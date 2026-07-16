@@ -55,6 +55,45 @@ export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStoc
     return Math.floor(Math.random() * LEARNING_KNOWLEDGE.length);
   });
 
+  // Morning report from AI pipeline
+  const [morningReport, setMorningReport] = useState<{
+    summaryText: string;
+    top3Themes: { title: string; evidence: string; chain: any }[];
+    sentiment: string;
+    loading: boolean;
+  }>({ summaryText: '', top3Themes: [], sentiment: '中性', loading: true });
+
+  // Market overview from rule engine
+  const [marketOverview, setMarketOverview] = useState<{
+    topSectors: { name: string; changePercent: number }[];
+    bottomSectors: { name: string; changePercent: number }[];
+    marketBreath: { up: number; down: number };
+  } | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function loadData() {
+      try {
+        const [reportRes, overviewRes] = await Promise.all([
+          fetch('/api/morning-report').then(r => r.json()),
+          fetch('/api/market-overview').then(r => r.json()),
+        ]);
+        if (!cancelled) {
+          if (!reportRes.fallback) {
+            setMorningReport({ ...reportRes, loading: false });
+          } else {
+            setMorningReport(prev => ({ ...prev, loading: false }));
+          }
+          setMarketOverview(overviewRes);
+        }
+      } catch {
+        if (!cancelled) setMorningReport(prev => ({ ...prev, loading: false }));
+      }
+    }
+    loadData();
+    return () => { cancelled = true; };
+  }, []);
+
   // Dynamic market weather calculation based on simulated indices
   const averageChange = indices.reduce((acc, idx) => acc + idx.changePercent, 0) / indices.length;
   let weatherEmoji = '☀️';
@@ -224,7 +263,9 @@ export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStoc
 
           <div className="space-y-1 flex-grow">
             <h2 id="paopao-greeting-title" className="text-xs font-bold text-gray-950 leading-relaxed">
-              😊 早上好！今天市场整体上涨，AI 板块领涨，成交额增加 12%。如果今天只记住一件事，就是资金重新回到了科技板块。
+              {morningReport.loading
+                ? '泡泡正在为你整理今日市场动态...'
+                : morningReport.summaryText || '早上好！今天市场整体上涨，AI 板块领涨，成交额增加 12%。如果今天只记住一件事，就是资金重新回到了科技板块。'}
             </h2>
             <p className="text-[10px] font-semibold text-indigo-500 bg-indigo-50/50 px-2 py-0.5 rounded-md inline-block mt-1">
               AI 陪伴研读 · 5分钟懂大盘
@@ -354,15 +395,24 @@ export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStoc
             今日强势吸金板块
           </div>
           <div className="flex flex-wrap gap-1.5">
-            <span className="text-[10px] font-bold bg-rose-50 text-rose-600 border border-rose-100 px-2.5 py-1 rounded-xl">
-              AI算力 +4.32%
-            </span>
-            <span className="text-[10px] font-bold bg-red-50 text-red-600 border border-red-100 px-2.5 py-1 rounded-xl">
-              半导体国产化 +3.28%
-            </span>
-            <span className="text-[10px] font-bold bg-orange-50 text-orange-600 border border-orange-100 px-2.5 py-1 rounded-xl">
-              具身智能 +2.45%
-            </span>
+            {marketOverview?.topSectors && marketOverview.topSectors.length > 0
+              ? marketOverview.topSectors.map(s => (
+                  <span key={s.name} className="text-[10px] font-bold bg-rose-50 text-rose-600 border border-rose-100 px-2.5 py-1 rounded-xl">
+                    {s.name} {s.changePercent > 0 ? '+' : ''}{s.changePercent.toFixed(2)}%
+                  </span>
+                ))
+              : <>
+                  <span className="text-[10px] font-bold bg-rose-50 text-rose-600 border border-rose-100 px-2.5 py-1 rounded-xl">
+                    AI算力 +4.32%
+                  </span>
+                  <span className="text-[10px] font-bold bg-red-50 text-red-600 border border-red-100 px-2.5 py-1 rounded-xl">
+                    半导体国产化 +3.28%
+                  </span>
+                  <span className="text-[10px] font-bold bg-orange-50 text-orange-600 border border-orange-100 px-2.5 py-1 rounded-xl">
+                    具身智能 +2.45%
+                  </span>
+                </>
+            }
           </div>
         </div>
       </div>
@@ -376,68 +426,46 @@ export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStoc
 
         {/* 3 Cards representation of Key Events */}
         <div id="notion-events-list" className="space-y-3">
-          {/* Card 1: 今日最大热点 */}
-          <div className="bg-white border border-slate-100 rounded-3xl p-4 space-y-3 shadow-sm hover:border-indigo-100 transition-all">
-            <div className="flex justify-between items-center">
-              <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-rose-50 text-rose-600">
-                1. 今日最大热点
-              </span>
-              <span className="text-[9px] text-gray-400 font-semibold font-mono">10:15 爆量拉升</span>
-            </div>
-            <h4 className="text-xs font-bold text-gray-950">
-              AI算力板块重掀涨停潮，领跑两市大单净占比
-            </h4>
-            {/* Paopao's explanation */}
-            <div className="bg-indigo-50/30 rounded-xl p-3 border border-indigo-100/20 text-[11px] text-slate-700 leading-relaxed flex gap-2">
-              <span className="text-sm">🤖</span>
-              <div>
-                <span className="font-bold text-indigo-950">泡泡解读：</span>
-                “AI板块大涨 5%，主要因为大模型训练及光模块基础设施需求爆发，大单资金抢筹，短期上升趋势异常明显。”
+          {morningReport.top3Themes.length > 0 ? morningReport.top3Themes.map((theme, i) => {
+            const badges = [
+              { label: '1. 今日最大热点', bg: 'bg-rose-50 text-rose-600' },
+              { label: '2. 板块涨跌分化', bg: 'bg-amber-50 text-amber-700' },
+              { label: '3. 重要财经事件', bg: 'bg-emerald-50 text-emerald-600' },
+            ];
+            return (
+              <div key={i} className="bg-white border border-slate-100 rounded-3xl p-4 space-y-3 shadow-sm hover:border-indigo-100 transition-all">
+                <div className="flex justify-between items-center">
+                  <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${badges[i]?.bg || 'bg-indigo-50 text-indigo-600'}`}>
+                    {badges[i]?.label || `热点 ${i + 1}`}
+                  </span>
+                  {theme.chain && (
+                    <span className="text-[9px] text-gray-400 font-semibold font-mono">
+                      确定性: {theme.chain.certainty || '中'}
+                    </span>
+                  )}
+                </div>
+                <h4 className="text-xs font-bold text-gray-950">
+                  {theme.title}
+                </h4>
+                <div className="bg-indigo-50/30 rounded-xl p-3 border border-indigo-100/20 text-[11px] text-slate-700 leading-relaxed flex gap-2">
+                  <span className="text-sm">🤖</span>
+                  <div>
+                    <span className="font-bold text-indigo-950">泡泡解读：</span>
+                    “{theme.evidence}”
+                    {theme.chain && theme.chain.certainty !== '不确定' && (
+                      <span className="block mt-1 text-[10px] text-indigo-500">
+                        因果链: {theme.chain.event} → {theme.chain.reason} → {theme.chain.marketResult}
+                      </span>
+                    )}
+                  </div>
+                </div>
               </div>
+            );
+          }) : (
+            <div className="text-center text-gray-400 text-xs py-6">
+              {morningReport.loading ? 'AI 正在分析今日热点...' : '暂无可用的热点数据'}
             </div>
-          </div>
-
-          {/* Card 2: 板块涨跌变化 */}
-          <div className="bg-white border border-slate-100 rounded-3xl p-4 space-y-3 shadow-sm hover:border-indigo-100 transition-all">
-            <div className="flex justify-between items-center">
-              <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-50 text-amber-700">
-                2. 板块涨跌分化
-              </span>
-              <span className="text-[9px] text-gray-400 font-semibold font-mono">11:30 盘中统计</span>
-            </div>
-            <h4 className="text-xs font-bold text-gray-950">
-              硬核半导体设备国产替代提速，白酒防守资金回落
-            </h4>
-            {/* Paopao's explanation */}
-            <div className="bg-indigo-50/30 rounded-xl p-3 border border-indigo-100/20 text-[11px] text-slate-700 leading-relaxed flex gap-2">
-              <span className="text-sm">🤖</span>
-              <div>
-                <span className="font-bold text-indigo-950">泡泡解读：</span>
-                “半导体上涨 3.28%，受益于国产替代高歌猛进；而中秋国庆淡季预期导致资金流出防守型的白酒板块。”
-              </div>
-            </div>
-          </div>
-
-          {/* Card 3: 重要财经事件 */}
-          <div className="bg-white border border-slate-100 rounded-3xl p-4 space-y-3 shadow-sm hover:border-indigo-100 transition-all">
-            <div className="flex justify-between items-center">
-              <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-600">
-                3. 重要财经事件
-              </span>
-              <span className="text-[9px] text-gray-400 font-semibold font-mono">09:15 央行发布</span>
-            </div>
-            <h4 className="text-xs font-bold text-gray-950">
-              央行净投放 1000 亿，维持流动性在充裕区间
-            </h4>
-            {/* Paopao's explanation */}
-            <div className="bg-indigo-50/30 rounded-xl p-3 border border-indigo-100/20 text-[11px] text-slate-700 leading-relaxed flex gap-2">
-              <span className="text-sm">🤖</span>
-              <div>
-                <span className="font-bold text-indigo-950">泡泡解读：</span>
-                “央行今日逆回购逆向注入流动性，巩固实体流动性宽裕预期。这夯实了大盘下方估值底部，消除了流动性恐慌。”
-              </div>
-            </div>
-          </div>
+          )}
         </div>
       </div>
 
@@ -605,53 +633,41 @@ export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStoc
                     💡
                   </div>
                   <div>
-                    <h3 className="text-sm font-bold text-gray-900">为什么资金今天重新回流科技？</h3>
-                    <p className="text-[10px] text-gray-400 mt-0.5 font-medium">泡泡帮您归纳了三大核心支撑因素</p>
+                    <h3 className="text-sm font-bold text-gray-900">今日市场驱动因素分析</h3>
+                    <p className="text-[10px] text-gray-400 mt-0.5 font-medium">泡泡 AI 三层推理引擎自动生成</p>
                   </div>
                 </div>
 
                 <div className="space-y-3 pt-2">
-                  {/* Factor 1 */}
-                  <div className="bg-slate-50 border border-slate-100 rounded-2xl p-4 space-y-1.5">
-                    <div className="flex justify-between items-center">
-                      <span className="text-[10px] font-bold text-indigo-600 bg-indigo-50 px-2 py-0.5 rounded-md">核心催化 🚀</span>
-                      <span className="text-[9px] text-gray-400 font-semibold font-mono">全球算力链超预期</span>
+                  {morningReport.top3Themes.length > 0 ? morningReport.top3Themes.map((theme, i) => (
+                    <div key={i} className="bg-slate-50 border border-slate-100 rounded-2xl p-4 space-y-1.5">
+                      <div className="flex justify-between items-center">
+                        <span className="text-[10px] font-bold text-indigo-600 bg-indigo-50 px-2 py-0.5 rounded-md">
+                          {i === 0 ? '核心催化' : i === 1 ? '资金风向' : '流动性保障'}
+                        </span>
+                        {theme.chain && (
+                          <span className="text-[9px] text-gray-400 font-semibold font-mono">
+                            确定性: {theme.chain.certainty || '中'}
+                          </span>
+                        )}
+                      </div>
+                      <p className="text-xs font-bold text-gray-900">
+                        {theme.title}
+                      </p>
+                      <p className="text-[11px] text-slate-600 leading-relaxed font-medium">
+                        {theme.evidence}
+                        {theme.chain && (
+                          <span className="block mt-1 text-indigo-600 font-medium">
+                            因果链: {theme.chain.event} → {theme.chain.reason}
+                          </span>
+                        )}
+                      </p>
                     </div>
-                    <p className="text-xs font-bold text-gray-900">
-                      大模型基础设施及光模块需求高景气
-                    </p>
-                    <p className="text-[11px] text-slate-600 leading-relaxed font-medium">
-                      海外巨头对人工智能资本开支继续加大，核心供应商排单已满至明年，极大提振了国内算力链及硬科技厂商的盈利预期。
-                    </p>
-                  </div>
-
-                  {/* Factor 2 */}
-                  <div className="bg-slate-50 border border-slate-100 rounded-2xl p-4 space-y-1.5">
-                    <div className="flex justify-between items-center">
-                      <span className="text-[10px] font-bold text-rose-600 bg-rose-50 px-2 py-0.5 rounded-md">资金风向 💰</span>
-                      <span className="text-[9px] text-gray-400 font-semibold font-mono">大单主力连续净买</span>
+                  )) : (
+                    <div className="text-center text-gray-400 text-xs py-8">
+                      {morningReport.loading ? 'AI 引擎分析中...' : '暂无可用的市场分析数据'}
                     </div>
-                    <p className="text-xs font-bold text-gray-900">
-                      主力资金单日净占比创出近三周新高
-                    </p>
-                    <p className="text-[11px] text-slate-600 leading-relaxed font-medium">
-                      游资、机构及量化资金在早盘10点半左右形成强烈买盘共振，A股主力资金净流入集中度高，呈现典型的爆量拉升态势。
-                    </p>
-                  </div>
-
-                  {/* Factor 3 */}
-                  <div className="bg-slate-50 border border-slate-100 rounded-2xl p-4 space-y-1.5">
-                    <div className="flex justify-between items-center">
-                      <span className="text-[10px] font-bold text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded-md">流动性保障 ⚖️</span>
-                      <span className="text-[9px] text-gray-400 font-semibold font-mono">央行大手笔逆回购</span>
-                    </div>
-                    <p className="text-xs font-bold text-gray-900">
-                      逆回购单日净投放，实体资金保持宽裕
-                    </p>
-                    <p className="text-[11px] text-slate-600 leading-relaxed font-medium">
-                      央行投放维持跨节资金充裕，消除了国庆/中秋等节假前的资金面异动隐忧，大盘估值安全垫非常稳固。
-                    </p>
-                  </div>
+                  )}
                 </div>
               </div>
 

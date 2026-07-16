@@ -157,6 +157,234 @@ async function startServer() {
     }
   });
 
+  // ─── Prompt Pipeline: Three-Prompt Architecture ───
+
+  const PROMPT_1_SYSTEM = `你是一名资深市场分析师。你的任务不是总结所有新闻，而是找出今天真正影响市场的核心交易逻辑。
+
+请遵循以下原则：
+1. 优先依据市场数据（指数、板块涨跌幅、成交额变化）判断热点
+2. 新闻仅作为解释依据，不要因为新闻数量多就认为影响大
+3. 输出今天最重要的 3 个市场主题
+4. 判断市场情绪（乐观 / 中性 / 谨慎）
+5. 不预测未来，只描述今天市场正在交易什么
+
+输出严格 JSON 格式，不可夹带任何解释或评论：
+{
+  "marketSentiment": "乐观" | "中性" | "谨慎",
+  "top3Themes": [
+    {
+      "theme": "主题名称",
+      "confidence": "高" | "中" | "低",
+      "evidence": "支撑该主题的数据证据"
+    }
+  ],
+  "keyEvents": [
+    {
+      "event": "事件描述",
+      "impact": "对市场的影响",
+      "source": "新闻来源"
+    }
+  ],
+  "affectedSectors": [
+    {
+      "sector": "板块名称",
+      "changePercent": "涨跌幅",
+      "reason": "涨跌原因一句话"
+    }
+  ]
+}`;
+
+  const PROMPT_2_SYSTEM = `你是一名财经逻辑分析师。请根据市场数据、新闻和已有知识，建立最合理的因果链。
+
+要求：
+1. 因果必须有依据，不允许猜测
+2. 如果存在多个可能原因，请按影响程度排序
+3. 如果证据不足，请明确说明"不确定"
+4. 输出事件 → 原因 → 板块 → 结果，不输出投资建议
+5. 宁可回答"证据不足"，也不要编造因果关系
+
+输出 JSON：
+{
+  "causalChains": [
+    {
+      "theme": "对应的主题",
+      "event": "触发事件",
+      "reason": "原因分析",
+      "affectedSectors": ["板块1", "板块2"],
+      "marketResult": "市场表现数据",
+      "certainty": "高" | "中" | "低" | "不确定"
+    }
+  ]
+}`;
+
+  const PROMPT_3_SYSTEM = `你是一位帮助投资小白成长的财经老师。请把分析结果翻译成普通人能理解的话。
+
+要求：
+1. 一句话原则 — 能用一句话说清楚就不用两句
+2. 保留关键数字 — 涨跌幅、成交额等核心数据必须保留
+3. 尽量不用专业术语 — 如果必须出现，同时用括号解释
+4. 不制造焦虑，不给买卖建议
+5. 目标是帮助用户理解，而不是预测市场`;
+
+  async function callGemini(systemInstruction: string, userContent: string, temperature: number, jsonMode = false): Promise<string> {
+    const client = getGeminiClient();
+    const config: Record<string, unknown> = { systemInstruction, temperature };
+    if (jsonMode) {
+      config.responseMimeType = 'application/json';
+    }
+    const response = await client.models.generateContent({
+      model: 'gemini-3.5-flash',
+      contents: userContent,
+      config,
+    });
+    return response.text || '';
+  }
+
+  async function fetchMarketData() {
+    // TODO: Replace with finnews skill integration (East Money + Yahoo + WallStreetCN)
+    // For now returns placeholder data matching the existing app's mock data
+    return {
+      indices: [
+        { name: '上证指数', code: '000001', price: 3882.41, changePercent: -1.85, volume: 535281873 },
+        { name: '深证成指', code: '399001', price: 14488.65, changePercent: -1.97, volume: 665968453 },
+        { name: '创业板指', code: '399006', price: 3925.83, changePercent: -0.07, volume: 26776813 },
+      ],
+      sectors: [
+        { name: 'AI算力', changePercent: 5.2, description: '北美云厂商加大AI投资带动算力需求' },
+        { name: '半导体', changePercent: 3.1, description: '国产替代加速推进' },
+        { name: '机器人', changePercent: 2.45, description: '具身智能概念持续发酵' },
+        { name: '新能源', changePercent: -0.8, description: '短期获利回吐' },
+        { name: '医药生物', changePercent: -1.2, description: '集采政策预期影响' },
+        { name: '白酒消费', changePercent: -1.8, description: '消费数据不及预期' },
+      ],
+      announcements: [
+        { title: '城投控股首次回购公司股份', company: '城投控股', type: '回购' },
+        { title: '芯海科技关联交易暨募集资金补充流动资金', company: '芯海科技', type: '董事会决议' },
+        { title: '展芯股份披露IPO相关文件', company: '展芯股份', type: 'IPO' },
+      ],
+      newsHeadlines: [
+        '美联储沃什国会首秀：对通胀零容忍，放弃前瞻指引',
+        '韩国央行意外加息25bp至2.75%',
+        '美对伊朗发起当日第二波打击，中东局势持续升级',
+        '中国上半年GDP同比增长4.7%，央行加大逆周期调节力度',
+        '存储芯片板块重挫，SK海力士跌超9%',
+        '苹果涨超4%，科技巨头多数上涨',
+        '全球央行持续增持黄金，对冲美元政策不确定性',
+      ],
+      volume: 8923,
+      timestamp: new Date(),
+    };
+  }
+
+  // POST /api/morning-report — Prompt 1 → 2 → 3 pipeline
+  app.post('/api/morning-report', async (_req, res) => {
+    const startedAt = Date.now();
+    try {
+      const marketData = await fetchMarketData();
+      console.log('[morning-report] step 0: market data fetched');
+
+      const p1Input = JSON.stringify({
+        indices: marketData.indices,
+        sectors: marketData.sectors,
+        newsHeadlines: marketData.newsHeadlines,
+        totalVolume: marketData.volume,
+      }, null, 2);
+
+      const p1Raw = await callGemini(PROMPT_1_SYSTEM, p1Input, 0.3, true);
+      console.log('[morning-report] step 1: market understanding done');
+
+      let p1Result: any;
+      try {
+        p1Result = JSON.parse(p1Raw.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim());
+      } catch {
+        console.error('[morning-report] failed to parse P1 JSON, raw:', p1Raw.substring(0, 200));
+        p1Result = {
+          marketSentiment: '中性',
+          top3Themes: [{ theme: '市场数据不足', confidence: '低', evidence: '无法解析' }],
+          keyEvents: [],
+          affectedSectors: [],
+        };
+      }
+
+      const p2Input = JSON.stringify({
+        themes: p1Result.top3Themes,
+        events: p1Result.keyEvents,
+        sectors: p1Result.affectedSectors,
+        newsText: marketData.newsHeadlines.join('\n'),
+      }, null, 2);
+
+      const p2Raw = await callGemini(PROMPT_2_SYSTEM, p2Input, 0.1, true);
+      console.log('[morning-report] step 2: causal reasoning done');
+
+      let p2Result: any;
+      try {
+        p2Result = JSON.parse(p2Raw.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim());
+      } catch {
+        console.error('[morning-report] failed to parse P2 JSON, raw:', p2Raw.substring(0, 200));
+        p2Result = { causalChains: [] };
+      }
+
+      const p3Input = JSON.stringify({
+        sentiment: p1Result.marketSentiment,
+        themes: p1Result.top3Themes,
+        chains: p2Result.causalChains,
+      }, null, 2);
+
+      const narrative = await callGemini(PROMPT_3_SYSTEM, p3Input, 0.7, false);
+      console.log('[morning-report] step 3: teacher expression done');
+
+      const elapsed = ((Date.now() - startedAt) / 1000).toFixed(1);
+      console.log(`[morning-report] completed in ${elapsed}s`);
+
+      res.json({
+        sentiment: p1Result.marketSentiment || '中性',
+        summaryText: narrative,
+        top3Themes: (p1Result.top3Themes || []).map((t: any, i: number) => ({
+          title: t.theme,
+          evidence: t.evidence,
+          chain: p2Result.causalChains?.[i] || null,
+        })),
+        keyEvents: p1Result.keyEvents || [],
+        affectedSectors: p1Result.affectedSectors || [],
+        timestamp: marketData.timestamp,
+      });
+    } catch (error: any) {
+      console.error('[morning-report] error:', error.message);
+      res.status(500).json({
+        error: '早报生成失败，请稍后重试',
+        fallback: true,
+      });
+    }
+  });
+
+  // GET /api/market-overview — rule engine, no AI
+  app.get('/api/market-overview', async (_req, res) => {
+    try {
+      const marketData = await fetchMarketData();
+
+      const sortedSectors = [...marketData.sectors].sort((a, b) => b.changePercent - a.changePercent);
+      const upCount = sortedSectors.filter(s => s.changePercent > 0).length;
+      const downCount = sortedSectors.filter(s => s.changePercent < 0).length;
+
+      res.json({
+        indices: marketData.indices.map(i => ({
+          name: i.name,
+          code: i.code,
+          price: i.price,
+          changePercent: i.changePercent,
+        })),
+        topSectors: sortedSectors.slice(0, 3),
+        bottomSectors: sortedSectors.slice(-3).reverse(),
+        marketBreath: { up: upCount, down: downCount },
+        totalVolume: marketData.volume,
+        timestamp: marketData.timestamp,
+      });
+    } catch (error: any) {
+      console.error('[market-overview] error:', error.message);
+      res.status(500).json({ error: '数据获取失败' });
+    }
+  });
+
   // Vite middleware integration for full-stack build/dev environment
   if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({
