@@ -1,0 +1,127 @@
+0 verbose cli Q:\node.exe Q:\node_modules\npm\bin\npm-cli.js
+1 info using npm@11.9.0
+2 info using node@v24.14.0
+3 silly config load:file:Q:\node_modules\npm\npmrc
+4 silly config load:file:C:\Users\27389\Documents\Codex\2026-07-16\ai-chatgpt-conversation-6a4c79d3-556c-83ee\.npmrc
+5 silly config load:file:C:\Users\27389\.npmrc
+6 silly config load:file:C:\Users\27389\AppData\Roaming\npm\etc\npmrc
+7 verbose title npm install
+8 verbose argv "install" "--cache" ".npm-cache"
+9 verbose logfile logs-max:10 dir:C:\Users\27389\Documents\Codex\2026-07-16\ai-chatgpt-conversation-6a4c79d3-556c-83ee\.npm-cache\_logs\2026-07-16T02_41_48_942Z-
+10 verbose logfile C:\Users\27389\Documents\Codex\2026-07-16\ai-chatgpt-conversation-6a4c79d3-556c-83ee\.npm-cache\_logs\2026-07-16T02_41_48_942Z-debug-0.log
+11 silly logfile done cleaning log files
+12 silly packumentCache heap:4496293888 maxSize:1124073472 maxEntrySize:562036736
+13 silly idealTree buildDeps
+14 silly fetch manifest @types/react@latest
+15 silly packumentCache full:https://registry.npmjs.org/@types%2freact cache-miss
+16 http fetch GET 200 https://registry.npmjs.org/@types%2freact 3183ms (cache miss)
+17 silly packumentCache full:https://registry.npmjs.org/@types%2freact set size:undefined disposed:false
+18 silly fetch manifest @types/react-dom@latest
+19 silly packumentCache full:https://registry.npmjs.org/@types%2freact-dom cache-miss
+20 http fetch GET 200 https://registry.npmjs.org/@types%2freact-dom 1045ms (cache miss)
+21 silly packumentCache full:https://registry.npmjs.org/@types%2freact-dom set size:undefined disposed:false
+22 silly placeDep ROOT @types/react@19.2.17 OK for: bubble-market@0.1.0 want: latest
+23 silly placeDep ROOT @types/react-dom@19.2.3 OK for: bubble-market@0.1.0 want: latest
+24 silly fetch manifest csstype@^3.2.2
+25 silly packumentCache full:https://registry.npmjs.org/csstype cache-miss
+26 http fetch GET 200 https://registry.npmjs.org/csstype 1146ms (cache miss)
+27 silly packumentCache full:https://registry.npmjs.org/csstype set size:undefined disposed:false
+28 silly placeDep ROOT csstype@3.2.3 OK for: @types/react@19.2.17 want: ^3.2.2
+29 silly reify moves {}
+30 silly audit bulk request {
+30 silly audit   '@emnapi/core': [ '1.11.1' ],
+30 silly audit   '@emnapi/runtime': [ '1.11.1' ],
+30 silly audit   '@emnapi/wasi-threads': [ '1.2.2' ],
+30 silly audit   '@napi-rs/wasm-runtime': [ '1.1.6' ],
+30 silly audit   '@oxc-project/types': [ '0.139.0' ],
+30 silly audit   '@rolldown/binding-android-arm64': [ '1.1.5' ],
+30 silly audit   '@rolldown/binding-darwin-arm64': [ '1.1.5' ],
+30 silly audit   '@rolldown/binding-darwin-x64': [ '1.1.5' ],
+30 silly audit   '@rolldown/binding-freebsd-x64': [ '1.1.5' ],
+30 silly audit   '@rolldown/binding-linux-arm-gnueabihf': [ '1.1.5' ],
+30 silly audit   '@rolldown/binding-linux-arm64-gnu': [ '1.1.5' ],
+30 silly audit   '@rolldown/binding-linux-arm64-musl': [ '1.1.5' ],
+30 silly audit   '@rolldown/binding-linux-ppc64-gnu': [ '1.1.5' ],
+30 silly audit   '@rolldown/binding-linux-s390x-gnu': [ '1.1.5' ],
+30 silly audit   '@rolldown/binding-linux-x64-gnu': [ '1.1.5' ],
+30 silly audit   '@rolldown/binding-linux-x64-musl': [ '1.1.5' ],
+30 silly audit   '@rolldown/binding-openharmony-arm64': [ '1.1.5' ],
+30 silly audit   '@rolldown/binding-wasm32-wasi': [ '1.1.5' ],
+30 silly audit   '@rolldown/binding-win32-arm64-msvc': [ '1.1.5' ],
+30 silly audit   '@rolldown/binding-win32-x64-msvc': [ '1.1.5' ],
+30 silly audit   '@rolldown/pluginutils': [ '1.0.1' ],
+30 silly audit   '@tybys/wasm-util': [ '0.10.3' ],
+30 silly audit   '@typescript/typescript-aix-ppc64': [ '7.0.2' ],
+30 silly audit   '@typescript/typescript-darwin-arm64': [ '7.0.2' ],
+30 silly audit   '@typescript/typescript-darwin-x64': [ '7.0.2' ],
+30 silly audit   '@typescript/typescript-freebsd-arm64': [ '7.0.2' ],
+30 silly audit   '@typescript/typescript-freebsd-x64': [ '7.0.2' ],
+30 silly audit   '@typescript/typescript-linux-arm': [ '7.0.2' ],
+30 silly audit   '@typescript/typescript-linux-arm64': [ '7.0.2' ],
+30 silly audit   '@typescript/typescript-linux-loong64': [ '7.0.2' ],
+30 silly audit   '@typescript/typescript-linux-mips64el': [ '7.0.2' ],
+30 silly audit   '@typescript/typescript-linux-ppc64': [ '7.0.2' ],
+30 silly audit   '@typescript/typescript-linux-riscv64': [ '7.0.2' ],
+30 silly audit   '@typescript/typescript-linux-s390x': [ '7.0.2' ],
+30 silly audit   '@typescript/typescript-linux-x64': [ '7.0.2' ],
+30 silly audit   '@typescript/typescript-netbsd-arm64': [ '7.0.2' ],
+30 silly audit   '@typescript/typescript-netbsd-x64': [ '7.0.2' ],
+30 silly audit   '@typescript/typescript-openbsd-arm64': [ '7.0.2' ],
+30 silly audit   '@typescript/typescript-openbsd-x64': [ '7.0.2' ],
+30 silly audit   '@typescript/typescript-sunos-x64': [ '7.0.2' ],
+30 silly audit   '@typescript/typescript-win32-arm64': [ '7.0.2' ],
+30 silly audit   '@typescript/typescript-win32-x64': [ '7.0.2' ],
+30 silly audit   '@vitejs/plugin-react': [ '6.0.3' ],
+30 silly audit   'detect-libc': [ '2.1.2' ],
+30 silly audit   fdir: [ '6.5.0' ],
+30 silly audit   fsevents: [ '2.3.3' ],
+30 silly audit   lightningcss: [ '1.32.0' ],
+30 silly audit   'lightningcss-android-arm64': [ '1.32.0' ],
+30 silly audit   'lightningcss-darwin-arm64': [ '1.32.0' ],
+30 silly audit   'lightningcss-darwin-x64': [ '1.32.0' ],
+30 silly audit   'lightningcss-freebsd-x64': [ '1.32.0' ],
+30 silly audit   'lightningcss-linux-arm-gnueabihf': [ '1.32.0' ],
+30 silly audit   'lightningcss-linux-arm64-gnu': [ '1.32.0' ],
+30 silly audit   'lightningcss-linux-arm64-musl': [ '1.32.0' ],
+30 silly audit   'lightningcss-linux-x64-gnu': [ '1.32.0' ],
+30 silly audit   'lightningcss-linux-x64-musl': [ '1.32.0' ],
+30 silly audit   'lightningcss-win32-arm64-msvc': [ '1.32.0' ],
+30 silly audit   'lightningcss-win32-x64-msvc': [ '1.32.0' ],
+30 silly audit   'lucide-react': [ '1.24.0' ],
+30 silly audit   nanoid: [ '3.3.16' ],
+30 silly audit   picocolors: [ '1.1.1' ],
+30 silly audit   picomatch: [ '4.0.5' ],
+30 silly audit   postcss: [ '8.5.19' ],
+30 silly audit   react: [ '19.2.7' ],
+30 silly audit   'react-dom': [ '19.2.7' ],
+30 silly audit   rolldown: [ '1.1.5' ],
+30 silly audit   scheduler: [ '0.27.0' ],
+30 silly audit   'source-map-js': [ '1.2.1' ],
+30 silly audit   tinyglobby: [ '0.2.17' ],
+30 silly audit   tslib: [ '2.8.1' ],
+30 silly audit   typescript: [ '7.0.2' ],
+30 silly audit   vite: [ '8.1.4' ],
+30 silly audit   '@types/react': [ '19.2.17' ],
+30 silly audit   '@types/react-dom': [ '19.2.3' ],
+30 silly audit   csstype: [ '3.2.3' ]
+30 silly audit }
+31 http cache @types/react-dom@https://registry.npmjs.org/@types/react-dom/-/react-dom-19.2.3.tgz 0ms (cache hit)
+32 http cache csstype@https://registry.npmjs.org/csstype/-/csstype-3.2.3.tgz 0ms (cache hit)
+33 http cache @types/react@https://registry.npmjs.org/@types/react/-/react-19.2.17.tgz 0ms (cache hit)
+34 silly tarball no local data for @types/react-dom@https://registry.npmjs.org/@types/react-dom/-/react-dom-19.2.3.tgz. Extracting by manifest.
+35 silly tarball no local data for csstype@https://registry.npmjs.org/csstype/-/csstype-3.2.3.tgz. Extracting by manifest.
+36 silly tarball no local data for @types/react@https://registry.npmjs.org/@types/react/-/react-19.2.17.tgz. Extracting by manifest.
+37 http fetch POST 200 https://registry.npmjs.org/-/npm/v1/security/advisories/bulk 1617ms
+38 silly audit report {}
+39 http fetch GET 200 https://registry.npmjs.org/@types/react-dom/-/react-dom-19.2.3.tgz 1774ms (cache miss)
+40 http fetch GET 200 https://registry.npmjs.org/csstype/-/csstype-3.2.3.tgz 1784ms (cache miss)
+41 http fetch GET 200 https://registry.npmjs.org/@types/react/-/react-19.2.17.tgz 1823ms (cache miss)
+42 silly ADD node_modules/csstype
+43 silly ADD node_modules/@types/react-dom
+44 silly ADD node_modules/@types/react
+45 verbose cwd C:\Users\27389\Documents\Codex\2026-07-16\ai-chatgpt-conversation-6a4c79d3-556c-83ee
+46 verbose os Windows_NT 10.0.19045
+47 verbose node v24.14.0
+48 verbose npm  v11.9.0
+49 verbose exit 0
+50 info ok
