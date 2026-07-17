@@ -127,6 +127,20 @@ export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStoc
     weatherBg = 'bg-indigo-50 border-indigo-100 text-indigo-700';
   }
 
+  const sentimentBase = morningReport.sentiment === '乐观' ? 72 : morningReport.sentiment === '中性' ? 50 : 28;
+  const sentimentAdjust = Math.round(averageChange * 3);
+  const sentimentTemp = Math.round(Math.min(90, Math.max(10, sentimentBase + sentimentAdjust)));
+  const sentimentLabel =
+    morningReport.sentiment === '乐观' ? '情绪偏多'
+    : morningReport.sentiment === '中性' ? '多空平衡'
+    : '情绪偏空';
+  const sentimentDesc =
+    morningReport.sentiment === '乐观'
+      ? (sentimentTemp >= 80 ? '极度贪婪' : sentimentTemp >= 65 ? '中度看涨' : '温和偏多')
+      : morningReport.sentiment === '中性'
+      ? '方向不明'
+      : (sentimentTemp <= 15 ? '极度恐慌' : sentimentTemp <= 30 ? '明显偏空' : '谨慎偏空');
+
   // Dynamic ticking values to simulate live stock market!
   useEffect(() => {
     const interval = setInterval(() => {
@@ -371,28 +385,25 @@ export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStoc
           })}
         </div>
 
-        {/* 2. 市场情绪指标 (Linear High-fidelity scale) */}
+        {/* 2. 市场情绪指标 */}
         <div id="sentiment-indicator-area" className="space-y-2 pt-1">
           <div className="flex justify-between text-[11px] font-bold text-gray-500">
             <span className="flex items-center gap-1">
-              情绪状态：<span className="text-indigo-600">情绪偏多 (中度看涨)</span>
+              情绪状态：<span className="text-indigo-600">{morningReport.loading ? '加载中...' : `${sentimentLabel} (${sentimentDesc})`}</span>
             </span>
-            <span className="text-indigo-600 font-mono">68℃ / 100℃</span>
+            <span className="text-indigo-600 font-mono">{sentimentTemp}℃ / 100℃</span>
           </div>
-          {/* Custom gauge bar */}
           <div className="relative w-full h-3 bg-gray-100 rounded-full overflow-hidden border border-gray-100/50">
-            {/* Color spectrum gradient */}
             <div className="absolute inset-0 bg-gradient-to-r from-emerald-400 via-indigo-500 to-rose-500 opacity-80"></div>
-            {/* Glowing marker indicator pin */}
             <motion.div
               className="absolute top-0 bottom-0 w-1.5 bg-white shadow-md border border-slate-300 rounded-full"
-              style={{ left: '68%' }}
+              style={{ left: `${sentimentTemp}%` }}
               animate={{ scaleY: [1, 1.2, 1] }}
               transition={{ repeat: Infinity, duration: 2 }}
             ></motion.div>
           </div>
           <div className="flex justify-between text-[9px] text-gray-400 font-semibold px-0.5">
-            <span>极度恐慌 (20℃)</span>
+            <span>极度恐慌 (10℃)</span>
             <span>多空平衡 (50℃)</span>
             <span>极度贪婪 (90℃)</span>
           </div>
