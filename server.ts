@@ -352,7 +352,7 @@ async function startServer() {
   let morningReportCache: { data: any; timestamp: number } | null = null;
   const REPORT_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 
-  app.post('/api/morning-report', async (_req, res) => {
+  app.get('/api/morning-report', async (_req, res) => {
     const now = Date.now();
     if (morningReportCache && (now - morningReportCache.timestamp) < REPORT_CACHE_TTL) {
       console.log('[morning-report] served from cache');
