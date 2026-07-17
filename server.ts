@@ -6,27 +6,24 @@
 import express from 'express';
 import path from 'path';
 import { createServer as createViteServer } from 'vite';
-import { GoogleGenAI } from '@google/genai';
+import OpenAI from 'openai';
 import dotenv from 'dotenv';
 
 dotenv.config();
 
-// Lazy initialization of Gemini API to prevent crash on startup if key is missing
-let aiClient: GoogleGenAI | null = null;
+const AI_MODEL = process.env.AI_MODEL || 'deepseek-v4-flash';
 
-function getGeminiClient(): GoogleGenAI {
+let aiClient: OpenAI | null = null;
+
+function getAIClient(): OpenAI {
   if (!aiClient) {
-    const apiKey = process.env.GEMINI_API_KEY;
+    const apiKey = process.env.DEEPSEEK_API_KEY;
     if (!apiKey) {
-      throw new Error('GEMINI_API_KEY is not defined. Please configure it in your Secrets / Env vars.');
+      throw new Error('DEEPSEEK_API_KEY is not defined. Please set it in your .env file.');
     }
-    aiClient = new GoogleGenAI({
+    aiClient = new OpenAI({
+      baseURL: process.env.AI_BASE_URL || 'https://api.deepseek.com',
       apiKey,
-      httpOptions: {
-        headers: {
-          'User-Agent': 'aistudio-build',
-        }
-      }
     });
   }
   return aiClient;
@@ -47,45 +44,42 @@ async function startServer() {
         return res.status(400).json({ error: 'Message is required' });
       }
 
-      const client = getGeminiClient();
+      const client = getAIClient();
 
-      // System Instructions to guide Gemini as "泡泡老师" (Paopao Teacher)
       const systemInstruction = `
-你是“泡泡老师” (Paopao Teacher)，一个非常可爱、亲切、专业且富有幽默感的A股智能投资研究专家，服务于“泡泡看市”应用。
-1. 自称要多用“泡泡”、“泡泡老师”、“泡泡看到”。语气里可以使用“加油！”、“🎈”、“💡”等活泼词。
-2. 擅长进行宏观大市分析、个股技术面研判、和资产配置决策。使用专业词汇，如“主力资金流”、“均线托底”、“回踩布林线下轨”、“高位筹码松动”、“获利了结”等。
-3. **特别强调：使用任何股票市场专业术语时，必须同时在括号内或紧随其后用非常通俗易懂的语句来解释该术语（例如解释“高位筹码松动”指买卖的人开始出现分歧，原本坚定的买家开始卖出，股价容易不稳），帮助用户零门槛零焦虑地理解。**
+你是"泡泡老师" (Paopao Teacher)，一个非常可爱、亲切、专业且富有幽默感的A股智能投资研究专家，服务于"泡泡看市"应用。
+1. 自称要多用"泡泡"、"泡泡老师"、"泡泡看到"。语气里可以使用"加油！"、"🎈"、"💡"等活泼词。
+2. 擅长进行宏观大市分析、个股技术面研判、和资产配置决策。使用专业词汇，如"主力资金流"、"均线托底"、"回踩布林线下轨"、"高位筹码松动"、"获利了结"等。
+3. **特别强调：使用任何股票市场专业术语时，必须同时在括号内或紧随其后用非常通俗易懂的语句来解释该术语（例如解释"高位筹码松动"指买卖的人开始出现分歧，原本坚定的买家开始卖出，股价容易不稳），帮助用户零门槛零焦虑地理解。**
 4. **理性温和：请保持客观理性的分析立场，绝不制造恐慌或贪婪的焦虑情绪，也决不给任何具体的买卖或开平仓建议。**
 5. **教育目标：泡泡老师的核心目标是帮助用户理解大盘和个股运行的背后逻辑、资金动向和市场基本面，而不是去充当预言家去预测明天的短期涨跌。**
 6. 当用户问到个股或板块时，给出简明、专业的分析。先说个股的亮点或痛点，再提供技术支撑位或趋势研判。
-7. **必须在回答的末尾加上一句温馨的合规免责声明**：“泡泡老师提醒：股市有风险，投资需谨慎！以上研判仅供泡泡模拟盘练习参考，不构成实盘买入建议哦。”
+7. **必须在回答的末尾加上一句温馨的合规免责声明**："泡泡老师提醒：股市有风险，投资需谨慎！以上研判仅供泡泡模拟盘练习参考，不构成实盘买入建议哦。"
 8. 请使用简体中文回答，段落排版要美观，善用粗体、列表来提升可读性。回答字数控制在150-280字之间。
       `;
 
-      // Convert standard simple history into Gemini Chat format if present
-      const contents = [];
+      const messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [
+        { role: 'system', content: systemInstruction },
+      ];
       if (history && Array.isArray(history)) {
         for (const turn of history) {
-          contents.push({
+          messages.push({
             role: turn.role,
-            parts: [{ text: turn.parts[0].text }]
+            content: turn.parts?.[0]?.text || '',
           });
         }
       }
-      contents.push({ role: 'user', parts: [{ text: message }] });
+      messages.push({ role: 'user', content: message });
 
-      const response = await client.models.generateContent({
-        model: 'gemini-3.5-flash',
-        contents,
-        config: {
-          systemInstruction,
-          temperature: 0.7,
-        }
+      const completion = await client.chat.completions.create({
+        model: AI_MODEL,
+        messages,
+        temperature: 0.7,
       });
 
-      const replyText = response.text || '抱歉呢，泡泡由于看盘劳累，刚才开小差了，您可以换个问题再和泡泡聊哦。';
+      const replyText = completion.choices[0]?.message?.content
+        || '抱歉呢，泡泡由于看盘劳累，刚才开小差了，您可以换个问题再和泡泡聊哦。';
 
-      // Dynamically generate some suggested subsequent prompts based on message context
       let suggestedPrompts = [
         '这只股票的技术支撑位在多少？',
         '同板块还有哪些值得看好的龙头股？',
@@ -122,7 +116,7 @@ async function startServer() {
   // API Route: One-click Comprehensive Market Digest Analysis
   app.post('/api/market-report', async (req, res) => {
     try {
-      const client = getGeminiClient();
+      const client = getAIClient();
 
       const prompt = `
 针对今天以下A股大市数据进行一键深度研判，并用可爱的泡泡老师口吻输出一个精炼的报告（150字以内，排版美观，加粗突出重点）：
@@ -138,16 +132,15 @@ async function startServer() {
 3. 【泡泡埋伏点睛】 推荐关注半导体与机器人低吸机会。
       `;
 
-      const response = await client.models.generateContent({
-        model: 'gemini-3.5-flash',
-        contents: prompt,
-        config: {
-          temperature: 0.5,
-        }
+      const completion = await client.chat.completions.create({
+        model: AI_MODEL,
+        messages: [{ role: 'user', content: prompt }],
+        temperature: 0.5,
       });
 
       res.json({
-        report: response.text || '今日大盘震荡上行，科创指数强势领涨，建议高避题材炒作，积极低吸半导体龙头。'
+        report: completion.choices[0]?.message?.content
+          || '今日大盘震荡上行，科创指数强势领涨，建议高避题材炒作，积极低吸半导体龙头。'
       });
     } catch (error: any) {
       console.error('Error in /api/market-report:', error.message);
@@ -226,18 +219,17 @@ async function startServer() {
 4. 不制造焦虑，不给买卖建议
 5. 目标是帮助用户理解，而不是预测市场`;
 
-  async function callGemini(systemInstruction: string, userContent: string, temperature: number, jsonMode = false): Promise<string> {
-    const client = getGeminiClient();
-    const config: Record<string, unknown> = { systemInstruction, temperature };
-    if (jsonMode) {
-      config.responseMimeType = 'application/json';
-    }
-    const response = await client.models.generateContent({
-      model: 'gemini-3.5-flash',
-      contents: userContent,
-      config,
+  async function callAI(systemInstruction: string, userContent: string, temperature: number): Promise<string> {
+    const client = getAIClient();
+    const completion = await client.chat.completions.create({
+      model: AI_MODEL,
+      messages: [
+        { role: 'system', content: systemInstruction },
+        { role: 'user', content: userContent },
+      ],
+      temperature,
     });
-    return response.text || '';
+    return completion.choices[0]?.message?.content || '';
   }
 
   async function fetchMarketData() {
@@ -290,7 +282,7 @@ async function startServer() {
         totalVolume: marketData.volume,
       }, null, 2);
 
-      const p1Raw = await callGemini(PROMPT_1_SYSTEM, p1Input, 0.3, true);
+      const p1Raw = await callAI(PROMPT_1_SYSTEM, p1Input, 0.3);
       console.log('[morning-report] step 1: market understanding done');
 
       let p1Result: any;
@@ -313,7 +305,7 @@ async function startServer() {
         newsText: marketData.newsHeadlines.join('\n'),
       }, null, 2);
 
-      const p2Raw = await callGemini(PROMPT_2_SYSTEM, p2Input, 0.1, true);
+      const p2Raw = await callAI(PROMPT_2_SYSTEM, p2Input, 0.1);
       console.log('[morning-report] step 2: causal reasoning done');
 
       let p2Result: any;
@@ -330,7 +322,7 @@ async function startServer() {
         chains: p2Result.causalChains,
       }, null, 2);
 
-      const narrative = await callGemini(PROMPT_3_SYSTEM, p3Input, 0.7, false);
+      const narrative = await callAI(PROMPT_3_SYSTEM, p3Input, 0.7);
       console.log('[morning-report] step 3: teacher expression done');
 
       const elapsed = ((Date.now() - startedAt) / 1000).toFixed(1);
