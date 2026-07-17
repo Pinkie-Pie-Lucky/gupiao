@@ -5,6 +5,7 @@
 
 import express from 'express';
 import path from 'path';
+import https from 'node:https';
 import { createServer as createViteServer } from 'vite';
 import OpenAI from 'openai';
 import dotenv from 'dotenv';
@@ -232,38 +233,117 @@ async function startServer() {
     return completion.choices[0]?.message?.content || '';
   }
 
+  function httpGetJSON(urlStr: string): Promise<any> {
+    return new Promise((resolve, reject) => {
+      const u = new URL(urlStr);
+      const req = https.get(
+        {
+          hostname: u.hostname,
+          path: u.pathname + u.search,
+          headers: { 'User-Agent': 'Mozilla/5.0' },
+        },
+        (res) => {
+          let data = '';
+          res.on('data', (chunk: string) => (data += chunk));
+          res.on('end', () => {
+            try {
+              resolve(JSON.parse(data));
+            } catch {
+              reject(new Error('JSON parse failed'));
+            }
+          });
+        },
+      );
+      req.on('error', reject);
+      req.setTimeout(10000, () => {
+        req.destroy();
+        reject(new Error('Timeout'));
+      });
+    });
+  }
+
   async function fetchMarketData() {
-    // TODO: Replace with finnews skill integration (East Money + Yahoo + WallStreetCN)
-    // For now returns placeholder data matching the existing app's mock data
+    const YAHOO_BASE = 'https://query1.finance.yahoo.com/v8/finance/chart/';
+    const WSCN_NEWS = 'https://api-one.wallstcn.com/apiv1/content/lives?channel=global-channel&limit=10';
+
+    const indexDefs = [
+      { symbol: '000001.SS', name: '上证指数', code: '000001' },
+      { symbol: '399001.SZ', name: '深证成指', code: '399001' },
+      { symbol: '399006.SZ', name: '创业板指', code: '399006' },
+    ];
+
+    const indexPromises = indexDefs.map(async ({ symbol, name, code }) => {
+      try {
+        const data = await httpGetJSON(`${YAHOO_BASE}${symbol}?interval=1d&range=2d`);
+        const m = data.chart.result[0].meta;
+        const price = m.regularMarketPrice;
+        const prev = m.previousClose || m.chartPreviousClose || price;
+        const changePercent = prev ? ((price - prev) / prev) * 100 : 0;
+        return {
+          name,
+          code,
+          price: Math.round(price * 100) / 100,
+          changePercent: Math.round(changePercent * 100) / 100,
+          volume: m.regularMarketVolume || 0,
+        };
+      } catch (e: any) {
+        console.error(`[fetchMarketData] Yahoo ${symbol} failed:`, e.message);
+        return null;
+      }
+    });
+
+    async function fetchSectors(): Promise<any[]> {
+      const EM_HOSTS = [
+        'push2.eastmoney.com',
+        '59.push2.eastmoney.com',
+        '70.push2.eastmoney.com',
+        '82.push2.eastmoney.com',
+        'push2his.eastmoney.com',
+      ];
+      const EM_PATH = '/api/qt/clist/get?pn=1&pz=20&po=1&np=1&fltt=2&invt=2&fid=f3&fs=m:90+t:2&fields=f2,f3,f4,f12,f14';
+      for (const host of EM_HOSTS) {
+        try {
+          const result = await httpGetJSON(`https://${host}${EM_PATH}`);
+          return (result?.data?.diff || [])
+            .map((d: any) => ({ name: d.f14, changePercent: Math.round(d.f3 * 100) / 100 }))
+            .filter((s: any) => s.name && s.changePercent !== undefined)
+            .sort((a: any, b: any) => b.changePercent - a.changePercent);
+        } catch {
+          // try next host
+        }
+      }
+      console.warn('[fetchMarketData] all EastMoney hosts unreachable, sectors unavailable');
+      return [];
+    }
+
+    const [sectors, newsResult, rawIndices] = await Promise.all([
+      fetchSectors(),
+      httpGetJSON(WSCN_NEWS).catch((e: any) => {
+        console.error('[fetchMarketData] WallStreetCN news failed:', e.message);
+        return null;
+      }),
+      Promise.all(indexPromises),
+    ]);
+
+    const indices = rawIndices.filter(Boolean);
+
+    const newsHeadlines: string[] = (newsResult?.data?.items || [])
+      .map((item: any) => {
+        const text = (item.content || '').replace(/<[^>]*>/g, '').trim();
+        const first = text.split(/[。！？\n]/)[0];
+        return first || text.substring(0, 50);
+      })
+      .filter((t: string) => t.length > 0)
+      .slice(0, 10);
+
+    const volume = indices.reduce((sum: number, i: any) => sum + (i.volume || 0), 0);
+
     return {
-      indices: [
-        { name: '上证指数', code: '000001', price: 3882.41, changePercent: -1.85, volume: 535281873 },
-        { name: '深证成指', code: '399001', price: 14488.65, changePercent: -1.97, volume: 665968453 },
-        { name: '创业板指', code: '399006', price: 3925.83, changePercent: -0.07, volume: 26776813 },
-      ],
-      sectors: [
-        { name: 'AI算力', changePercent: 5.2, description: '北美云厂商加大AI投资带动算力需求' },
-        { name: '半导体', changePercent: 3.1, description: '国产替代加速推进' },
-        { name: '机器人', changePercent: 2.45, description: '具身智能概念持续发酵' },
-        { name: '新能源', changePercent: -0.8, description: '短期获利回吐' },
-        { name: '医药生物', changePercent: -1.2, description: '集采政策预期影响' },
-        { name: '白酒消费', changePercent: -1.8, description: '消费数据不及预期' },
-      ],
-      announcements: [
-        { title: '城投控股首次回购公司股份', company: '城投控股', type: '回购' },
-        { title: '芯海科技关联交易暨募集资金补充流动资金', company: '芯海科技', type: '董事会决议' },
-        { title: '展芯股份披露IPO相关文件', company: '展芯股份', type: 'IPO' },
-      ],
-      newsHeadlines: [
-        '美联储沃什国会首秀：对通胀零容忍，放弃前瞻指引',
-        '韩国央行意外加息25bp至2.75%',
-        '美对伊朗发起当日第二波打击，中东局势持续升级',
-        '中国上半年GDP同比增长4.7%，央行加大逆周期调节力度',
-        '存储芯片板块重挫，SK海力士跌超9%',
-        '苹果涨超4%，科技巨头多数上涨',
-        '全球央行持续增持黄金，对冲美元政策不确定性',
-      ],
-      volume: 8923,
+      indices: indices.length > 0 ? indices : [],
+      sectors,
+      announcements: [],
+      newsHeadlines: newsHeadlines.length > 0 ? newsHeadlines : ['今日财经快讯获取中，请稍后刷新'],
+      volume,
       timestamp: new Date(),
     };
   }
