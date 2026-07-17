@@ -448,17 +448,9 @@ export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStoc
         {/* 3 Cards representation of Key Events */}
         <div id="notion-events-list" className="space-y-3">
           {morningReport.top3Themes.length > 0 ? morningReport.top3Themes.map((theme, i) => {
-            const badges = [
-              { label: '1. 今日最大热点', bg: 'bg-rose-50 text-rose-600' },
-              { label: '2. 板块涨跌分化', bg: 'bg-amber-50 text-amber-700' },
-              { label: '3. 重要财经事件', bg: 'bg-emerald-50 text-emerald-600' },
-            ];
             return (
               <div key={i} className="bg-white border border-slate-100 rounded-3xl p-4 space-y-3 shadow-sm hover:border-indigo-100 transition-all">
-                <div className="flex justify-between items-center">
-                  <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${badges[i]?.bg || 'bg-indigo-50 text-indigo-600'}`}>
-                    {badges[i]?.label || `热点 ${i + 1}`}
-                  </span>
+                <div className="flex justify-end items-center">
                   {theme.chain && (
                     <span className="text-[9px] text-gray-400 font-semibold font-mono">
                       确定性: {theme.chain.certainty || '中'}
