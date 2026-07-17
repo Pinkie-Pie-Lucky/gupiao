@@ -352,10 +352,11 @@ async function startServer() {
   let morningReportCache: { data: any; timestamp: number } | null = null;
   const REPORT_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 
-  app.get('/api/morning-report', async (_req, res) => {
+  app.get('/api/morning-report', async (req, res) => {
+    console.log(`[morning-report] incoming request, ref=${req.header('referer') || 'none'}, ua=${req.header('user-agent')?.substring(0, 40) || 'none'}`);
     const now = Date.now();
     if (morningReportCache && (now - morningReportCache.timestamp) < REPORT_CACHE_TTL) {
-      console.log('[morning-report] served from cache');
+      console.log(`[morning-report] served from cache, data.sentiment=${morningReportCache.data.sentiment}, summaryLen=${morningReportCache.data.summaryText?.length || 0}`);
       return res.json(morningReportCache.data);
     }
 

@@ -85,6 +85,16 @@ export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStoc
             setMorningReport(prev => ({ ...prev, loading: false }));
           }
           setMarketOverview(overviewRes);
+          if (overviewRes.indices?.length) {
+            setIndices(overviewRes.indices.map((i: any) => ({
+              name: i.name,
+              code: i.code,
+              value: i.price,
+              changePercent: i.changePercent,
+              changeValue: parseFloat((i.price * i.changePercent / 100).toFixed(2)),
+              history: [],
+            })));
+          }
         }
       } catch {
         if (!cancelled) setMorningReport(prev => ({ ...prev, loading: false }));
