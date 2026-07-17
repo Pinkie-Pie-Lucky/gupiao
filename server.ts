@@ -349,7 +349,16 @@ async function startServer() {
   }
 
   // POST /api/morning-report — Prompt 1 → 2 → 3 pipeline
+  let morningReportCache: { data: any; timestamp: number } | null = null;
+  const REPORT_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+
   app.post('/api/morning-report', async (_req, res) => {
+    const now = Date.now();
+    if (morningReportCache && (now - morningReportCache.timestamp) < REPORT_CACHE_TTL) {
+      console.log('[morning-report] served from cache');
+      return res.json(morningReportCache.data);
+    }
+
     const startedAt = Date.now();
     try {
       const marketData = await fetchMarketData();
@@ -408,7 +417,7 @@ async function startServer() {
       const elapsed = ((Date.now() - startedAt) / 1000).toFixed(1);
       console.log(`[morning-report] completed in ${elapsed}s`);
 
-      res.json({
+      const result = {
         sentiment: p1Result.marketSentiment || '中性',
         summaryText: narrative,
         top3Themes: (p1Result.top3Themes || []).map((t: any, i: number) => ({
@@ -419,7 +428,9 @@ async function startServer() {
         keyEvents: p1Result.keyEvents || [],
         affectedSectors: p1Result.affectedSectors || [],
         timestamp: marketData.timestamp,
-      });
+      };
+      morningReportCache = { data: result, timestamp: Date.now() };
+      res.json(result);
     } catch (error: any) {
       console.error('[morning-report] error:', error.message);
       res.status(500).json({
