@@ -41,9 +41,10 @@ interface HomeTabProps {
   onSelectSector: (sectorId: string) => void;
   onNavigateToTab: (tabId: string) => void;
   onAskTeacherAboutStock: (stockName: string, stockCode: string) => void;
+  followedStocks?: { name: string; code: string; price: number; changePercent: number }[];
 }
 
-export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStock }: HomeTabProps) {
+export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStock, followedStocks = [] }: HomeTabProps) {
   const [indices, setIndices] = useState<MarketIndex[]>([]);
   const [selectedIndex, setSelectedIndex] = useState<MarketIndex | null>(null);
   const [selectedAlert, setSelectedAlert] = useState<PersonalizedAlert | null>(null);
@@ -241,9 +242,55 @@ export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStoc
       ? '方向不明'
       : (sentimentTemp <= 15 ? '极度恐慌' : sentimentTemp <= 30 ? '明显偏空' : '谨慎偏空');
 
-  // 使用真实API数据后，移除前端随机模拟
-  // 之前用于模拟实时跳动的 setInterval 已移除，
-  // 数据完全由后端东方财富API提供
+  // 今日一句话成长金句
+  const [growthQuote, setGrowthQuote] = useState('');
+  const GROWTH_QUOTES = [
+    '今天的投资思维：不要只关注涨了什么，更要关注为什么涨。',
+    '今天的投资思维：一次上涨不代表趋势改变，连续观察比一次判断更重要。',
+    '今天的投资思维：市场恐慌的时候，往往是机会开始的时候。',
+    '今天的投资思维：投资不是赌博，看不懂的时候就先别出手。',
+    '今天的投资思维：学会等待，比学会操作更难，也更重要。',
+    '今天的投资思维：亏钱不可怕，可怕的是不知道为什么亏。',
+    '今天的投资思维：分散不是买很多只股票，而是买不同逻辑的资产。',
+    '今天的投资思维：好公司不等于好股票，价格也很重要。',
+    '今天的投资思维：别人贪婪时我恐惧，别人恐惧时我贪婪。',
+    '今天的投资思维：没有人能每次都预测对，重要的是控制风险。',
+    '今天的投资思维：短期的涨跌只是情绪，长期的价值才是根本。',
+    '今天的投资思维：如果你不愿持有一只股票十年，那十分钟也不要持有。',
+    '今天的投资思维：市场永远有机会，但本金只有一次。',
+    '今天的投资思维：学习投资的第一步，是学会承认自己不懂。',
+    '今天的投资思维：牛市赚的钱，往往会在熊市还回去。',
+    '今天的投资思维：最好的投资策略是适合自己性格的策略。',
+    '今天的投资思维：不要因为涨了就觉得是自己厉害，不要因为跌了就觉得是运气不好。',
+    '今天的投资思维：每个新手都会经历"自信→怀疑→恐惧→理性"的过程。',
+    '今天的投资思维：真正的风险不是波动，而是永久性损失。',
+    '今天的投资思维：投资最难的不是技术，而是管住自己的手。',
+    '今天的投资思维：数据和事实比消息和感觉更可靠。',
+    '今天的投资思维：市场短期是投票机，长期是称重机。',
+    '今天的投资思维：当你觉得所有人都赚钱了，那可能已经到尾声了。',
+    '今天的投资思维：闲钱投资，才能在市场波动中保持冷静。',
+    '今天的投资思维：不断学习的人，最终会打败那些只想打听消息的人。',
+    '今天的投资思维：最贵的教训往往来自于"这次不一样"的错觉。',
+    '今天的投资思维：看懂一个行业，比跟风十个热点更有价值。',
+    '今天的投资思维：交易越频繁，收益越容易被费用吃掉。',
+    '今天的投资思维：不买自己不理解的东西，是最基本的投资原则。',
+    '今天的投资思维：复利是世界第八大奇迹，前提是你给它足够的时间。',
+    '今天的投资思维：每天都看盘的人，往往比每周看盘的人赚得少。',
+    '今天的投资思维：好消息已经反映在价格里了，坏消息也一样。',
+    '今天的投资思维：与其预测明天天气，不如准备一把伞。',
+    '今天的投资思维：知道自己不知道，比不知道更重要。',
+    '今天的投资思维：世界上没有免费的午餐，高收益一定有高风险。',
+    '今天的投资思维：投资是马拉松，不是百米冲刺。',
+    '今天的投资思维：不要把所有鸡蛋放在一个篮子里，但也别放在太多篮子里。',
+    '今天的投资思维：成功投资者的共同点：耐心、纪律、独立思考。',
+    '今天的投资思维：市场总是在绝望中诞生，在犹豫中上涨，在乐观中消亡。',
+    '今天的投资思维：今天的学习，是为了明天更从容地面对市场波动。',
+  ];
+
+  // 初始化金句
+  useEffect(() => {
+    setGrowthQuote(GROWTH_QUOTES[Math.floor(Math.random() * GROWTH_QUOTES.length)]);
+  }, []);
 
   const handleSearchSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -350,7 +397,7 @@ export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStoc
         {/* Card Header with Module Title and Dynamic Weather */}
         <div className="flex justify-between items-center border-b border-slate-50 pb-2">
           <div className="text-xs font-bold text-gray-400 flex items-center gap-1.5">
-            AI老师每日早报
+            泡泡老师
           </div>
           {/* Dynamic Weather Badge */}
           <div className={`flex items-center gap-1 px-2.5 py-0.5 rounded-full border text-[10px] font-bold ${cachedWeather.bg} transition-all duration-300`}>
@@ -565,9 +612,36 @@ export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStoc
                         <span className="text-[9px] text-slate-500 font-mono">置信度 {confidenceScore}%</span>
                       </div>
                     </div>
-                    <div className="text-[11px] text-slate-700">
-                      <p className="mb-1.5"><strong>📌 触发：</strong>{theme.chain.event}</p>
-                      <p><strong>💡 原因：</strong>{theme.chain.reason}</p>
+
+                    {/* 箭头式因果链 */}
+                    <div className="flex flex-col items-center py-1">
+                      {(theme.chain.chainSteps || [{ step: theme.chain.event, impact: 3 }, { step: theme.chain.reason, impact: 3 }]).map((step: any, si: number) => (
+                        <div key={si} className="flex flex-col items-center w-full">
+                          <div className="flex items-center justify-between w-full bg-white/60 rounded-xl px-3 py-2 border border-amber-200/40">
+                            <span className="text-[11px] font-medium text-slate-800">{step.step}</span>
+                            <span className="text-[10px] text-amber-600">{'★'.repeat(step.impact || 3)}{'☆'.repeat(5 - (step.impact || 3))}</span>
+                          </div>
+                          {si < (theme.chain.chainSteps || []).length - 1 && (
+                            <div className="flex flex-col items-center my-0.5">
+                              <span className="text-amber-400 text-[10px]">↓</span>
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                      {/* 如果没有 chainSteps，使用旧数据 */}
+                      {!theme.chain.chainSteps && (
+                        <div className="w-full space-y-0.5">
+                          <div className="flex items-center justify-between w-full bg-white/60 rounded-xl px-3 py-2 border border-amber-200/40">
+                            <span className="text-[11px] font-medium text-slate-800">{theme.chain.event}</span>
+                          </div>
+                          <div className="flex flex-col items-center my-0.5">
+                            <span className="text-amber-400 text-[10px]">↓</span>
+                          </div>
+                          <div className="flex items-center justify-between w-full bg-white/60 rounded-xl px-3 py-2 border border-amber-200/40">
+                            <span className="text-[11px] font-medium text-slate-800">{theme.chain.reason}</span>
+                          </div>
+                        </div>
+                      )}
                     </div>
                   </div>
                 )}
@@ -619,6 +693,54 @@ export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStoc
               </div>
             );
           })}
+        </div>
+      </div>
+
+      {/* 今日一句话成长 */}
+      <div id="growth-quote-card" className="mx-4 px-5 py-4 bg-gradient-to-r from-indigo-50 to-purple-50 border border-indigo-100 rounded-3xl shadow-sm">
+        <div className="flex items-start gap-3">
+          <div className="w-9 h-9 bg-indigo-100 rounded-xl flex items-center justify-center flex-shrink-0 text-lg">
+            💡
+          </div>
+          <div>
+            <p className="text-[10px] font-bold text-indigo-400 mb-1">今日投资思维</p>
+            <p className="text-xs font-medium text-indigo-900 leading-relaxed">
+              {growthQuote || '学会等待，比学会操作更难，也更重要。'}
+            </p>
+          </div>
+        </div>
+      </div>
+
+      {/* 今天与你有关 */}
+      <div id="related-to-you-card" className="mx-4 bg-white border border-slate-100 rounded-[32px] p-5 shadow-sm">
+        <div className="flex items-center gap-2 mb-3">
+          <span className="text-sm">👤</span>
+          <span className="text-xs font-bold text-gray-700">今天与你有关</span>
+        </div>
+        <div className="bg-slate-50 rounded-2xl p-4 border border-slate-100">
+          {followedStocks && followedStocks.length > 0 ? (
+            <div className="space-y-3">
+              <p className="text-[10px] text-gray-400 font-medium mb-2">根据你的关注动态</p>
+              {followedStocks.slice(0, 3).map((stock) => {
+                const isUp = stock.changePercent >= 0;
+                return (
+                  <div key={stock.code} className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <span className={`w-1.5 h-1.5 rounded-full ${isUp ? 'bg-red-400' : 'bg-emerald-400'}`}></span>
+                      <span className="text-xs font-semibold text-gray-800">{stock.name}</span>
+                    </div>
+                    <span className={`text-[10px] font-mono font-bold ${isUp ? 'text-red-500' : 'text-emerald-500'}`}>
+                      {isUp ? '+' : ''}{stock.changePercent}%
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          ) : (
+            <p className="text-xs text-gray-400 text-center py-2">
+              今天没有影响你关注内容的重要事件，可以安心休息 😊
+            </p>
+          )}
         </div>
       </div>
 
