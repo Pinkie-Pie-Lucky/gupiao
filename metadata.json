@@ -1,0 +1,8 @@
+{
+  "name": "泡泡看市",
+  "description": "泡泡看市是一款结合AI大模型的智能投资看市与市场分析应用。拥有今日市场速览、AI老师个性化提醒、市场热点地图以及AI老师智能投研对话等功能，助您随时掌握市场脉搏。",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
