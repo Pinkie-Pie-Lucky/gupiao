@@ -576,9 +576,9 @@ export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStoc
         <div id="notion-events-list" className="space-y-3">
           {morningReport.top3Themes.length > 0 ? morningReport.top3Themes
             .filter((theme) => {
-              // 置信度 < 30 不展示
+              // 置信度 < 10 不展示（极低置信度的才隐藏）
               const score = theme.chain?.confidenceScore;
-              return score === undefined || score >= 30;
+              return score === undefined || score >= 10;
             })
             .map((theme, i) => {
             const confidenceScore = theme.chain?.confidenceScore;
@@ -595,7 +595,7 @@ export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStoc
                     “{theme.evidence}”
                   </div>
                 </div>
-                {theme.chain && confidenceScore !== undefined && confidenceScore >= 50 && (
+                {theme.chain && confidenceScore !== undefined && confidenceScore >= 20 && (
                   <div className="bg-amber-50/40 rounded-xl p-3 border border-amber-100/30 text-[11px] text-slate-700 leading-relaxed space-y-2">
                     <div className="flex items-center justify-between">
                       <span className="font-bold text-amber-800 flex items-center gap-1">

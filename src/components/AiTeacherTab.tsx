@@ -85,7 +85,7 @@ export function AiTeacherTab({ prefilledStock, onClearPrefilledStock }: AiTeache
       const recentHistory = messages
         .slice(-4)
         .map(msg => ({
-          role: msg.sender === 'user' ? 'user' : 'model',
+          role: msg.sender === 'user' ? 'user' : 'assistant',
           parts: [{ text: msg.text }]
         }));
 
