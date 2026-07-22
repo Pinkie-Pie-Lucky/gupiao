@@ -5,10 +5,11 @@
 
 import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Search, TrendingUp, TrendingDown, ChevronRight, X, AlertTriangle, ArrowUpRight, Award, MessageSquare, Flame, BarChart2, Activity, BookOpen, Sun, GraduationCap, RefreshCw } from 'lucide-react';
+import { Search, TrendingUp, TrendingDown, ChevronRight, X, AlertTriangle, ArrowUpRight, Award, MessageSquare, Flame, BarChart2, Activity, BookOpen, Sun, GraduationCap, RefreshCw, ThumbsUp, ThumbsDown } from 'lucide-react';
 import { MarketIndex, StockSector, PersonalizedAlert } from '../types';
 import { formatChineseDate, initialSectors, initialAlerts } from '../data';
 import { InteractiveChart } from './InteractiveChart';
+import { FeedbackModal } from './FeedbackModal';
 
 const LEARNING_KNOWLEDGE = [
   {
@@ -63,6 +64,7 @@ export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStoc
     top3Themes: { title: string; evidence: string; chain: any }[];
     sentiment: string;
     loading: boolean;
+    promptVersion?: string;
   }>({ summaryText: '', reasonBrief: '', top3Themes: [], sentiment: '中性', loading: true });
 
   // 市场状态（交易时段判断）
@@ -286,6 +288,79 @@ export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStoc
     '今天的投资思维：市场总是在绝望中诞生，在犹豫中上涨，在乐观中消亡。',
     '今天的投资思维：今天的学习，是为了明天更从容地面对市场波动。',
   ];
+
+  // 小白/专业模式切换
+  const [isBeginnerMode, setIsBeginnerMode] = useState(true);
+  // 因果链展开/收起状态
+  const [expandedChains, setExpandedChains] = useState<Set<number>>(new Set());
+
+  // 反馈状态
+  const [feedbackTarget, setFeedbackTarget] = useState<{
+    contentType: string;
+    contentId: string;
+    promptVersion: string;
+  } | null>(null);
+  const [thumbsFeedback, setThumbsFeedback] = useState<Record<number, 'up' | 'down' | null>>({});
+
+  const handleThumbsUp = (index: number, theme: any) => {
+    // 如果已经点赞，取消点赞
+    if (thumbsFeedback[index] === 'up') {
+      setThumbsFeedback(prev => ({ ...prev, [index]: null }));
+    } else {
+      setThumbsFeedback(prev => ({ ...prev, [index]: 'up' }));
+      // 发送点赞到后端，带上 promptVersion
+      fetch('/api/feedback', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contentType: 'morning_report_theme',
+          contentId: theme.title,
+          promptVersion: morningReport.promptVersion || 'v2-p2A',
+          rating: 'positive',
+          reasons: [],
+          comment: '',
+          timestamp: new Date().toISOString(),
+        }),
+      }).catch(() => {});
+    }
+  };
+
+  const handleThumbsDown = (index: number, theme: any) => {
+    // 如果已经点踩，取消
+    if (thumbsFeedback[index] === 'down') {
+      setThumbsFeedback(prev => ({ ...prev, [index]: null }));
+    } else {
+      setThumbsFeedback(prev => ({ ...prev, [index]: 'down' }));
+      // 打开反馈弹窗
+      setFeedbackTarget({
+        contentType: 'morning_report_theme',
+        contentId: theme.title,
+        promptVersion: morningReport.promptVersion || 'v2-p2A',
+      });
+    }
+  };
+
+  const toggleChain = (index: number) => {
+    setExpandedChains(prev => {
+      const next = new Set(prev);
+      if (next.has(index)) next.delete(index);
+      else next.add(index);
+      return next;
+    });
+  };
+
+  const TYPE_ICONS: Record<string, string> = {
+    'sector_driver': '⚡',
+    'geo_event': '🌍',
+    'policy_driver': '🏛️',
+    'macro_event': '📊',
+  };
+  const TYPE_LABELS: Record<string, string> = {
+    'sector_driver': '市场热点',
+    'geo_event': '地缘事件',
+    'policy_driver': '政策驱动',
+    'macro_event': '宏观事件',
+  };
 
   // 初始化金句
   useEffect(() => {
@@ -572,19 +647,43 @@ export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStoc
           今天发生了什么
         </h3>
 
-        {/* 3 Cards representation of Key Events */}
+        {/* 小白/专业切换按钮 */}
+        <div className="flex items-center justify-between gap-2 mb-1">
+          <div className="flex items-center bg-slate-100 rounded-full p-0.5 text-[10px] font-semibold">
+            <button
+              onClick={() => setIsBeginnerMode(true)}
+              className={`px-3 py-1 rounded-full transition-all ${isBeginnerMode ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+            >
+              🔰 小白模式
+            </button>
+            <button
+              onClick={() => setIsBeginnerMode(false)}
+              className={`px-3 py-1 rounded-full transition-all ${!isBeginnerMode ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+            >
+              📊 专业模式
+            </button>
+          </div>
+        </div>
+
+        {/* 3 Cards representation of Key Events / Market Stories */}
         <div id="notion-events-list" className="space-y-3">
           {morningReport.top3Themes.length > 0 ? morningReport.top3Themes
             .filter((theme) => {
-              // 置信度 < 10 不展示（极低置信度的才隐藏）
               const score = theme.chain?.confidenceScore;
               return score === undefined || score >= 10;
             })
             .map((theme, i) => {
             const confidenceScore = theme.chain?.confidenceScore;
             const scoreColor = confidenceScore >= 80 ? 'bg-emerald-500' : confidenceScore >= 60 ? 'bg-amber-500' : 'bg-slate-300';
+            const typeIcon = (theme as any).type ? TYPE_ICONS[(theme as any).type] || '📌' : '📌';
+            const typeLabel = (theme as any).type ? TYPE_LABELS[(theme as any).type] || '市场事件' : '市场事件';
             return (
               <div key={i} className="bg-white border border-slate-100 rounded-3xl p-4 space-y-3 shadow-sm hover:border-indigo-100 transition-all">
+                {/* 事件类型标签 + 标题 */}
+                <div className="flex items-center gap-2">
+                  <span className="text-sm">{typeIcon}</span>
+                  <span className="text-[9px] font-bold text-gray-400 bg-gray-50 px-1.5 py-0.5 rounded-md">{typeLabel}</span>
+                </div>
                 <h4 className="text-xs font-bold text-gray-950">
                   {theme.title}
                 </h4>
@@ -595,56 +694,112 @@ export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStoc
                     “{theme.evidence}”
                   </div>
                 </div>
-                {theme.chain && confidenceScore !== undefined && confidenceScore >= 20 && (
-                  <div className="bg-amber-50/40 rounded-xl p-3 border border-amber-100/30 text-[11px] text-slate-700 leading-relaxed space-y-2">
-                    <div className="flex items-center justify-between">
-                      <span className="font-bold text-amber-800 flex items-center gap-1">
-                        <span className="text-sm">🔗</span>
-                        因果链
-                      </span>
-                      <div className="flex items-center gap-1.5">
-                        <div className="w-14 h-1.5 bg-slate-200 rounded-full overflow-hidden">
-                          <div
-                            className={`h-full rounded-full ${scoreColor}`}
-                            style={{ width: `${confidenceScore}%` }}
-                          ></div>
-                        </div>
-                        <span className="text-[9px] text-slate-500 font-mono">置信度 {confidenceScore}%</span>
-                      </div>
-                    </div>
 
-                    {/* 箭头式因果链 */}
-                    <div className="flex flex-col items-center py-1">
-                      {(theme.chain.chainSteps || [{ step: theme.chain.event, impact: 3 }, { step: theme.chain.reason, impact: 3 }]).map((step: any, si: number) => (
-                        <div key={si} className="flex flex-col items-center w-full">
-                          <div className="flex items-center justify-between w-full bg-white/60 rounded-xl px-3 py-2 border border-amber-200/40">
-                            <span className="text-[11px] font-medium text-slate-800">{step.step}</span>
-                            <span className="text-[10px] text-amber-600">{'★'.repeat(step.impact || 3)}{'☆'.repeat(5 - (step.impact || 3))}</span>
-                          </div>
-                          {si < (theme.chain.chainSteps || []).length - 1 && (
-                            <div className="flex flex-col items-center my-0.5">
-                              <span className="text-amber-400 text-[10px]">↓</span>
-                            </div>
-                          )}
-                        </div>
-                      ))}
-                      {/* 如果没有 chainSteps，使用旧数据 */}
-                      {!theme.chain.chainSteps && (
-                        <div className="w-full space-y-0.5">
-                          <div className="flex items-center justify-between w-full bg-white/60 rounded-xl px-3 py-2 border border-amber-200/40">
-                            <span className="text-[11px] font-medium text-slate-800">{theme.chain.event}</span>
-                          </div>
-                          <div className="flex flex-col items-center my-0.5">
-                            <span className="text-amber-400 text-[10px]">↓</span>
-                          </div>
-                          <div className="flex items-center justify-between w-full bg-white/60 rounded-xl px-3 py-2 border border-amber-200/40">
-                            <span className="text-[11px] font-medium text-slate-800">{theme.chain.reason}</span>
+                {/* 因果链 - 展开/收起 */}
+                {theme.chain && confidenceScore !== undefined && confidenceScore >= 20 && (
+                  <>
+                    <button
+                      onClick={() => toggleChain(i)}
+                      className="w-full flex items-center justify-between bg-amber-50/40 rounded-xl px-3 py-2 border border-amber-100/30 text-[11px] text-amber-800 font-bold"
+                    >
+                      <span className="flex items-center gap-1">
+                        <span>🔗</span>
+                        因果链
+                        <span className="text-[9px] text-amber-500 font-mono font-normal ml-1">置信度 {confidenceScore}%</span>
+                      </span>
+                      <span className="text-amber-500">{expandedChains.has(i) ? '收起 ▲' : '展开 ▼'}</span>
+                    </button>
+
+                    {expandedChains.has(i) && (
+                      <div className="bg-amber-50/40 rounded-xl p-3 border border-amber-100/30 text-[11px] text-slate-700 leading-relaxed space-y-2">
+                        {/* 置信度进度条 */}
+                        <div className="flex items-center gap-1.5 mb-2">
+                          <div className="w-full h-1.5 bg-slate-200 rounded-full overflow-hidden">
+                            <div
+                              className={`h-full rounded-full ${scoreColor}`}
+                              style={{ width: `${confidenceScore}%` }}
+                            ></div>
                           </div>
                         </div>
-                      )}
-                    </div>
-                  </div>
+
+                        {/* 箭头式因果链 - 根据模式切换 */}
+                        <div className="flex flex-col items-center py-1">
+                          {(() => {
+                            // 小白版优先使用 chainSteps_beginner，否则用 chainSteps_pro，最后用旧数据
+                            const steps = isBeginnerMode
+                              ? (theme.chain.chainSteps_beginner || theme.chain.chainSteps_pro || theme.chain.chainSteps || null)
+                              : (theme.chain.chainSteps_pro || theme.chain.chainSteps_beginner || theme.chain.chainSteps || null);
+                            if (steps && steps.length > 0) {
+                              return steps.map((step: any, si: number) => (
+                                <div key={si} className="flex flex-col items-center w-full">
+                                  <div className="flex items-center justify-between w-full bg-white/60 rounded-xl px-3 py-2 border border-amber-200/40">
+                                    <span className="text-[11px] font-medium text-slate-800">{step.step}</span>
+                                  </div>
+                                  {si < steps.length - 1 && (
+                                    <div className="flex flex-col items-center my-0.5">
+                                      <span className="text-amber-400 text-[10px]">↓</span>
+                                    </div>
+                                  )}
+                                </div>
+                              ));
+                            }
+                            // 旧数据降级
+                            const oldSteps = [
+                              { step: theme.chain.event, impact: 3 },
+                              { step: theme.chain.reason, impact: 3 }
+                            ].filter(s => s.step);
+                            return oldSteps.map((step: any, si: number) => (
+                              <div key={si} className="flex flex-col items-center w-full">
+                                <div className="flex items-center justify-between w-full bg-white/60 rounded-xl px-3 py-2 border border-amber-200/40">
+                                  <span className="text-[11px] font-medium text-slate-800">{step.step}</span>
+                                </div>
+                                {si < oldSteps.length - 1 && (
+                                  <div className="flex flex-col items-center my-0.5">
+                                    <span className="text-amber-400 text-[10px]">↓</span>
+                                  </div>
+                                )}
+                              </div>
+                            ));
+                          })()}
+                        </div>
+
+                        {/* 泡泡提醒（不确定性） */}
+                        {theme.chain.uncertainty && (
+                          <div className="flex items-start gap-1.5 mt-1 pt-2 border-t border-amber-200/30">
+                            <span className="text-[10px]">💭</span>
+                            <span className="text-[10px] text-amber-700 font-medium leading-relaxed">{theme.chain.uncertainty}</span>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </>
                 )}
+
+                {/* 点赞/点踩反馈按钮 */}
+                <div className="flex items-center justify-end gap-1.5 pt-1 border-t border-slate-50">
+                  <button
+                    onClick={() => handleThumbsUp(i, theme)}
+                    className={`flex items-center gap-1 px-2 py-1 rounded-lg text-[10px] font-medium transition-all ${
+                      thumbsFeedback[i] === 'up'
+                        ? 'bg-indigo-50 text-indigo-600 border border-indigo-200'
+                        : 'text-gray-400 hover:text-indigo-500 hover:bg-gray-50'
+                    }`}
+                  >
+                    <ThumbsUp className={`w-3 h-3 ${thumbsFeedback[i] === 'up' ? 'fill-indigo-500' : ''}`} />
+                    有用
+                  </button>
+                  <button
+                    onClick={() => handleThumbsDown(i, theme)}
+                    className={`flex items-center gap-1 px-2 py-1 rounded-lg text-[10px] font-medium transition-all ${
+                      thumbsFeedback[i] === 'down'
+                        ? 'bg-rose-50 text-rose-600 border border-rose-200'
+                        : 'text-gray-400 hover:text-rose-500 hover:bg-gray-50'
+                    }`}
+                  >
+                    <ThumbsDown className={`w-3 h-3 ${thumbsFeedback[i] === 'down' ? 'fill-rose-500' : ''}`} />
+                    改进
+                  </button>
+                </div>
               </div>
             );
           }) : (
@@ -838,6 +993,23 @@ export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStoc
           </div>
         )}
       </AnimatePresence>
+
+      {/* 反馈弹窗 - 点踩后弹出 */}
+      {feedbackTarget && (
+        <FeedbackModal
+          contentType={feedbackTarget.contentType}
+          contentId={feedbackTarget.contentId}
+          promptVersion={feedbackTarget.promptVersion}
+          onClose={() => {
+            setFeedbackTarget(null);
+            // 点踩弹窗关闭后清除点踩状态
+            const idx = morningReport.top3Themes.findIndex(t => t.title === feedbackTarget.contentId);
+            if (idx >= 0) {
+              setThumbsFeedback(prev => ({ ...prev, [idx]: null }));
+            }
+          }}
+        />
+      )}
 
       {/* Interactive Modal Sheet for AI Morning Report Reasons */}
       <AnimatePresence>

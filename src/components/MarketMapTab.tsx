@@ -35,15 +35,15 @@ export function MarketMapTab({
   const [dataError, setDataError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
-  // 直接从后端获取真实板块数据
+  // v4: 直接从后端获取真实板块数据（修复React StrictMode双重执行导致cancelled提前问题）
   useEffect(() => {
-    let cancelled = false;
     async function loadSectors() {
       try {
-        const res = await fetch('/api/sectors');
-        if (!res.ok) throw new Error('Sector API failed');
-        const data = await res.json();
-        if (!cancelled && data.sectors?.length > 0) {
+        const res = await fetch('/api/sectors?t=' + Date.now());
+        if (!res.ok) throw new Error('Sector API failed: ' + res.status);
+        const text = await res.text();
+        const data = JSON.parse(text);
+        if (data.sectors && data.sectors.length > 0) {
           const mapped = data.sectors.map((s: any, i: number) => ({
             id: s.id || `sector-${i}`,
             name: s.name,
@@ -55,14 +55,13 @@ export function MarketMapTab({
         } else {
           setDataError('暂无可用板块数据');
         }
-      } catch {
-        if (!cancelled) setDataError('板块实时数据获取失败');
+      } catch (e: any) {
+        setDataError('板块实时数据获取失败');
       } finally {
-        if (!cancelled) setLoading(false);
+        setLoading(false);
       }
     }
     loadSectors();
-    return () => { cancelled = true; };
   }, []);
 
   // Sync active sector when selectedSectorId changes from parent

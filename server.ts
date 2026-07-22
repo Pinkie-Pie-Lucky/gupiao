@@ -5,6 +5,7 @@
 
 import express from 'express';
 import path from 'path';
+import fs from 'node:fs';
 import https from 'node:https';
 import http from 'node:http';
 import { createServer as createViteServer } from 'vite';
@@ -154,43 +155,46 @@ async function startServer() {
 
   // ─── Prompt Pipeline: Three-Prompt Architecture ───
 
-  const PROMPT_1_SYSTEM = `你是一名资深市场分析师。你的职责是从数据中提炼事实摘要，但绝不进行因果推导。
+  // PROMPT_1_SYSTEM v2.0 | 2026-07-21 | 改为故事发现模式，新增4种事件类型
+  const PROMPT_1_SYSTEM = `你是一名资深市场分析师。你的职责是从海量行情和新闻中，发现今天市场最重要的三个故事，而非总结涨跌幅。
 
 请遵循以下原则：
-1. 优先依据市场数据（指数、板块涨跌幅、成交额变化）判断热点
-2. 新闻仅作为解释依据，不要因为新闻数量多就认为影响大
-3. 输出今天最重要的 3 个市场主题
+1. **从事件出发，而非从板块出发**。不要简单输出"某某板块上涨"，而要问"为什么市场今天关注这件事"
+2. 优先从以下四个来源发现故事：
+   - 市场热点（板块异动、行业趋势、资金流向）
+   - 地缘事件（国际冲突、贸易争端、地缘政治）
+   - 政策驱动（产业政策、货币政策、监管变化）
+   - 宏观事件（美联储决议、CPI、GDP、PMI等经济数据）
+3. **主题不重复**：三个故事不能是同一主题的变体
+   ❌ "能源板块上涨" + "油价波动影响" + "石油股异动"（同一主题）
+   ✅ "AI板块上涨" + "中东地缘冲突" + "新能源政策出台"（不同主题）
 4. 判断市场情绪（乐观 / 中性 / 谨慎）
-5. 不预测未来，只描述今天市场正在交易什么
-6. **关键约束：evidence 字段必须只陈述客观数据事实，不能包含任何因果推导**。例如："AI算力板块上涨4.3%，成交额较昨日增长12%"而不是"表明资金正在流入"
+5. **教育价值优先**：优先选择能解释因果逻辑的事件，而非单纯涨跌幅大的事件
+6. **evidence 字段必须只陈述客观数据事实**，不可推导因果
+
+输出的 type 字段使用以下四种分类：
+- "sector_driver"：市场热点（板块、行业、资金相关）
+- "geo_event"：地缘事件（国际冲突、制裁、选举等）
+- "policy_driver"：政策驱动（政策、法规、监管相关）
+- "macro_event"：宏观事件（经济数据、利率、通胀等）
 
 输出严格 JSON 格式，不可夹带任何解释或评论：
 {
   "marketSentiment": "乐观" | "中性" | "谨慎",
-  "top3Themes": [
+  "top3Stories": [
     {
-      "theme": "主题名称",
-      "confidence": "高" | "中" | "低",
-      "evidence": "纯事实陈述，仅包含数字和事件，不做推导"
-    }
-  ],
-  "keyEvents": [
-    {
-      "event": "事件描述",
-      "impact": "对市场的影响",
-      "source": "新闻来源"
-    }
-  ],
-  "affectedSectors": [
-    {
-      "sector": "板块名称",
-      "changePercent": "涨跌幅",
-      "reason": "该板块变动的事实描述（非推导）"
+      "type": "sector_driver" | "geo_event" | "policy_driver" | "macro_event",
+      "title": "简洁的故事标题，让用户一看就懂",
+      "what": "发生了什么（一句话概括，30字内）",
+      "evidence": "支撑该故事的数据事实，只陈述不推导"
     }
   ]
 }`;
 
-  const PROMPT_2_SYSTEM = `你是一名财经逻辑分析师。请基于 Prompt 1 给出的事实，建立最合理的因果链。
+  // ─── A/B Test：两版 P2 Prompt ───
+
+  // P2_A（严谨版）：当前正式版，强调数据严谨、置信度分档严格
+  const PROMPT_2_A_SYSTEM = `你是一名财经逻辑分析师。请基于 Prompt 1 给出的事实，建立最合理的因果链。
 
 要求：
 1. 因果必须有依据，不允许猜测
@@ -198,9 +202,10 @@ async function startServer() {
 3. 如果证据不足，请明确说明并降低 confidenceScore
 4. 只输出事件 → 行业 → 经济 → 板块逻辑链，不输出投资建议
 5. 宁可回答"证据不足"，也不要编造因果关系
-6. **chainSteps 要求**：将推理过程拆分成 3-4 步的链，每步一个简短事件描述（10字以内）
-7. **impact 评分**：每一步的影响力度（1-5星），5=最强影响
-8. **confidenceScore 评分标准**：
+6. **chainSteps_beginner 要求**（小白版）：每一步用通俗易懂的大白话描述（可用15-20字），在括号里解释专业术语，语气像老师在给小学生讲课。拆分成 3-4 步。
+7. **chainSteps_pro 要求**（专业版）：每一步用精准的专业术语（10字以内），简洁有力，适合有投资经验的用户。拆分成 3-4 步。
+8. **impact 评分**：每一步的影响力度（1-5星），5=最强影响
+9. **confidenceScore 评分标准**：
    - 80-100：多源数据交叉验证一致，量价配合明显
    - 60-79：有2个以上独立数据源支持
    - 30-59：有1个数据源支持但证据有限
@@ -212,11 +217,51 @@ async function startServer() {
     {
       "theme": "对应的主题",
       "confidenceScore": 0-100,
-      "chainSteps": [
-        { "step": "第一步事件", "impact": 5 },
-        { "step": "第二步影响", "impact": 4 },
-        { "step": "第三步结果", "impact": 3 },
-        { "step": "第四步板块表现", "impact": 4 }
+      "chainSteps_beginner": [
+        { "step": "第一步事件（用大白话解释这一步在发生什么）", "impact": 5 },
+        { "step": "第二步（继续用通俗语言说明因果关系）", "impact": 4 },
+        { "step": "第三步结果（说明最终如何影响股市板块）", "impact": 3 },
+        { "step": "第四步板块表现（说清楚哪个板块因此涨跌）", "impact": 4 }
+      ],
+      "chainSteps_pro": [
+        { "step": "专业术语描述事件", "impact": 5 },
+        { "step": "传导路径", "impact": 4 },
+        { "step": "市场影响", "impact": 3 },
+        { "step": "板块映射", "impact": 4 }
+      ]
+    }
+  ]
+}`;
+
+  // P2_B（通俗版）：强制用比喻、更短的步骤、语气更亲切
+  const PROMPT_2_B_SYSTEM = `你是一名擅长用比喻讲故事的财经分析师。请基于 Prompt 1 给出的事实，用最亲切易懂的方式建立因果链。
+
+要求：
+1. 因果必须有依据，但每个步骤都要用一个生活比喻来解释
+2. 每个步骤的描述必须在15字以内，且不带专业术语
+3. 只输出事件 → 行业 → 经济 → 板块逻辑链，不输出投资建议
+4. **chainSteps_beginner 要求**：每一步前面加一个emoji，用生活场景打比方（例如"小明攒钱买游戏机=企业融资扩产"），语气像在讲故事
+5. **chainSteps_pro 要求**：每一步控制在8字以内，用短句概括，不带括号解释
+6. **confidenceScore 直接从P1传递**：不做额外降级，保留P1的置信度评估
+7. 宁可回答"证据不足"，也不要编造因果关系
+
+输出 JSON：
+{
+  "causalChains": [
+    {
+      "theme": "对应的主题",
+      "confidenceScore": 0-100,
+      "chainSteps_beginner": [
+        { "step": "🍳 第一步比喻（用生活场景类比该事件，12字以内）", "impact": 5 },
+        { "step": "📈 第二步比喻（继续用生活场景解释传导，12字以内）", "impact": 4 },
+        { "step": "💡 第三步结果（说明最终对股市的影响，12字以内）", "impact": 3 },
+        { "step": "🎯 第四步板块（直接说哪个板块涨跌，12字以内）", "impact": 4 }
+      ],
+      "chainSteps_pro": [
+        { "step": "4字概括事件", "impact": 5 },
+        { "step": "4字传导路径", "impact": 4 },
+        { "step": "4字市场影响", "impact": 3 },
+        { "step": "4字板块映射", "impact": 4 }
       ]
     }
   ]
@@ -377,6 +422,50 @@ async function startServer() {
     };
   }
 
+  // POST /api/feedback — 用户反馈闭环
+  app.post('/api/feedback', async (req, res) => {
+    const dir = 'l:/gupiao-main/gupiao-main/work';
+    const file = `${dir}/feedback.jsonl`;
+    try {
+      fs.mkdirSync(dir, { recursive: true });
+      fs.appendFileSync(file, JSON.stringify(req.body) + '\n');
+      res.json({ ok: true });
+    } catch {
+      res.json({ ok: true });
+    }
+  });
+
+  // GET /api/feedback-stats — A/B Test 反馈统计
+  app.get('/api/feedback-stats', async (_req, res) => {
+    const file = 'l:/gupiao-main/gupiao-main/work/feedback.jsonl';
+    try {
+      if (!fs.existsSync(file)) {
+        return res.json({ stats: {}, total: 0 });
+      }
+      const lines = fs.readFileSync(file, 'utf-8').split('\n').filter(Boolean);
+      const stats: Record<string, { positive: number; negative: number; total: number; reasons: Record<string, number> }> = {};
+      for (const line of lines) {
+        try {
+          const entry = JSON.parse(line);
+          const pv = entry.promptVersion || 'unknown';
+          if (!stats[pv]) stats[pv] = { positive: 0, negative: 0, total: 0, reasons: {} };
+          stats[pv].total++;
+          if (entry.rating === 'positive') stats[pv].positive++;
+          if (entry.rating === 'negative') stats[pv].negative++;
+          if (entry.reasons && Array.isArray(entry.reasons)) {
+            for (const r of entry.reasons) {
+              if (!stats[pv].reasons[r]) stats[pv].reasons[r] = 0;
+              stats[pv].reasons[r]++;
+            }
+          }
+        } catch { /* skip malformed line */ }
+      }
+      res.json({ stats, total: lines.length });
+    } catch {
+      res.json({ stats: {}, total: 0 });
+    }
+  });
+
   // POST /api/morning-report — Prompt 1 → 2 → 3 pipeline
   let morningReportCache: { data: any; timestamp: number } | null = null;
   // 调用频率控制：开发阶段3小时（10800000ms），生产环境30分钟（1800000ms）
@@ -412,20 +501,35 @@ async function startServer() {
         console.error('[morning-report] failed to parse P1 JSON, raw:', p1Raw.substring(0, 200));
         p1Result = {
           marketSentiment: '中性',
-          top3Themes: [{ theme: '市场数据不足', confidence: '低', evidence: '无法解析' }],
-          keyEvents: [],
-          affectedSectors: [],
+          top3Stories: [{ type: 'sector_driver', title: '市场数据不足', what: '无法获取', evidence: '无法解析' }],
         };
       }
 
+      // 兼容新旧输出格式
+      if (!p1Result.top3Stories && p1Result.top3Themes) {
+        p1Result.top3Stories = p1Result.top3Themes.map((t: any) => ({
+          type: 'sector_driver', title: t.theme, what: t.evidence?.substring(0,30) || t.theme, evidence: t.evidence,
+        }));
+      }
+
+      // ─── A/B Test: 选择 P2 变体 ───
+      // 通过查询参数 ?p2v=A 或 ?p2v=B 选择，默认随机分配
+      let p2Variant = (req.query.p2v as string || '').toUpperCase();
+      if (p2Variant !== 'A' && p2Variant !== 'B') {
+        p2Variant = Math.random() > 0.5 ? 'A' : 'B';
+      }
+      const selectedP2 = p2Variant === 'A' ? PROMPT_2_A_SYSTEM : PROMPT_2_B_SYSTEM;
+      const promptVersion = `v2-p2${p2Variant}`;
+      console.log(`[morning-report] step 2: using ${promptVersion}`);
+
       const p2Input = JSON.stringify({
-        themes: p1Result.top3Themes,
+        themes: p1Result.top3Stories,
         events: p1Result.keyEvents,
         sectors: p1Result.affectedSectors,
         newsText: marketData.newsHeadlines.join('\n'),
       }, null, 2);
 
-      const p2Raw = await callAI(PROMPT_2_SYSTEM, p2Input, 0.1);
+      const p2Raw = await callAI(selectedP2, p2Input, 0.1);
       console.log('[morning-report] step 2: causal reasoning done');
 
       let p2Result: any;
@@ -457,17 +561,22 @@ async function startServer() {
       const elapsed = ((Date.now() - startedAt) / 1000).toFixed(1);
       console.log(`[morning-report] completed in ${elapsed}s`);
 
+      // 统一使用 stories 格式，兼容新旧输出
+      const stories = (p1Result.top3Stories || p1Result.top3Themes || []).map((t: any, i: number) => ({
+        title: t.title || t.theme || '',
+        evidence: t.what || t.evidence || '',
+        type: t.type || 'sector_driver',
+        chain: p2Result.causalChains?.[i] || null,
+      }));
+
       const result = {
         sentiment: p1Result.marketSentiment || '中性',
         summaryText: p3Result.summaryText || p3Raw,
         reasonBrief: p3Result.reasonBrief || '',
-        top3Themes: (p1Result.top3Themes || []).map((t: any, i: number) => ({
-          title: t.theme,
-          evidence: t.evidence,
-          chain: p2Result.causalChains?.[i] || null,
-        })),
+        top3Themes: stories,
         keyEvents: p1Result.keyEvents || [],
         affectedSectors: p1Result.affectedSectors || [],
+        promptVersion, // 返回当前使用的 Prompt 版本，供前端反馈时使用
         timestamp: marketData.timestamp,
       };
       morningReportCache = { data: result, timestamp: Date.now() };
