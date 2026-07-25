@@ -5,11 +5,12 @@
 
 import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Search, TrendingUp, TrendingDown, ChevronRight, X, AlertTriangle, ArrowUpRight, Award, MessageSquare, Flame, BarChart2, Activity, BookOpen, Sun, GraduationCap, RefreshCw, ThumbsUp, ThumbsDown } from 'lucide-react';
-import { MarketIndex, StockSector, PersonalizedAlert } from '../types';
+import { Search, TrendingUp, TrendingDown, ChevronRight, ChevronDown, X, AlertTriangle, ArrowUpRight, Award, MessageSquare, Flame, BarChart2, Activity, BookOpen, Sun, GraduationCap, RefreshCw, ShieldCheck, ThumbsUp, ThumbsDown } from 'lucide-react';
+import { MarketIndex, MarketStory, StockSector, PersonalizedAlert } from '../types';
 import { formatChineseDate, initialSectors, initialAlerts } from '../data';
 import { InteractiveChart } from './InteractiveChart';
 import { FeedbackModal } from './FeedbackModal';
+import { BubbleAvatar } from './BubbleAvatar';
 
 const LEARNING_KNOWLEDGE = [
   {
@@ -61,11 +62,15 @@ export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStoc
   const [morningReport, setMorningReport] = useState<{
     summaryText: string;
     reasonBrief: string;
-    top3Themes: { title: string; evidence: string; chain: any }[];
+    stories: MarketStory[];
     sentiment: string;
     loading: boolean;
     promptVersion?: string;
-  }>({ summaryText: '', reasonBrief: '', top3Themes: [], sentiment: '中性', loading: true });
+    promptVersions?: {
+      beginner: string;
+      professional: string;
+    };
+  }>({ summaryText: '', reasonBrief: '', stories: [], sentiment: '中性', loading: true });
 
   // 市场状态（交易时段判断）
   const [marketStatus, setMarketStatus] = useState<{
@@ -80,6 +85,32 @@ export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStoc
     bottomSectors: { name: string; changePercent: number }[];
     marketBreath: { up: number; down: number; breadthRatio?: number };
     totalVolume?: number;
+    marketTemperature?: {
+      score: number;
+      emoji: string;
+      text: string;
+      label: string;
+      description: string;
+      tone: 'hot' | 'warm' | 'neutral' | 'cool';
+      directionScore: number;
+      confirmationScore: number;
+      correction: number;
+      components: {
+        breadth: { score: number; up: number; down: number; total: number };
+        indices: { score: number; averageChange: number };
+        extremes: { score: number; limitUp: number; limitDown: number; stockCount: number; available: boolean };
+        turnover: {
+          score: number;
+          amount: number;
+          baseline: number | null;
+          ratio: number | null;
+          sampleCount: number;
+          status: string;
+        };
+        concentration: { score: number; top3Share: number | null };
+        volatility: { score: number; averageAmplitude: number | null };
+      };
+    };
   } | null>(null);
 
   // 数据是否成功加载
@@ -90,34 +121,30 @@ export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStoc
     label: '加载中', desc: ''
   });
 
-  // 当指数数据变更时才重新计算天气/情绪（而非每次渲染）
+  // 市场温度来自客观规则引擎；AI情绪只用于早报文案，不参与温度计算。
   useEffect(() => {
-    if (indices.length === 0) {
-      if (dataError) {
-        setCachedWeather({ emoji: '⚠️', text: '数据异常', bg: 'bg-yellow-50 border-yellow-200 text-yellow-700', temp: 0, label: '数据异常', desc: '行情数据获取失败' });
-      }
+    if (dataError) {
+      setCachedWeather({ emoji: '⚠️', text: '数据异常', bg: 'bg-yellow-50 border-yellow-200 text-yellow-700', temp: 0, label: '数据异常', desc: '行情数据获取失败' });
       return;
     }
-    const avg = indices.reduce((acc, idx) => acc + idx.changePercent, 0) / indices.length;
-    const base = morningReport.sentiment === '乐观' ? 72 : morningReport.sentiment === '中性' ? 50 : 28;
-    const adj = Math.round(avg * 3);
-    const temp = Math.round(Math.min(90, Math.max(10, base + adj)));
-    const label = morningReport.sentiment === '乐观' ? '情绪偏多' : morningReport.sentiment === '中性' ? '多空平衡' : '情绪偏空';
-    const desc = morningReport.sentiment === '乐观'
-      ? (temp >= 80 ? '极度贪婪' : temp >= 65 ? '中度看涨' : '温和偏多')
-      : morningReport.sentiment === '中性' ? '方向不明'
-      : (temp <= 15 ? '极度恐慌' : temp <= 30 ? '明显偏空' : '谨慎偏空');
+    const temperature = marketOverview?.marketTemperature;
+    if (!temperature) return;
 
-    if (avg > 1.2) {
-      setCachedWeather({ emoji: '🔥', text: '烈日狂飙 / 极度看涨 📈', bg: 'bg-rose-50 border-rose-100 text-rose-700', temp, label, desc });
-    } else if (avg > 0) {
-      setCachedWeather({ emoji: '☀️', text: '温和晴朗 / 科技吸金 📈', bg: 'bg-amber-50 border-amber-100 text-amber-700', temp, label, desc });
-    } else if (avg > -0.5) {
-      setCachedWeather({ emoji: '⛅', text: '多云转阴 / 区间震荡 ⚖️', bg: 'bg-slate-100 border-slate-200 text-slate-700', temp, label, desc });
-    } else {
-      setCachedWeather({ emoji: '🌧️', text: '暴风雨临 / 避险防御 📉', bg: 'bg-indigo-50 border-indigo-100 text-indigo-700', temp, label, desc });
-    }
-  }, [indices, morningReport.sentiment, dataError]);
+    const bgByTone = {
+      hot: 'bg-rose-50 border-rose-100 text-rose-700',
+      warm: 'bg-amber-50 border-amber-100 text-amber-700',
+      neutral: 'bg-slate-100 border-slate-200 text-slate-700',
+      cool: 'bg-indigo-50 border-indigo-100 text-indigo-700',
+    };
+    setCachedWeather({
+      emoji: temperature.emoji,
+      text: temperature.text,
+      bg: bgByTone[temperature.tone],
+      temp: temperature.score,
+      label: temperature.label,
+      desc: temperature.description,
+    });
+  }, [marketOverview, dataError]);
 
   async function loadMarketOverview({ cancelled }: { cancelled: boolean }) {
     try {
@@ -165,8 +192,12 @@ export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStoc
       if (!cancelled) {
         try {
           const reportRes = await fetch('/api/morning-report').then(r => r.json());
-          if (!cancelled && !reportRes.fallback) {
-            setMorningReport({ ...reportRes, loading: false });
+          if (!cancelled && !reportRes.error) {
+            setMorningReport({
+              ...reportRes,
+              stories: reportRes.stories || reportRes.top3Themes || [],
+              loading: false,
+            });
           } else if (!cancelled) {
             setMorningReport(prev => ({ ...prev, loading: false }));
           }
@@ -195,54 +226,12 @@ export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStoc
     };
   }, []);
 
-  // Dynamic market weather calculation based on simulated indices
-  const averageChange = indices.length > 0
-    ? indices.reduce((acc, idx) => acc + idx.changePercent, 0) / indices.length
-    : 0;
-  let weatherEmoji = '❓';
-  let weatherText = '暂无数据';
-  let weatherBg = 'bg-gray-50 border-gray-200 text-gray-500';
-  if (dataError) {
-    weatherEmoji = '⚠️';
-    weatherText = '数据异常';
-    weatherBg = 'bg-yellow-50 border-yellow-200 text-yellow-700';
-  } else if (indices.length > 0) {
-    if (averageChange > 1.2) {
-      weatherEmoji = '🔥';
-      weatherText = '烈日狂飙 / 极度看涨 📈';
-      weatherBg = 'bg-rose-50 border-rose-100 text-rose-700';
-    } else if (averageChange > 0) {
-      weatherEmoji = '☀️';
-      weatherText = '温和晴朗 / 科技吸金 📈';
-      weatherBg = 'bg-amber-50 border-amber-100 text-amber-700';
-    } else if (averageChange > -0.5) {
-      weatherEmoji = '⛅';
-      weatherText = '多云转阴 / 区间震荡 ⚖️';
-      weatherBg = 'bg-slate-100 border-slate-200 text-slate-700';
-    } else {
-      weatherEmoji = '🌧️';
-      weatherText = '暴风雨临 / 避险防御 📉';
-      weatherBg = 'bg-indigo-50 border-indigo-100 text-indigo-700';
-    }
-  }
-
-  const sentimentBase = morningReport.sentiment === '乐观' ? 72 : morningReport.sentiment === '中性' ? 50 : 28;
-  const sentimentAdjust = Math.round(averageChange * 3);
-  const sentimentTemp = indices.length > 0
-    ? Math.round(Math.min(90, Math.max(10, sentimentBase + sentimentAdjust)))
-    : 0;
-  const sentimentLabel =
-    dataError ? '数据异常'
-    : morningReport.sentiment === '乐观' ? '情绪偏多'
-    : morningReport.sentiment === '中性' ? '多空平衡'
-    : '情绪偏空';
-  const sentimentDesc =
-    dataError ? '行情数据获取失败'
-    : morningReport.sentiment === '乐观'
-      ? (sentimentTemp >= 80 ? '极度贪婪' : sentimentTemp >= 65 ? '中度看涨' : '温和偏多')
-      : morningReport.sentiment === '中性'
-      ? '方向不明'
-      : (sentimentTemp <= 15 ? '极度恐慌' : sentimentTemp <= 30 ? '明显偏空' : '谨慎偏空');
+  const turnoverText = (() => {
+    const amount = marketOverview?.marketTemperature?.components.turnover.amount || marketOverview?.totalVolume || 0;
+    if (!amount) return '成交额待更新';
+    if (amount >= 1_000_000_000_000) return `成交额 ${(amount / 1_000_000_000_000).toFixed(2)}万亿`;
+    return `成交额 ${Math.round(amount / 100_000_000)}亿`;
+  })();
 
   // 今日一句话成长金句
   const [growthQuote, setGrowthQuote] = useState('');
@@ -289,10 +278,8 @@ export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStoc
     '今天的投资思维：今天的学习，是为了明天更从容地面对市场波动。',
   ];
 
-  // 小白/专业模式切换
-  const [isBeginnerMode, setIsBeginnerMode] = useState(true);
-  // 因果链展开/收起状态
-  const [expandedChains, setExpandedChains] = useState<Set<number>>(new Set());
+  const [expandedStories, setExpandedStories] = useState<Set<string>>(new Set());
+  const [storyMode, setStoryMode] = useState<'beginner' | 'professional'>('beginner');
 
   // 反馈状态
   const [feedbackTarget, setFeedbackTarget] = useState<{
@@ -300,22 +287,23 @@ export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStoc
     contentId: string;
     promptVersion: string;
   } | null>(null);
-  const [thumbsFeedback, setThumbsFeedback] = useState<Record<number, 'up' | 'down' | null>>({});
+  const [thumbsFeedback, setThumbsFeedback] = useState<Record<string, 'up' | 'down' | null>>({});
 
-  const handleThumbsUp = (index: number, theme: any) => {
-    // 如果已经点赞，取消点赞
-    if (thumbsFeedback[index] === 'up') {
-      setThumbsFeedback(prev => ({ ...prev, [index]: null }));
+  const handleThumbsUp = (story: MarketStory) => {
+    const feedbackKey = `${storyMode}:${story.storyId}`;
+    if (thumbsFeedback[feedbackKey] === 'up') {
+      setThumbsFeedback(prev => ({ ...prev, [feedbackKey]: null }));
     } else {
-      setThumbsFeedback(prev => ({ ...prev, [index]: 'up' }));
-      // 发送点赞到后端，带上 promptVersion
+      setThumbsFeedback(prev => ({ ...prev, [feedbackKey]: 'up' }));
       fetch('/api/feedback', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          contentType: 'morning_report_theme',
-          contentId: theme.title,
-          promptVersion: morningReport.promptVersion || 'v2-p2A',
+          contentType: `market_story_${storyMode}`,
+          contentId: story.storyId,
+          promptVersion: storyMode === 'beginner'
+            ? morningReport.promptVersions?.beginner || 'p3a-beginner-v1'
+            : morningReport.promptVersions?.professional || 'p3b-professional-v1',
           rating: 'positive',
           reasons: [],
           comment: '',
@@ -325,41 +313,48 @@ export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStoc
     }
   };
 
-  const handleThumbsDown = (index: number, theme: any) => {
-    // 如果已经点踩，取消
-    if (thumbsFeedback[index] === 'down') {
-      setThumbsFeedback(prev => ({ ...prev, [index]: null }));
+  const handleThumbsDown = (story: MarketStory) => {
+    const feedbackKey = `${storyMode}:${story.storyId}`;
+    if (thumbsFeedback[feedbackKey] === 'down') {
+      setThumbsFeedback(prev => ({ ...prev, [feedbackKey]: null }));
     } else {
-      setThumbsFeedback(prev => ({ ...prev, [index]: 'down' }));
-      // 打开反馈弹窗
+      setThumbsFeedback(prev => ({ ...prev, [feedbackKey]: 'down' }));
       setFeedbackTarget({
-        contentType: 'morning_report_theme',
-        contentId: theme.title,
-        promptVersion: morningReport.promptVersion || 'v2-p2A',
+        contentType: `market_story_${storyMode}`,
+        contentId: story.storyId,
+        promptVersion: storyMode === 'beginner'
+          ? morningReport.promptVersions?.beginner || 'p3a-beginner-v1'
+          : morningReport.promptVersions?.professional || 'p3b-professional-v1',
       });
     }
   };
 
-  const toggleChain = (index: number) => {
-    setExpandedChains(prev => {
+  const toggleStory = (storyId: string) => {
+    setExpandedStories(prev => {
       const next = new Set(prev);
-      if (next.has(index)) next.delete(index);
-      else next.add(index);
+      if (next.has(storyId)) next.delete(storyId);
+      else next.add(storyId);
       return next;
     });
   };
 
-  const TYPE_ICONS: Record<string, string> = {
-    'sector_driver': '⚡',
-    'geo_event': '🌍',
-    'policy_driver': '🏛️',
-    'macro_event': '📊',
-  };
   const TYPE_LABELS: Record<string, string> = {
     'sector_driver': '市场热点',
     'geo_event': '地缘事件',
     'policy_driver': '政策驱动',
     'macro_event': '宏观事件',
+  };
+
+  const confidenceText = (story: MarketStory): string | null => {
+    if (story.reasoning.confidenceLevel === 'high') return '证据较充分';
+    if (story.reasoning.confidenceLevel === 'medium') return '存在合理依据';
+    return null;
+  };
+
+  const visibleReasoningSteps = (story: MarketStory) => {
+    const steps = story.reasoning?.steps || [];
+    const withoutRepeatedOpening = steps.filter((step, index) => !(index === 0 && step.kind === 'fact'));
+    return withoutRepeatedOpening.length > 0 ? withoutRepeatedOpening : steps;
   };
 
   // 初始化金句
@@ -591,7 +586,7 @@ export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStoc
         <div id="sentiment-indicator-area" className="space-y-2 pt-1">
           <div className="flex justify-between text-[11px] font-bold text-gray-500">
             <span className="flex items-center gap-1">
-              情绪状态：<span className="text-indigo-600">{morningReport.loading ? '加载中...' : `${cachedWeather.label} (${cachedWeather.desc})`}</span>
+              市场温度：<span className="text-indigo-600">{marketOverview?.marketTemperature ? `${cachedWeather.label}（${cachedWeather.desc}）` : '加载中...'}</span>
             </span>
             <span className="text-indigo-600 font-mono">{cachedWeather.temp}℃ / 100℃</span>
           </div>
@@ -600,15 +595,50 @@ export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStoc
             <motion.div
               className="absolute top-0 bottom-0 w-1.5 bg-white shadow-md border border-slate-300 rounded-full"
               style={{ left: `${cachedWeather.temp}%` }}
-              animate={{ scaleY: [1, 1.2, 1] }}
-              transition={{ repeat: Infinity, duration: 2 }}
             ></motion.div>
           </div>
           <div className="flex justify-between text-[9px] text-gray-400 font-semibold px-0.5">
-            <span>极度恐慌 (10℃)</span>
+            <span>市场偏冷 (0℃)</span>
             <span>多空平衡 (50℃)</span>
-            <span>极度贪婪 (90℃)</span>
+            <span>市场活跃 (100℃)</span>
           </div>
+          {marketOverview?.marketTemperature && (
+            <div className="grid grid-cols-2 gap-2 pt-1">
+              <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2">
+                <div className="text-[9px] font-semibold text-slate-400">板块广度</div>
+                <div className="mt-0.5 text-[11px] font-bold text-slate-700">
+                  {marketOverview.marketTemperature.components.breadth.total > 0 ? (
+                    <>
+                      <span className="text-red-600">{marketOverview.marketTemperature.components.breadth.up} 个上涨</span>
+                      <span className="mx-1 text-slate-300">/</span>
+                      <span className="text-emerald-600">{marketOverview.marketTemperature.components.breadth.down} 个下跌</span>
+                    </>
+                  ) : (
+                    <span className="text-slate-500">板块数据待更新</span>
+                  )}
+                </div>
+              </div>
+              <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2">
+                <div className="text-[9px] font-semibold text-slate-400">市场成交</div>
+                <div className="mt-0.5 text-[11px] font-bold text-slate-700">{turnoverText}</div>
+              </div>
+            </div>
+          )}
+          {marketOverview?.marketTemperature && (
+            <div className="flex items-center justify-between text-[9px] text-slate-400">
+              <span>方向分 {marketOverview.marketTemperature.directionScore.toFixed(1)}</span>
+              <span>
+                确认修正 {marketOverview.marketTemperature.correction >= 0 ? '+' : ''}
+                {marketOverview.marketTemperature.correction.toFixed(1)}
+                <span className="ml-1 text-slate-300">（范围 ±15）</span>
+              </span>
+            </div>
+          )}
+          {marketOverview?.marketTemperature?.components.turnover.ratio === null && (
+            <p className="text-[9px] leading-4 text-slate-400">
+              {marketOverview.marketTemperature.components.turnover.status}；不会影响方向判断。
+            </p>
+          )}
         </div>
 
         {/* 3. 今日热点主题 */}
@@ -640,175 +670,282 @@ export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStoc
         </div>
       </div>
 
-      {/* 中间区域: 今天发生了什么 */}
-      <div id="what-happened-section" className="space-y-3 px-4">
-        <h3 id="events-heading" className="text-base font-bold text-gray-950 flex items-center gap-2">
-          <Activity className="w-4.5 h-4.5 text-indigo-600" />
-          今天发生了什么
-        </h3>
-
-        {/* 小白/专业切换按钮 */}
-        <div className="flex items-center justify-between gap-2 mb-1">
-          <div className="flex items-center bg-slate-100 rounded-full p-0.5 text-[10px] font-semibold">
-            <button
-              onClick={() => setIsBeginnerMode(true)}
-              className={`px-3 py-1 rounded-full transition-all ${isBeginnerMode ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
-            >
-              🔰 小白模式
-            </button>
-            <button
-              onClick={() => setIsBeginnerMode(false)}
-              className={`px-3 py-1 rounded-full transition-all ${!isBeginnerMode ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
-            >
-              📊 专业模式
-            </button>
+      <section id="what-happened-section" className="px-4 space-y-3 scroll-mt-4">
+        <div className="flex items-center justify-between gap-3">
+          <h3 id="events-heading" className="text-base font-bold text-slate-950 flex items-center gap-2">
+            <Activity className="w-4 h-4 text-indigo-600" />
+            今天发生了什么
+          </h3>
+          <div className="flex items-center rounded-xl bg-slate-100 p-1" role="group" aria-label="故事阅读模式">
+            {([
+              ['beginner', '小白模式'],
+              ['professional', '专业模式'],
+            ] as const).map(([mode, label]) => (
+              <button
+                key={mode}
+                type="button"
+                aria-pressed={storyMode === mode}
+                onClick={() => {
+                  setStoryMode(mode);
+                  setExpandedStories(new Set());
+                }}
+                className={`px-2.5 py-1.5 rounded-lg text-[10px] font-bold transition-colors ${
+                  storyMode === mode
+                    ? 'bg-white text-indigo-700 shadow-sm'
+                    : 'text-slate-500 hover:text-slate-700'
+                }`}
+              >
+                {label}
+              </button>
+            ))}
           </div>
         </div>
+        <p className="text-[10px] leading-4 text-slate-500">
+          {storyMode === 'beginner'
+            ? '用一屏看懂事件和最短逻辑'
+            : '查看数据验证、多因素驱动和反向条件'}
+        </p>
 
-        {/* 3 Cards representation of Key Events / Market Stories */}
-        <div id="notion-events-list" className="space-y-3">
-          {morningReport.top3Themes.length > 0 ? morningReport.top3Themes
-            .filter((theme) => {
-              const score = theme.chain?.confidenceScore;
-              return score === undefined || score >= 10;
-            })
-            .map((theme, i) => {
-            const confidenceScore = theme.chain?.confidenceScore;
-            const scoreColor = confidenceScore >= 80 ? 'bg-emerald-500' : confidenceScore >= 60 ? 'bg-amber-500' : 'bg-slate-300';
-            const typeIcon = (theme as any).type ? TYPE_ICONS[(theme as any).type] || '📌' : '📌';
-            const typeLabel = (theme as any).type ? TYPE_LABELS[(theme as any).type] || '市场事件' : '市场事件';
-            return (
-              <div key={i} className="bg-white border border-slate-100 rounded-3xl p-4 space-y-3 shadow-sm hover:border-indigo-100 transition-all">
-                {/* 事件类型标签 + 标题 */}
-                <div className="flex items-center gap-2">
-                  <span className="text-sm">{typeIcon}</span>
-                  <span className="text-[9px] font-bold text-gray-400 bg-gray-50 px-1.5 py-0.5 rounded-md">{typeLabel}</span>
-                </div>
-                <h4 className="text-xs font-bold text-gray-950">
-                  {theme.title}
-                </h4>
-                <div className="bg-indigo-50/30 rounded-xl p-3 border border-indigo-100/20 text-[11px] text-slate-700 leading-relaxed flex gap-2">
-                  <span className="text-sm">🤖</span>
-                  <div>
-                    <span className="font-bold text-indigo-950">泡泡解读：</span>
-                    “{theme.evidence}”
-                  </div>
-                </div>
-
-                {/* 因果链 - 展开/收起 */}
-                {theme.chain && confidenceScore !== undefined && confidenceScore >= 20 && (
-                  <>
-                    <button
-                      onClick={() => toggleChain(i)}
-                      className="w-full flex items-center justify-between bg-amber-50/40 rounded-xl px-3 py-2 border border-amber-100/30 text-[11px] text-amber-800 font-bold"
-                    >
-                      <span className="flex items-center gap-1">
-                        <span>🔗</span>
-                        因果链
-                        <span className="text-[9px] text-amber-500 font-mono font-normal ml-1">置信度 {confidenceScore}%</span>
-                      </span>
-                      <span className="text-amber-500">{expandedChains.has(i) ? '收起 ▲' : '展开 ▼'}</span>
-                    </button>
-
-                    {expandedChains.has(i) && (
-                      <div className="bg-amber-50/40 rounded-xl p-3 border border-amber-100/30 text-[11px] text-slate-700 leading-relaxed space-y-2">
-                        {/* 置信度进度条 */}
-                        <div className="flex items-center gap-1.5 mb-2">
-                          <div className="w-full h-1.5 bg-slate-200 rounded-full overflow-hidden">
-                            <div
-                              className={`h-full rounded-full ${scoreColor}`}
-                              style={{ width: `${confidenceScore}%` }}
-                            ></div>
-                          </div>
-                        </div>
-
-                        {/* 箭头式因果链 - 根据模式切换 */}
-                        <div className="flex flex-col items-center py-1">
-                          {(() => {
-                            // 小白版优先使用 chainSteps_beginner，否则用 chainSteps_pro，最后用旧数据
-                            const steps = isBeginnerMode
-                              ? (theme.chain.chainSteps_beginner || theme.chain.chainSteps_pro || theme.chain.chainSteps || null)
-                              : (theme.chain.chainSteps_pro || theme.chain.chainSteps_beginner || theme.chain.chainSteps || null);
-                            if (steps && steps.length > 0) {
-                              return steps.map((step: any, si: number) => (
-                                <div key={si} className="flex flex-col items-center w-full">
-                                  <div className="flex items-center justify-between w-full bg-white/60 rounded-xl px-3 py-2 border border-amber-200/40">
-                                    <span className="text-[11px] font-medium text-slate-800">{step.step}</span>
-                                  </div>
-                                  {si < steps.length - 1 && (
-                                    <div className="flex flex-col items-center my-0.5">
-                                      <span className="text-amber-400 text-[10px]">↓</span>
-                                    </div>
-                                  )}
-                                </div>
-                              ));
-                            }
-                            // 旧数据降级
-                            const oldSteps = [
-                              { step: theme.chain.event, impact: 3 },
-                              { step: theme.chain.reason, impact: 3 }
-                            ].filter(s => s.step);
-                            return oldSteps.map((step: any, si: number) => (
-                              <div key={si} className="flex flex-col items-center w-full">
-                                <div className="flex items-center justify-between w-full bg-white/60 rounded-xl px-3 py-2 border border-amber-200/40">
-                                  <span className="text-[11px] font-medium text-slate-800">{step.step}</span>
-                                </div>
-                                {si < oldSteps.length - 1 && (
-                                  <div className="flex flex-col items-center my-0.5">
-                                    <span className="text-amber-400 text-[10px]">↓</span>
-                                  </div>
-                                )}
-                              </div>
-                            ));
-                          })()}
-                        </div>
-
-                        {/* 泡泡提醒（不确定性） */}
-                        {theme.chain.uncertainty && (
-                          <div className="flex items-start gap-1.5 mt-1 pt-2 border-t border-amber-200/30">
-                            <span className="text-[10px]">💭</span>
-                            <span className="text-[10px] text-amber-700 font-medium leading-relaxed">{theme.chain.uncertainty}</span>
-                          </div>
-                        )}
-                      </div>
-                    )}
-                  </>
+        {morningReport.stories.length > 0 ? morningReport.stories.map((story) => {
+          const expanded = expandedStories.has(story.storyId);
+          const reasoningSteps = storyMode === 'beginner' && story.teacher.simpleChain?.length
+            ? story.teacher.simpleChain.map((text, index) => ({
+                id: `simple-${index + 1}`,
+                text,
+                kind: 'knowledge' as const,
+                evidenceIds: [],
+              }))
+            : visibleReasoningSteps(story);
+          const confidence = confidenceText(story);
+          const professional = story.professional;
+          const feedbackKey = `${storyMode}:${story.storyId}`;
+          const driverLabels = {
+            primary: '主驱动',
+            secondary: '次驱动',
+            diffusion: '扩散逻辑',
+          };
+          return (
+            <article key={story.storyId} className="bg-white rounded-2xl border border-slate-100 p-4 shadow-sm space-y-3">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[9px] font-bold text-indigo-700 bg-indigo-50 px-2 py-1 rounded-full">
+                  {TYPE_LABELS[story.type] || '市场事件'}
+                </span>
+                {storyMode === 'beginner' && confidence && (
+                  <span className="text-[9px] text-slate-500 flex items-center gap-1">
+                    <ShieldCheck className="w-3 h-3" />
+                    {confidence}
+                  </span>
                 )}
-
-                {/* 点赞/点踩反馈按钮 */}
-                <div className="flex items-center justify-end gap-1.5 pt-1 border-t border-slate-50">
-                  <button
-                    onClick={() => handleThumbsUp(i, theme)}
-                    className={`flex items-center gap-1 px-2 py-1 rounded-lg text-[10px] font-medium transition-all ${
-                      thumbsFeedback[i] === 'up'
-                        ? 'bg-indigo-50 text-indigo-600 border border-indigo-200'
-                        : 'text-gray-400 hover:text-indigo-500 hover:bg-gray-50'
-                    }`}
-                  >
-                    <ThumbsUp className={`w-3 h-3 ${thumbsFeedback[i] === 'up' ? 'fill-indigo-500' : ''}`} />
-                    有用
-                  </button>
-                  <button
-                    onClick={() => handleThumbsDown(i, theme)}
-                    className={`flex items-center gap-1 px-2 py-1 rounded-lg text-[10px] font-medium transition-all ${
-                      thumbsFeedback[i] === 'down'
-                        ? 'bg-rose-50 text-rose-600 border border-rose-200'
-                        : 'text-gray-400 hover:text-rose-500 hover:bg-gray-50'
-                    }`}
-                  >
-                    <ThumbsDown className={`w-3 h-3 ${thumbsFeedback[i] === 'down' ? 'fill-rose-500' : ''}`} />
-                    改进
-                  </button>
-                </div>
+                {storyMode === 'professional' && (
+                  <span className="text-[9px] text-slate-600 flex items-center gap-1">
+                    <ShieldCheck className="w-3 h-3 text-indigo-500" />
+                    证据评分 {professional.confidence.score}/100
+                  </span>
+                )}
               </div>
-            );
-          }) : (
-            <div className="text-center text-gray-400 text-xs py-6">
-              {morningReport.loading ? 'AI 正在分析今日热点...' : '暂无可用的热点数据'}
-            </div>
-          )}
-        </div>
-      </div>
+
+              <div>
+                <h4 className="text-sm font-bold text-slate-950">{story.title}</h4>
+                {story.metrics.length > 0 && (
+                  <div className="mt-2">
+                    {storyMode === 'professional' && (
+                      <p className="text-[9px] font-bold text-slate-400 mb-1.5">行情与数据验证</p>
+                    )}
+                    <div className="flex flex-wrap gap-1.5">
+                    {story.metrics.map((metric) => (
+                      <span key={`${metric.label}-${metric.value}`} className="text-[10px] font-semibold bg-slate-50 text-slate-600 px-2 py-1 rounded-lg">
+                        {metric.label}：{metric.value}
+                      </span>
+                    ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {storyMode === 'beginner' ? (
+                <div className="flex gap-2 bg-indigo-50/60 rounded-2xl p-3 border border-indigo-100/70">
+                  <BubbleAvatar size="sm" />
+                  <p className="text-xs leading-5 text-slate-700">
+                    <strong className="text-indigo-800">泡泡解读：</strong>
+                    {story.teacher.summary}
+                  </p>
+                </div>
+              ) : (
+                <>
+                  <div className="rounded-xl bg-indigo-50/60 p-3">
+                    <p className="text-[9px] font-bold text-indigo-500 mb-1">事件结论</p>
+                    <p className="text-xs leading-5 font-medium text-slate-800">{professional.conclusion}</p>
+                  </div>
+                  {professional.drivers.length > 0 && (
+                    <div className="space-y-2">
+                      <p className="text-[9px] font-bold text-slate-400">核心驱动因素</p>
+                      {professional.drivers.map((driver, index) => (
+                        <div key={`${driver.role}-${index}`} className="flex items-start gap-2">
+                          <span className={`mt-0.5 shrink-0 rounded-md px-1.5 py-0.5 text-[9px] font-bold ${
+                            driver.role === 'primary'
+                              ? 'bg-indigo-100 text-indigo-700'
+                              : driver.role === 'secondary'
+                                ? 'bg-sky-100 text-sky-700'
+                                : 'bg-violet-100 text-violet-700'
+                          }`}>
+                            {driverLabels[driver.role]}
+                          </span>
+                          <div className="min-w-0">
+                            <p className="text-[11px] font-bold text-slate-800">{driver.title}</p>
+                            <p className="text-[10px] leading-4 text-slate-600 mt-0.5">{driver.explanation}</p>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </>
+              )}
+
+              {reasoningSteps.length > 0 && (
+                <div>
+                  <button
+                    type="button"
+                    onClick={() => toggleStory(story.storyId)}
+                    aria-expanded={expanded}
+                    className="w-full flex items-center justify-between text-[11px] font-bold text-slate-700 bg-slate-50 px-3 py-2.5 rounded-xl"
+                  >
+                    <span>{storyMode === 'beginner' ? '为什么会这样？' : '查看完整逻辑'}</span>
+                    <ChevronDown className={`w-4 h-4 transition-transform ${expanded ? 'rotate-180' : ''}`} />
+                  </button>
+                  {expanded && (
+                    <div className="mt-2 rounded-2xl bg-slate-50 border border-slate-100 p-3 space-y-3">
+                      {storyMode === 'professional' && (
+                        <p className="text-[9px] font-bold text-slate-400">完整因果链</p>
+                      )}
+                      {reasoningSteps.map((step, index) => (
+                        <div key={step.id} className="flex gap-2">
+                          <div className="flex flex-col items-center">
+                            <span className="w-5 h-5 rounded-full bg-white border border-indigo-200 text-[9px] font-bold text-indigo-700 flex items-center justify-center">
+                              {index + 1}
+                            </span>
+                            {index < reasoningSteps.length - 1 && <span className="w-px h-5 bg-indigo-200" />}
+                          </div>
+                          <div className="min-w-0 flex-1 pb-2">
+                            <p className="text-[11px] leading-5 text-slate-700">{step.text}</p>
+                            {storyMode === 'professional' && (
+                              <span className="text-[9px] text-slate-400">
+                                {step.kind === 'fact' ? '已确认事实' : step.kind === 'knowledge' ? '金融常识' : '合理推断'}
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                      ))}
+                      {storyMode === 'beginner' && (story.teacher.uncertaintyText || story.reasoning.uncertainty) && (
+                        <p className="text-[10px] leading-4 text-amber-800 border-t border-amber-200/60 pt-2">
+                          💭 {story.teacher.uncertaintyText || story.reasoning.uncertainty}
+                        </p>
+                      )}
+                      {storyMode === 'professional' && (
+                        <>
+                          <div className="border-t border-slate-200 pt-3 space-y-2">
+                            <div>
+                              <p className="text-[9px] font-bold text-emerald-700">支持证据</p>
+                              <ul className="mt-1 space-y-1">
+                                {professional.supportingEvidence.length > 0
+                                  ? professional.supportingEvidence.map((item) => <li key={item} className="text-[10px] leading-4 text-slate-600">• {item}</li>)
+                                  : <li className="text-[10px] text-slate-500">当前仅有行情事实，暂无额外支持证据。</li>}
+                              </ul>
+                            </div>
+                            <div>
+                              <p className="text-[9px] font-bold text-amber-700">证据缺口</p>
+                              <ul className="mt-1 space-y-1">
+                                {(professional.evidenceGaps.length > 0 ? professional.evidenceGaps : [story.reasoning.uncertainty])
+                                  .filter(Boolean)
+                                  .map((item) => <li key={item} className="text-[10px] leading-4 text-slate-600">• {item}</li>)}
+                              </ul>
+                            </div>
+                          </div>
+                          <div className="rounded-xl bg-white p-3 border border-slate-200">
+                            <div className="flex items-center justify-between gap-2">
+                              <p className="text-[10px] font-bold text-slate-800">证据评分 {professional.confidence.score}/100</p>
+                              <span className="text-[9px] text-slate-500">
+                                {professional.confidence.level === 'high' ? '较充分' : professional.confidence.level === 'medium' ? '中等' : '有限'}
+                              </span>
+                            </div>
+                            <div className="h-1.5 bg-slate-100 rounded-full overflow-hidden mt-2">
+                              <div className="h-full bg-indigo-500 rounded-full" style={{ width: `${professional.confidence.score}%` }} />
+                            </div>
+                            <p className="text-[10px] leading-4 text-slate-600 mt-2">{professional.confidence.explanation}</p>
+                          </div>
+                          {professional.alternativeExplanations.length > 0 && (
+                            <div>
+                              <p className="text-[9px] font-bold text-slate-700">替代解释</p>
+                              {professional.alternativeExplanations.map((item) => <p key={item} className="text-[10px] leading-4 text-slate-600 mt-1">• {item}</p>)}
+                            </div>
+                          )}
+                          {professional.counterLogic.length > 0 && (
+                            <div>
+                              <p className="text-[9px] font-bold text-rose-700">反向逻辑</p>
+                              {professional.counterLogic.map((item) => <p key={item} className="text-[10px] leading-4 text-slate-600 mt-1">• {item}</p>)}
+                            </div>
+                          )}
+                          {professional.observationIndicators.length > 0 && (
+                            <div>
+                              <p className="text-[9px] font-bold text-indigo-700">后续观察</p>
+                              <div className="flex flex-wrap gap-1.5 mt-1.5">
+                                {professional.observationIndicators.map((item) => (
+                                  <span key={item} className="text-[9px] leading-4 bg-white border border-slate-200 text-slate-600 px-2 py-1 rounded-lg">{item}</span>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                        </>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {story.evidence.length > 0 && (
+                <div className="text-[9px] text-slate-400 flex flex-wrap items-center gap-1">
+                  <span>来源：</span>
+                  {story.evidence.slice(0, 3).map((source) => source.url?.startsWith('http') ? (
+                    <a key={source.id} href={source.url} target="_blank" rel="noreferrer" className="underline hover:text-indigo-600">
+                      {source.sourceName}
+                    </a>
+                  ) : <span key={source.id}>{source.sourceName}</span>)}
+                </div>
+              )}
+
+              <div className="flex items-center justify-end gap-1.5 pt-1 border-t border-slate-50">
+                <button
+                  type="button"
+                  onClick={() => handleThumbsUp(story)}
+                  className={`flex items-center gap-1 px-2 py-1 rounded-lg text-[10px] font-medium transition-all ${
+                    thumbsFeedback[feedbackKey] === 'up'
+                      ? 'bg-indigo-50 text-indigo-600 border border-indigo-200'
+                      : 'text-gray-400 hover:text-indigo-500 hover:bg-gray-50'
+                  }`}
+                >
+                  <ThumbsUp className={`w-3 h-3 ${thumbsFeedback[feedbackKey] === 'up' ? 'fill-indigo-500' : ''}`} />
+                  有用
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleThumbsDown(story)}
+                  className={`flex items-center gap-1 px-2 py-1 rounded-lg text-[10px] font-medium transition-all ${
+                    thumbsFeedback[feedbackKey] === 'down'
+                      ? 'bg-rose-50 text-rose-600 border border-rose-200'
+                      : 'text-gray-400 hover:text-rose-500 hover:bg-gray-50'
+                  }`}
+                >
+                  <ThumbsDown className={`w-3 h-3 ${thumbsFeedback[feedbackKey] === 'down' ? 'fill-rose-500' : ''}`} />
+                  改进
+                </button>
+              </div>
+            </article>
+          );
+        }) : (
+          <div className="text-center text-gray-400 text-xs py-6">
+            {morningReport.loading ? 'AI 正在分析今日热点...' : '暂无可用的热点数据'}
+          </div>
+        )}
+      </section>
 
       {/* 下方区域: 市场地图入口 */}
       <div id="market-map-entrance-section" className="space-y-3 px-4">
@@ -1001,12 +1138,10 @@ export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStoc
           contentId={feedbackTarget.contentId}
           promptVersion={feedbackTarget.promptVersion}
           onClose={() => {
+            const storyId = feedbackTarget.contentId;
+            const mode = feedbackTarget.contentType.endsWith('professional') ? 'professional' : 'beginner';
             setFeedbackTarget(null);
-            // 点踩弹窗关闭后清除点踩状态
-            const idx = morningReport.top3Themes.findIndex(t => t.title === feedbackTarget.contentId);
-            if (idx >= 0) {
-              setThumbsFeedback(prev => ({ ...prev, [idx]: null }));
-            }
+            setThumbsFeedback(prev => ({ ...prev, [`${mode}:${storyId}`]: null }));
           }}
         />
       )}
@@ -1061,19 +1196,19 @@ export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStoc
                   </div>
                 ) : (
                   <div className="space-y-3 pt-1">
-                    {morningReport.top3Themes.length > 0 ? morningReport.top3Themes.map((theme, i) => (
-                      <div key={i} className="bg-slate-50 border border-slate-100 rounded-2xl p-4 space-y-1.5">
+                    {morningReport.stories.length > 0 ? morningReport.stories.map((story, i) => (
+                      <div key={story.storyId} className="bg-slate-50 border border-slate-100 rounded-2xl p-4 space-y-1.5">
                         <div className="flex justify-between items-center">
                           <span className="text-[10px] font-bold text-indigo-600 bg-indigo-50 px-2 py-0.5 rounded-md">
                             {i === 0 ? '核心催化' : i === 1 ? '资金风向' : '流动性保障'}
                           </span>
                         </div>
-                        <p className="text-xs font-bold text-gray-900">{theme.title}</p>
+                        <p className="text-xs font-bold text-gray-900">{story.title}</p>
                         <p className="text-[11px] text-slate-600 leading-relaxed font-medium">
-                          {theme.evidence}
-                          {theme.chain && (
+                          {story.teacher.summary}
+                          {story.reasoning.steps.length > 0 && (
                             <span className="block mt-1 text-indigo-600 font-medium">
-                              因果链: {theme.chain.event} → {theme.chain.reason}
+                              因果链：{story.reasoning.steps.map(step => step.text).join(' → ')}
                             </span>
                           )}
                         </p>
