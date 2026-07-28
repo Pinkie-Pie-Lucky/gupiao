@@ -115,6 +115,12 @@ export function SectorDetailPanel({ sectorId, sectorName, onClose, onAskTeacher,
             )) : <p className="text-[10px] text-slate-400 text-center py-2">暂无内部细分数据</p>}
           </Card>
 
+          {(data.relatedChain||[]).length > 0 ? <Card label="产业链图谱" icon={<ArrowUpRight className="w-3.5 h-3.5 text-cyan-600"/>} ibg="bg-cyan-50" id="chain">
+            <div className="space-y-1.5">
+              {(data.relatedChain||[]).map(function(step,i){return <div key={i} className="flex items-center gap-2 text-[10px]"><span className="w-5 h-5 rounded-full bg-cyan-100 text-cyan-700 flex items-center justify-center font-bold text-[9px]">{i+1}</span><button onClick={function(){onAskTeacher?.(step+'板块分析','看一下'+step+'板块现在是什么情况？')}} className="text-cyan-700 hover:text-cyan-900 hover:underline font-medium cursor-pointer">{step}</button></div>;})}
+            </div>
+          </Card> : null}
+
           <Card label="今日领涨公司" icon={<Activity className="w-3.5 h-3.5 text-emerald-600"/>} ibg="bg-emerald-50" id="stocks">
             {(data.leadingStocks||[]).length > 0 ? (
               <div className="space-y-2">

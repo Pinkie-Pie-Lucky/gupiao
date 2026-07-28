@@ -3,195 +3,203 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useState, useEffect } from 'react';
+import { useEffect, useMemo, useState } from 'react';
+import {
+  Activity,
+  AlertTriangle,
+  ArrowUpRight,
+  Compass,
+  Heart,
+  Layers3,
+  MessageCircle,
+  Search,
+  Sparkles,
+} from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Search, TrendingUp, TrendingDown, Eye, MessageSquare, PieChart, Activity, Briefcase, ChevronRight, AlertTriangle } from 'lucide-react';
-import { StockSector, StockItem } from '../types';
-import { InteractiveChart } from './InteractiveChart';
-
-interface RawSector {
-  id: string;
-  name: string;
-  changePercent: number;
-  description: string;
-}
+import { SectorIntelligence } from '../types';
+import { SectorDetailPanel } from './SectorDetailPanel';
 
 interface MarketMapTabProps {
   selectedSectorId: string | null;
   onSelectSectorId: (sectorId: string | null) => void;
   onNavigateToTab: (tabId: string) => void;
-  onAskTeacherAboutStock: (stockName: string, stockCode: string) => void;
+  onAskTeacherAboutSector: (sector: SectorIntelligence) => void;
 }
 
-export function MarketMapTab({
-  selectedSectorId,
-  onSelectSectorId,
-  onNavigateToTab,
-  onAskTeacherAboutStock,
-}: MarketMapTabProps) {
-  const [sectors, setSectors] = useState<RawSector[]>([]);
-  const [activeSector, setActiveSector] = useState<RawSector | null>(null);
+interface IntelligenceResponse {
+  sectors: SectorIntelligence[];
+  timestamp?: string;
+}
+
+type MapFilter = 'all' | 'featured' | 'anomaly' | 'followed';
+type CategoryScope = 'all' | 'industry' | 'concept';
+
+const tagStyles: Record<string, string> = {
+  今日主线: 'bg-violet-100 text-violet-700',
+  异动放量: 'bg-amber-100 text-amber-800',
+  新闻驱动: 'bg-sky-100 text-sky-700',
+  资金扩散: 'bg-cyan-100 text-cyan-800',
+  值得观察: 'bg-slate-100 text-slate-700',
+  与我有关: 'bg-rose-100 text-rose-700',
+};
+
+export function MarketMapTab({ selectedSectorId, onSelectSectorId, onNavigateToTab, onAskTeacherAboutSector }: MarketMapTabProps) {
+  const [sectors, setSectors] = useState<SectorIntelligence[]>([]);
+  const [activeSector, setActiveSector] = useState<SectorIntelligence | null>(null);
+  const [detailTarget, setDetailTarget] = useState<{ sectorId: string; sectorName: string } | null>(null);
   const [filterQuery, setFilterQuery] = useState('');
+  const [mapFilter, setMapFilter] = useState<MapFilter>('all');
+  const [categoryScope, setCategoryScope] = useState<CategoryScope>('all');
+  const [followedSectorIds, setFollowedSectorIds] = useState<string[]>([]);
   const [dataError, setDataError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [updatedAt, setUpdatedAt] = useState<string | null>(null);
+  const [marketSummary, setMarketSummary] = useState<{sentiment?:string; upSectors?:number; downSectors?:number; temperature?:number; temperatureLabel?:string; indices?:Array<{name:string;changePercent:number}>} | null>(null);
 
-  // v4: 直接从后端获取真实板块数据（修复React StrictMode双重执行导致cancelled提前问题）
+  // Fetch market overview
   useEffect(() => {
-    async function loadSectors() {
-      try {
-        const res = await fetch('/api/sectors?t=' + Date.now());
-        if (!res.ok) throw new Error('Sector API failed: ' + res.status);
-        const text = await res.text();
-        const data = JSON.parse(text);
-        if (data.sectors && data.sectors.length > 0) {
-          const mapped = data.sectors.map((s: any, i: number) => ({
-            id: s.id || `sector-${i}`,
-            name: s.name,
-            changePercent: s.changePercent,
-            description: '',
-          }));
-          setSectors(mapped);
-          setActiveSector(mapped[0]);
-        } else {
-          setDataError('暂无可用板块数据');
-        }
-      } catch (e: any) {
-        setDataError('板块实时数据获取失败');
-      } finally {
-        setLoading(false);
+    fetch('/api/market-overview').then(r=>r.json()).then(d=>{
+      if (d && !d.error) {
+        setMarketSummary({
+          indices: (d.indices||[]).slice(0,3),
+          upSectors: d.marketBreath?.up,
+          downSectors: d.marketBreath?.down,
+          temperature: d.marketTemperature?.score,
+          temperatureLabel: d.marketTemperature?.text,
+        });
       }
-    }
-    loadSectors();
+    }).catch(()=>{});
   }, []);
 
-  // Sync active sector when selectedSectorId changes from parent
   useEffect(() => {
-    if (selectedSectorId && sectors.length > 0) {
-      const match = sectors.find((s) => s.id === selectedSectorId);
-      if (match) setActiveSector(match);
+    let live = true;
+    async function load() {
+      try {
+        const r = await fetch(`/api/market-map/intelligence?t=${Date.now()}`);
+        if (!r.ok) throw new Error('fail');
+        const d = await r.json() as IntelligenceResponse;
+        if (!live) return;
+        const s = d.sectors || [];
+        setSectors(s);
+        setActiveSector(s.find(i => i.shouldHighlight) || s[0] || null);
+        setUpdatedAt(d.timestamp || null);
+        if (!s.length) setDataError('暂时没有可用于绘制市场地图的板块数据。');
+      } catch {
+        if (live) setDataError('市场地图暂时无法更新，请稍后刷新重试。');
+      } finally { if (live) setLoading(false); }
     }
-  }, [selectedSectorId, sectors]);
+    load();
+    return () => { live = false; };
+  }, []);
 
-  const filteredSectors = sectors.filter((s) =>
-    s.name.toLowerCase().includes(filterQuery.toLowerCase())
-  );
+  useEffect(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem('market-map-followed-sectors') || '[]');
+      if (Array.isArray(saved)) setFollowedSectorIds(saved.filter(i => typeof i === 'string'));
+    } catch {}
+  }, []);
 
-  if (loading) {
-    return (
-      <div id="market-map-tab-view" className="space-y-6 pb-24">
-        <div id="map-header" className="px-4 pt-2">
-          <h2 className="text-2xl font-bold text-gray-950 flex items-center gap-2">
-            <PieChart className="w-6 h-6 text-indigo-600" />
-            全景市场地图
-          </h2>
-        </div>
-        <div className="flex items-center justify-center py-20">
-          <div className="flex flex-col items-center gap-3">
-            <div className="w-8 h-8 border-2 border-indigo-600 border-t-transparent rounded-full animate-spin"></div>
-            <span className="text-xs text-gray-400">加载中...</span>
-          </div>
-        </div>
-      </div>
-    );
-  }
+  const selectSector = (sector: SectorIntelligence) => {
+    setActiveSector(sector);
+    onSelectSectorId(sector.sectorId);
+    setDetailTarget({ sectorId: sector.sectorId, sectorName: sector.sector });
+  };
+
+  const filterCounts = useMemo(() => ({
+    all: sectors.length,
+    featured: sectors.filter(s => s.shouldHighlight).length,
+    anomaly: sectors.filter(s => s.isAnomaly).length,
+    followed: followedSectorIds.length,
+  }), [sectors, followedSectorIds]);
+
+  const filteredSectors = useMemo(() => {
+    const q = filterQuery.trim().toLowerCase();
+    return sectors.filter(s => {
+      const pm = mapFilter === 'all' || (mapFilter === 'featured' && s.shouldHighlight) || (mapFilter === 'anomaly' && s.isAnomaly) || (mapFilter === 'followed' && followedSectorIds.includes(s.sectorId));
+      const cm = categoryScope === 'all' || s.category === categoryScope;
+      const qm = !q || s.sector.toLowerCase().includes(q);
+      return pm && cm && qm;
+    });
+  }, [sectors, filterQuery, mapFilter, categoryScope, followedSectorIds]);
+
+  const isUp = (pct: number) => pct >= 0;
 
   return (
-    <div id="market-map-tab-view" className="space-y-6 pb-24">
-      {/* Tab Title */}
-      <div id="map-header" className="px-4 pt-2">
-        <h2 id="map-title" className="text-2xl font-bold text-gray-950 flex items-center gap-2">
-          <PieChart className="w-6 h-6 text-indigo-600" />
-          全景市场地图
-        </h2>
-        <p id="map-subtitle" className="text-xs text-gray-400 mt-1">
-          东方财富实时板块行情
-          {sectors.length > 0 && (
-            <span className="text-emerald-500 ml-1">● {sectors.length} 个板块 · 真实数据</span>
-          )}
-        </p>
-        {dataError && (
-          <div className="flex items-center gap-1 mt-1 text-[10px] text-yellow-600 bg-yellow-50 px-2 py-1 rounded-lg">
-            <AlertTriangle className="w-3 h-3" />
-            <span>{dataError}</span>
+    <div className="space-y-4 px-3 pb-24 pt-3">
+      <header className="flex items-center gap-2 px-1">
+        <div className="grid h-8 w-8 place-items-center rounded-xl bg-indigo-600 text-white"><Compass className="h-4 w-4" /></div>
+        <h2 className="text-xl font-bold">A股市场地图</h2>
+        <span className="ml-auto rounded-full bg-indigo-50 px-2.5 py-1 text-[10px] font-semibold text-indigo-700">β</span>
+      </header>
+
+      {/* 市场概览卡片 */}
+      {marketSummary ? <div className="bg-gradient-to-r from-indigo-50 to-blue-50 rounded-2xl p-4 border border-indigo-100">
+        <div className="flex items-center gap-2 mb-2"><Sparkles className="w-4 h-4 text-indigo-600"/><span className="text-xs font-bold text-indigo-700">泡泡发现</span></div>
+        <div className="flex items-center justify-between">
+          <div className="flex gap-4 text-[11px]">
+            {(marketSummary.indices||[]).map(function(idx,i){return <div key={i}><span className="text-slate-500">{idx.name}</span><span className={'ml-1 font-bold '+(idx.changePercent>=0?'text-red-500':'text-emerald-500')}>{idx.changePercent>=0?'+':''}{idx.changePercent?.toFixed(2)}%</span></div>;})}
           </div>
-        )}
-      </div>
-
-      {/* Filter Sector Row */}
-      <div id="map-search-row" className="px-4">
-        <div className="relative">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 w-4.5 h-4.5" />
-          <input
-            id="map-filter-input"
-            type="text"
-            placeholder="搜索行业板块..."
-            value={filterQuery}
-            onChange={(e) => setFilterQuery(e.target.value)}
-            className="w-full bg-gray-50 text-gray-900 placeholder-gray-400 pl-10 pr-4 py-2 rounded-2xl border border-gray-200 focus:outline-none focus:border-indigo-500 focus:bg-white text-sm transition-all"
-          />
+          {marketSummary.temperature ? <div className="text-right"><span className="text-lg">{marketSummary.temperature>=60?'🔥':marketSummary.temperature>=40?'☀️':'🌧️'}</span><span className="text-[10px] text-slate-500 ml-1">{marketSummary.temperatureLabel||''}</span></div> : null}
         </div>
+        {marketSummary.upSectors!==undefined ? <div className="flex gap-2 mt-2 text-[10px]"><span className="text-green-600 font-medium">上涨 {marketSummary.upSectors} 板块</span><span className="text-slate-300">|</span><span className="text-red-500 font-medium">下跌 {marketSummary.downSectors} 板块</span></div> : null}
+      </div> : null}
+
+      {dataError && <div className="rounded-xl bg-amber-50 p-3 text-xs text-amber-800"><AlertTriangle className="inline w-3 h-3 mr-1"/>{dataError}</div>}
+
+      <div className="flex gap-2 overflow-x-auto pb-1">
+        {(['all','featured','anomaly','followed'] as MapFilter[]).map(o => (
+          <button key={o} onClick={() => setMapFilter(o)}
+            className={`shrink-0 rounded-full px-3 py-1.5 text-xs font-semibold transition ${mapFilter===o?'bg-indigo-600 text-white':'bg-slate-100 text-slate-600'}`}>
+            {o==='all'?'全部':o==='featured'?'泡泡精选':o==='anomaly'?'异动':'关注'} ({filterCounts[o]})
+          </button>
+        ))}
       </div>
 
-      {/* Grid of Sector Tags (Heatmap style) */}
-      <div id="sector-chips-carousel" className="px-4 flex gap-2 overflow-x-auto pb-1 no-scrollbar">
-        {filteredSectors.map((sector) => {
-          const isActive = activeSector?.id === sector.id;
-          const isUp = sector.changePercent >= 0;
-          return (
-            <button
-              key={sector.id}
-              onClick={() => {
-                setActiveSector(sector);
-                onSelectSectorId(sector.id);
-              }}
-              className={`flex-shrink-0 px-4 py-2.5 rounded-2xl text-xs font-bold transition-all flex items-center gap-1.5 border ${
-                isActive
-                  ? 'bg-indigo-600 text-white border-indigo-600 shadow-md shadow-indigo-600/15 scale-105'
-                  : 'bg-white text-gray-700 border-gray-100 hover:border-gray-300'
-              }`}
-            >
-              <span>{sector.name}</span>
-              <span className={`px-1.5 py-0.5 rounded-md text-[9px] font-mono ${
-                isActive 
-                  ? 'bg-white/20 text-white' 
-                  : isUp ? 'bg-red-50 text-red-600' : 'bg-emerald-50 text-emerald-600'
-              }`}>
-                {isUp ? '+' : ''}{sector.changePercent}%
-              </span>
+      <div className="relative">
+        <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400"/>
+        <input type="search" placeholder="搜索板块" value={filterQuery} onChange={e => setFilterQuery(e.target.value)}
+          className="w-full rounded-xl border border-slate-200 bg-white py-2.5 pl-9 pr-3 text-sm outline-none" />
+      </div>
+
+      {loading ? (
+        <div className="grid grid-cols-2 gap-2.5">{[0,1,2,3,4,5].map(i => <div key={i} className="h-28 animate-pulse rounded-2xl bg-slate-100"/>)}</div>
+      ) : (
+        <div className="grid grid-cols-2 gap-2.5">
+          {filteredSectors.map(s => (
+            <button key={s.sectorId} onClick={() => selectSector(s)}
+              className={`rounded-2xl border p-3 text-left transition min-h-[100px] ${isUp(s.changePercent)?'border-red-100 bg-red-50/80':'border-emerald-100 bg-emerald-50/80'} ${s.shouldHighlight?'col-span-2':''}`}>
+              <span className="text-sm font-bold">{s.sector}</span>
+              <div className={`mt-1 text-xl font-bold ${isUp(s.changePercent)?'text-red-600':'text-emerald-600'}`}>{s.change}</div>
+              <div className="mt-1 flex flex-wrap gap-1">
+              {s.signalTags.slice(0,2).map(t => (
+                <span key={t} className={`rounded-full px-1.5 py-0.5 text-[10px] font-semibold ${tagStyles[t]||'bg-slate-100'}`}>{t}</span>
+              ))}
+              {s.isAnomaly ? <span className="rounded-full px-1.5 py-0.5 text-[10px] font-semibold bg-amber-100 text-amber-700">⚡异动</span> : null}
+              </div>
             </button>
-          );
-        })}
-      </div>
-
-      {/* Active Sector Analysis Panel */}
-      {activeSector && (
-        <div id="active-sector-panel" className="mx-4 bg-white border border-gray-100 rounded-3xl p-5 shadow-sm space-y-4">
-          <div className="flex justify-between items-start">
-            <div>
-              <h3 id="active-sector-header-title" className="text-lg font-bold text-gray-950 flex items-center gap-2">
-                <Activity className="w-5 h-5 text-indigo-600" />
-                {activeSector.name}
-              </h3>
-              <p className="text-xs text-gray-400 mt-0.5">
-                板块涨跌幅：
-                <span className={`font-bold ml-1 ${activeSector.changePercent >= 0 ? 'text-red-500' : 'text-emerald-500'}`}>
-                  {activeSector.changePercent >= 0 ? '+' : ''}{activeSector.changePercent}%
-                </span>
-              </p>
-            </div>
-            <div className={`px-3 py-1.5 rounded-xl font-bold font-mono text-sm ${activeSector.changePercent >= 0 ? 'bg-red-50 text-red-600' : 'bg-emerald-50 text-emerald-600'}`}>
-              {activeSector.changePercent >= 0 ? '↑' : '↓'} {activeSector.changePercent}%
-            </div>
-          </div>
+          ))}
         </div>
       )}
 
-      {/* 空状态提示 */}
-      {filteredSectors.length === 0 && !loading && (
-        <div className="text-center text-gray-400 text-xs py-10">
-          未找到匹配的板块
+      {!loading && !filteredSectors.length && (
+        <div className="rounded-2xl border border-dashed border-slate-200 px-4 py-8 text-center">
+          <Layers3 className="mx-auto h-5 w-5 text-slate-300"/>
+          <p className="mt-2 text-xs text-slate-500">没有找到匹配板块。</p>
         </div>
       )}
+
+      {/* 板块详情弹窗 */}
+      <AnimatePresence>
+        {detailTarget && (
+          <SectorDetailPanel
+            sectorId={detailTarget.sectorId}
+            sectorName={detailTarget.sectorName}
+            onClose={() => setDetailTarget(null)}
+            onAskTeacher={() => {}}
+            initialSector={activeSector}
+          />
+        )}
+      </AnimatePresence>
     </div>
   );
 }
