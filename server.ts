@@ -1621,15 +1621,35 @@ async function startServer() {
         return s;
       });
       
-      // News
-      var newsItems = (md.newsItems||[]).slice(0,3).map(function(n) {
-        return {id:n.id,title:n.title,sourceName:n.sourceName};
+      // News with classification
+      var rawNews = (md.newsItems||[]);
+      var catalystKeywords = ['政策','利好','扶持','补贴','规划','推动','支持','印发','发布'];
+      var riskKeywords = ['风险','警告','监管','处罚','降温','收紧','利空','下跌','回调'];
+      var industryKeywords = [sn.slice(0,2),'板块','行业','市场','景气','需求'];
+      
+      var newsItems = rawNews.slice(0,6).map(function(n) {
+        var t = n.title || '';
+        var isCatalyst = catalystKeywords.some(function(k) { return t.includes(k); });
+        var isRisk = riskKeywords.some(function(k) { return t.includes(k); });
+        var isIndustry = industryKeywords.some(function(k) { return t.includes(k); });
+        var category = isCatalyst ? '直接催化' : isRisk ? '风险信息' : isIndustry ? '行业背景' : '市场动态';
+        var summary = t.length > 30 ? t.substring(0, 30) + '...' : t;
+        return {id:n.id, title:t, sourceName:n.sourceName, category: category, summary: summary};
       });
+      
+      // Better stage rules
+      var stage, stageLabel;
+      if (pct > 4) { stage = 'strengthening'; stageLabel = '持续走强'; }
+      else if (pct > 2) { stage = 'just_starting'; stageLabel = '刚刚启动'; }
+      else if (pct > 0) { stage = 'high_volatility'; stageLabel = '高位震荡'; }
+      else if (pct > -2) { stage = 'pullback'; stageLabel = '冲高回落'; }
+      else if (pct > -4) { stage = 'cooling_down'; stageLabel = '逐步降温'; }
+      else { stage = 'no_clear_trend'; stageLabel = '暂无明确趋势'; }
       
       res.json({
         sector: sn,sectorId:req.query.sectorId||'',todayChange:(pct>=0?'+':'')+pct.toFixed(2)+'%',todayChangePercent:pct,
         change5d:null,change20d:null,change3m:null,turnoverChange:null,
-        stage:pct>3?'strengthening':pct>0.5?'just_starting':'no_clear_trend',stageLabel:'',signalTags:[],signalTypes:[],
+        stage:stage,stageLabel:stageLabel,signalTags:[],signalTypes:[],
         bubbleConclusion:sn+'今日'+(pct>=0?'上涨':'下跌')+Math.abs(pct).toFixed(2)+'%',
         subdivisions:subs.map(function(s){return{name:s.name,changePercent:Number(s.changePercent)||0,status:'weak'};}),
         leadingStocks: leading, laggingStocks: lagging,
