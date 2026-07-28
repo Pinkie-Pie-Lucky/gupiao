@@ -74,8 +74,10 @@ export function SectorDetailPanel({ sectorId, sectorName, onClose, onAskTeacher,
 
             <div className="flex gap-3 text-[11px] bg-slate-50 rounded-2xl p-3">
               {['今日','近5日','近20日','3个月'].map((l,i) => {
-                const v = [data.todayChange,data.change5d,data.change20d,data.change3m][i];
-                return <div key={l}><span className="text-slate-400">{l}</span><span className={`ml-1.5 font-mono font-bold ${v?.startsWith('+')?'text-red-500':v?.startsWith('-')?'text-emerald-500':'text-slate-400'}`}>{v||'--'}</span></div>;
+                const vals = [data.todayChangePercent,data.change5d,data.change20d,data.change3m];
+                const v = vals[i];
+                const display = v!==null&&v!==undefined ? (v>=0?'+':'')+v.toFixed(2)+'%' : '--';
+                return <div key={l}><span className="text-slate-400">{l}</span><span className={`ml-1.5 font-mono font-bold ${v>0?'text-red-500':v<0?'text-emerald-500':'text-slate-400'}`}>{display}</span></div>;
               })}
             </div>
 

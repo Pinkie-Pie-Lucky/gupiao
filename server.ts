@@ -1579,6 +1579,34 @@ async function startServer() {
     try { const md = await fetchMarketData(); const s = buildMarketMapIntelligence(md); if(!s.length) return res.status(503).json({error:'暂无可用的板块数据',dataUnavailable:true}); res.json({market:'CN',generatedAt:new Date().toISOString(),timestamp:md.timestamp,sectors:s}); }
     catch(e) { console.error('[market-map]',e.message); res.status(503).json({error:'市场地图信号生成失败',dataUnavailable:true}); }
   });
+  // Fetch K-line data for a sector (5d, 20d, 3m changes)
+  async function fetchSectorKline(bkCode) {
+    var hosts = ['push2his.eastmoney.com', 'push2.eastmoney.com', '59.push2.eastmoney.com'];
+    var url = '/api/qt/stock/kline/get?secid=90.' + bkCode + '&fields1=f1&fields2=f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61&klt=101&fqt=1&end=20500101&lmt=120';
+    for (var i = 0; i < hosts.length; i++) {
+      try {
+        var data = await httpGetJSON('http://' + hosts[i] + url);
+        if (data && data.data && data.data.klines && data.data.klines.length > 0) {
+          var klines = data.data.klines.map(function(k) {
+            var parts = k.split(',');
+            return { date: parts[0], open: parseFloat(parts[1]), close: parseFloat(parts[2]), high: parseFloat(parts[3]), low: parseFloat(parts[4]), volume: parseInt(parts[5]) || 0, amount: parseFloat(parts[6]) || 0 };
+          }).filter(function(k) { return k.close > 0; });
+          if (klines.length < 2) continue;
+          var latest = klines[klines.length - 1];
+          var change5d = null, change20d = null, change3m = null, volumeSum = 0, volumeCount = 0;
+          if (klines.length >= 5) { change5d = ((latest.close / klines[klines.length - 5].close) - 1) * 100; }
+          if (klines.length >= 20) { change20d = ((latest.close / klines[klines.length - 20].close) - 1) * 100; }
+          if (klines.length >= 60) { change3m = ((latest.close / klines[klines.length - 60].close) - 1) * 100; }
+          // Average volume for turnoverHeat
+          for (var j = Math.max(0, klines.length - 20); j < klines.length; j++) { if (klines[j].amount > 0) { volumeSum += klines[j].amount; volumeCount++; } }
+          var avgAmount = volumeCount > 0 ? volumeSum / volumeCount : null;
+          return { change5d: change5d, change20d: change20d, change3m: change3m, todayAmount: latest.amount, avg20dAmount: avgAmount };
+        }
+      } catch(e) {}
+    }
+    return { change5d: null, change20d: null, change3m: null, todayAmount: null, avg20dAmount: null };
+  }
+
   // Fetch real stocks for a sector from East Money
   async function fetchSectorStocks(bkCode) {
     try {
@@ -1637,9 +1665,24 @@ async function startServer() {
         return {id:n.id, title:t, sourceName:n.sourceName, category: category, summary: summary};
       });
       
-      // Better stage rules
+      // Fetch kline data for multi-period changes + heat
+      var klineData = null;
+      if (bkCode) klineData = await fetchSectorKline(bkCode);
+      var c5 = klineData ? klineData.change5d : null;
+      var c20 = klineData ? klineData.change20d : null;
+      var c3m = klineData ? klineData.change3m : null;
+      var heatMetrics = {
+        todayTurnover: klineData ? klineData.todayAmount : null,
+        turnoverChangePercent: (klineData && klineData.avg20dAmount && klineData.todayAmount) ? ((klineData.todayAmount / klineData.avg20dAmount) - 1) * 100 : null,
+        turnoverVs20dAvg: (klineData && klineData.avg20dAmount) ? klineData.avg20dAmount : null,
+        turnoverRate: null,
+        upRatio: allStocks.length ? Math.round(allStocks.filter(function(s){return s.changePercent>0;}).length/allStocks.length*100) : null
+      };
+      
+      // Better stage rules (use multi-period data if available)
       var stage, stageLabel;
-      if (pct > 4) { stage = 'strengthening'; stageLabel = '持续走强'; }
+      if (c20 !== null && c20 > 10) { stage = 'strengthening'; stageLabel = '持续走强'; }
+      else if (pct > 4) { stage = 'strengthening'; stageLabel = '持续走强'; }
       else if (pct > 2) { stage = 'just_starting'; stageLabel = '刚刚启动'; }
       else if (pct > 0) { stage = 'high_volatility'; stageLabel = '高位震荡'; }
       else if (pct > -2) { stage = 'pullback'; stageLabel = '冲高回落'; }
@@ -1648,14 +1691,14 @@ async function startServer() {
       
       res.json({
         sector: sn,sectorId:req.query.sectorId||'',todayChange:(pct>=0?'+':'')+pct.toFixed(2)+'%',todayChangePercent:pct,
-        change5d:null,change20d:null,change3m:null,turnoverChange:null,
+        change5d:c5,change20d:c20,change3m:c3m,
         stage:stage,stageLabel:stageLabel,signalTags:[],signalTypes:[],
         bubbleConclusion:sn+'今日'+(pct>=0?'上涨':'下跌')+Math.abs(pct).toFixed(2)+'%',
         subdivisions:subs.map(function(s){return{name:s.name,changePercent:Number(s.changePercent)||0,status:'weak'};}),
         leadingStocks: leading, laggingStocks: lagging,
         healthMetrics:{ upCount: allStocks.filter(function(s){return s.changePercent>0;}).length, totalCount: allStocks.length, medianChange:'--', leaderContribution: leading[0]&&leading.length>1?((leading[0].changePercent/(leading.reduce(function(a,b){return a+Math.abs(b.changePercent)},0)))*100).toFixed(0)+'%':'--', divergence:  'moderate' },
         news:newsItems,
-        heatMetrics:{ todayTurnover: sec?.turnoverAmount||null, turnoverChangePercent:null, turnoverVs20dAvg:null, turnoverRate:null, upRatio: allStocks.length?Math.round(allStocks.filter(function(s){return s.changePercent>0;}).length/allStocks.length*100):null },
+        heatMetrics:heatMetrics,
         watchPoints:['成交额是否继续放大','上涨是否扩散','龙头股能否保持强势'],
         exploreQuestions:['为什么'+sn+'今天表现突出？',sn+'现在处于什么阶段？']
       });
