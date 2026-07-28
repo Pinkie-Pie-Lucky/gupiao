@@ -686,7 +686,7 @@ async function startServer() {
         try {
           const result = await httpGetJSON(`http://${host}${EM_PATH}`);
           return (result?.data?.diff || [])
-            .map((d: any) => ({ name: d.f14, code: d.f12, changePercent: Math.round(d.f3 * 100) / 100 }))
+            .map((d: any) => ({ name: d.f14, changePercent: Math.round(d.f3 * 100) / 100 }))
             .filter((s: any) => s.name && s.changePercent !== undefined)
             .sort((a: any, b: any) => b.changePercent - a.changePercent);
         } catch {
@@ -1539,109 +1539,6 @@ async function startServer() {
       });
     }
   });
-
-  // Market Map Helpers
-  function sectorNewsMatches(s, src) {
-    const n = s.replace(/[行业板块概念]/g,'').trim();
-    const a = [n, s].filter(Boolean).flatMap(t => [t, t.slice(0, Math.min(4, t.length))]);
-    return (src||[]).filter(x => a.some(y => x.title && x.title.includes(y))).slice(0,3);
-  }
-  function inferRelatedChain(s) {
-    const rs = [
-      {m:/AI|人工智能|算力/i, c:['芯片','服务器','光模块','AI应用']},
-      {m:/半导体|芯片/i, c:['设备','芯片设计','封测','电子材料']},
-      {m:/机器人/i, c:['减速器','伺服电机','机器视觉','工业软件']},
-      {m:/电力|电网/i, c:['燃料与发电','电网','储能','用电需求']},
-      {m:/新能源|锂电|光伏/i, c:['上游材料','电池/组件','整机','充储能']},
-      {m:/黄金|有色|稀土/i, c:['资源供给','现货价格','冶炼加工','下游需求']},
-      {m:/证券|银行|保险/i, c:['流动性','资本市场活跃度','金融机构','风险偏好']},
-    ];
-    return rs.find(r => r.m.test(s))?.c || ['上游供给','行业需求',s];
-  }
-  function buildMarketMapIntelligence(md) {
-    const all = [...(md.sectors||[]),...(md.conceptSectors||[])]
-      .map((s,i) => ({id: s.code ? (s.category+'-'+s.code) : 'sector-'+i, name: String(s.name||'').trim(), category: s.category==='concept'?'concept':'industry', changePercent: Number(s.changePercent)||0, turnoverAmount: Number.isFinite(Number(s.turnoverAmount))?Number(s.turnoverAmount):null}))
-      .filter(s => s.name);
-    const ranked = [...all].sort((a,b) => Math.abs(b.changePercent)-Math.abs(a.changePercent));
-    const th = Math.max(2.5, [...all.map(s => Math.abs(s.changePercent))].sort((a,b) => a-b)[Math.floor(all.length*0.9)]||0);
-    return all.map(s => {
-      const r = ranked.findIndex(x => x.id === s.id)+1, m = s.changePercent>0&&r<=3, sc = Math.round(Math.min(100,Math.max(0,Math.abs(s.changePercent)*15+Math.max(0,16-r)+(m?14:0))));
-      const t = [];
-      if(m) t.push('今日主线');
-      if(Math.abs(s.changePercent) >= th) t.push('异动上涨');
-      if(sectorNewsMatches(s.name,md.newsItems||[]).length) t.push('新闻驱动');
-      if(!m) t.push('值得观察');
-      const n = sectorNewsMatches(s.name,md.newsItems||[]);
-      return {sectorId: s.id, sector: s.name, category: s.category, change: (s.changePercent>=0?'+':'')+s.changePercent.toFixed(2)+'%', changePercent: s.changePercent, turnoverAmount: s.turnoverAmount, turnoverChange: null, volumeChange: null, signalTags: t.slice(0,3), signalTypes: [], isAnomaly: Math.abs(s.changePercent)>=th, anomalyReason: Math.abs(s.changePercent)>=th?'今日涨跌幅度较大，需要关注':null, analysisSource: 'rule', evidenceStatus: n.length?'partially_verified':'market_data_only', importanceScore: sc, shouldHighlight: sc>=55||m, beginnerExplanation: s.name+'今日'+(s.changePercent>=0?'上涨':'下跌')+Math.abs(s.changePercent).toFixed(2)+'%', professionalSummary: s.name+(s.changePercent>=0?'上涨':'下跌')+Math.abs(s.changePercent).toFixed(2)+'%，重要度'+sc+'分', relatedNews: n, relatedChain: inferRelatedChain(s.name), dataNotes: ['重要度由涨跌异动、排行和新闻关联共同计算。']};
-    }).sort((a,b) => b.importanceScore-a.importanceScore);
-  }
-  app.get('/api/market-map/intelligence', async (_req, res) => {
-    try { const md = await fetchMarketData(); const s = buildMarketMapIntelligence(md); if(!s.length) return res.status(503).json({error:'暂无可用的板块数据',dataUnavailable:true}); res.json({market:'CN',generatedAt:new Date().toISOString(),timestamp:md.timestamp,sectors:s}); }
-    catch(e) { console.error('[market-map]',e.message); res.status(503).json({error:'市场地图信号生成失败',dataUnavailable:true}); }
-  });
-  // Fetch real stocks for a sector from East Money
-  async function fetchSectorStocks(bkCode) {
-    try {
-      const r = await httpGetJSON('http://push2.eastmoney.com/api/qt/clist/get?pn=1&pz=10&po=1&np=1&fltt=2&invt=2&fid=f3&fs=b:' + bkCode + '%2Bf:!50&fields=f2,f3,f4,f6,f12,f14,f20,f25');
-      return (r.data && r.data.diff) ? r.data.diff.map(function(st) {
-        return {
-          code: String(st.f12 || ''),
-          name: String(st.f14 || ''),
-          changePercent: Number(st.f3) || 0,
-          turnoverAmount: Number.isFinite(Number(st.f6)) ? Number(st.f6) : null,
-          totalMarketCap: Number.isFinite(Number(st.f20)) ? Math.round(Number(st.f20) / 100000000) : null,
-          isLeader: false
-        };
-      }).sort(function(a, b) { return b.changePercent - a.changePercent; }) : [];
-    } catch(e) { return []; }
-  }
-
-  app.get('/api/sector-detail', async (req, res) => {
-    try {
-      const sn = req.query.sectorName; if(!sn) return res.status(400).json({error:'sectorName is required'});
-      const md = await fetchMarketData(); const sec = (md.sectors||[]).find(s => s.name === sn); const pct = Number(sec?.changePercent)||0;
-      const subs = (md.sectors||[]).filter(s => s.name !== sn && s.name && s.name.includes(sn.slice(0,2))).slice(0,5);
-      
-      // Get real stock data
-      const bkCode = (sec && sec.code) ? String(sec.code) : (req.query.sectorId ? String(req.query.sectorId).replace(/^(industry|concept)-/, '') : '');
-      var allStocks = [];
-      if (bkCode) allStocks = await fetchSectorStocks(bkCode);
-      
-      // Top 5 leaders
-      var leading = allStocks.slice(0, 5).map(function(s, i) {
-        var reasons = ['板块上涨时弹性更强', '成交额明显放大，资金关注度提升', '受益于行业政策预期', '板块龙头，带动效应明显', '跟随板块整体走强'];
-        s.reason = reasons[i] || reasons[reasons.length - 1];
-        s.isLeader = i === 0;
-        return s;
-      });
-      
-      // Bottom 3 laggards
-      var lagging = allStocks.slice(-3).reverse().map(function(s) {
-        s.reason = '板块内部表现较弱';
-        return s;
-      });
-      
-      // News
-      var newsItems = (md.newsItems||[]).slice(0,3).map(function(n) {
-        return {id:n.id,title:n.title,sourceName:n.sourceName};
-      });
-      
-      res.json({
-        sector: sn,sectorId:req.query.sectorId||'',todayChange:(pct>=0?'+':'')+pct.toFixed(2)+'%',todayChangePercent:pct,
-        change5d:null,change20d:null,change3m:null,turnoverChange:null,
-        stage:pct>3?'strengthening':pct>0.5?'just_starting':'no_clear_trend',stageLabel:'',signalTags:[],signalTypes:[],
-        bubbleConclusion:sn+'今日'+(pct>=0?'上涨':'下跌')+Math.abs(pct).toFixed(2)+'%',
-        subdivisions:subs.map(function(s){return{name:s.name,changePercent:Number(s.changePercent)||0,status:'weak'};}),
-        leadingStocks: leading, laggingStocks: lagging,
-        healthMetrics:{ upCount: allStocks.filter(function(s){return s.changePercent>0;}).length, totalCount: allStocks.length, medianChange:'--', leaderContribution: leading[0]&&leading[0].changePercent>5?'较高':'一般', divergence: 'medium', breadth: 'moderate' },
-        news:newsItems,
-        heatMetrics:{ todayTurnover: sec?.turnoverAmount||null, turnoverChangePercent:null, turnoverVs20dAvg:null, turnoverRate:null, upRatio: allStocks.length?Math.round(allStocks.filter(function(s){return s.changePercent>0;}).length/allStocks.length*100):null },
-        watchPoints:['成交额是否继续放大','上涨是否扩散','龙头股能否保持强势'],
-        exploreQuestions:['为什么'+sn+'今天表现突出？',sn+'现在处于什么阶段？']
-      });
-    } catch(e) { res.status(503).json({error:'生成失败'}); }
-  });
-
 
   // Vite middleware integration for full-stack build/dev environment
   if (process.env.NODE_ENV !== 'production') {
