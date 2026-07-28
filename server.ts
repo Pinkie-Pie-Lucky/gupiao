@@ -1653,7 +1653,7 @@ async function startServer() {
         bubbleConclusion:sn+'今日'+(pct>=0?'上涨':'下跌')+Math.abs(pct).toFixed(2)+'%',
         subdivisions:subs.map(function(s){return{name:s.name,changePercent:Number(s.changePercent)||0,status:'weak'};}),
         leadingStocks: leading, laggingStocks: lagging,
-        healthMetrics:{ upCount: allStocks.filter(function(s){return s.changePercent>0;}).length, totalCount: allStocks.length, medianChange:'--', leaderContribution: leading[0]&&leading[0].changePercent>5?'较高':'一般', divergence: 'medium', breadth: 'moderate' },
+        healthMetrics:{ upCount: allStocks.filter(function(s){return s.changePercent>0;}).length, totalCount: allStocks.length, medianChange:'--', leaderContribution: leading[0]&&leading.length>1?((leading[0].changePercent/(leading.reduce(function(a,b){return a+Math.abs(b.changePercent)},0)))*100).toFixed(0)+'%':'--', divergence:  'moderate' },
         news:newsItems,
         heatMetrics:{ todayTurnover: sec?.turnoverAmount||null, turnoverChangePercent:null, turnoverVs20dAvg:null, turnoverRate:null, upRatio: allStocks.length?Math.round(allStocks.filter(function(s){return s.changePercent>0;}).length/allStocks.length*100):null },
         watchPoints:['成交额是否继续放大','上涨是否扩散','龙头股能否保持强势'],

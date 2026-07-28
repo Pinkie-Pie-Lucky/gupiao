@@ -5,7 +5,7 @@
 
 import { useState, useEffect } from 'react';
 import { motion } from 'motion/react';
-import { TrendingUp, BarChart3, Activity, Newspaper, Clock, MessageCircle, ChevronDown, ChevronUp, Sparkles, Heart, X, ArrowUpRight } from 'lucide-react';
+import { TrendingUp, BarChart3, Activity, Newspaper, Clock, MessageCircle, ChevronDown, ChevronUp, Sparkles, Heart, X, ArrowUpRight, Shield } from 'lucide-react';
 
 const tagStyles = {
   '今日主线':'bg-violet-100 text-violet-700','异动上涨':'bg-amber-100 text-amber-800',
@@ -88,6 +88,24 @@ export function SectorDetailPanel({ sectorId, sectorName, onClose, onAskTeacher,
             <div><span className="text-slate-400 text-[11px]">行情阶段</span><span className={`ml-2 text-[10px] px-1.5 py-0.5 rounded-full border font-bold ${stageStyles[data.stage]?.cls || ''}`}>{stageStyles[data.stage]?.label || '暂无'}</span></div>
           </Card>
 
+          <Card label="板块健康度" icon={<Shield className="w-3.5 h-3.5 text-indigo-600"/>} ibg="bg-indigo-50" id="health">
+            <div className="grid grid-cols-3 gap-3 text-[11px] text-center">
+              <div className="bg-white rounded-xl p-2.5 border border-slate-100">
+                <div className="text-green-600 font-bold text-lg">{(data.healthMetrics?.upCount||0)}</div>
+                <div className="text-slate-400">上涨</div>
+              </div>
+              <div className="bg-white rounded-xl p-2.5 border border-slate-100">
+                <div className="text-slate-700 font-bold text-lg">{(data.healthMetrics?.totalCount||0)}</div>
+                <div className="text-slate-400">成分股</div>
+              </div>
+              <div className="bg-white rounded-xl p-2.5 border border-slate-100">
+                <div className={'font-bold text-lg '+(data.heatMetrics?.upRatio>=60?'text-green-600':data.heatMetrics?.upRatio>=40?'text-amber-600':'text-red-500')}>{data.heatMetrics?.upRatio??'--'}%</div>
+                <div className="text-slate-400">上涨比</div>
+              </div>
+            </div>
+            {data.healthMetrics?.leaderContribution ? <p className="text-[9px] text-slate-400 text-center mt-2">龙头贡献度：{data.healthMetrics.leaderContribution}</p> : null}
+          </Card>
+
           <Card label="板块内部表现" icon={<BarChart3 className="w-3.5 h-3.5 text-amber-600"/>} ibg="bg-amber-50" id="internal">
             {(data.subdivisions||[]).length > 0 ? (data.subdivisions||[]).map((s,i) => (
               <div key={i} className="flex justify-between py-1 text-xs border-b border-slate-100/60 last:border-0">
@@ -124,9 +142,16 @@ export function SectorDetailPanel({ sectorId, sectorName, onClose, onAskTeacher,
           </Card>
 
           <Card label="相关新闻" icon={<Newspaper className="w-3.5 h-3.5 text-sky-600"/>} ibg="bg-sky-50" id="news">
-            {(data.news||[]).length > 0 ? (data.news||[]).slice(0,3).map((n,i) => (
-              <div key={n.id||i} className="text-xs border-b border-slate-100/60 last:border-0 py-1.5">{n.title||''}</div>
-            )) : <p className="text-[10px] text-slate-400 text-center py-2">暂无关联新闻</p>}
+            {(data.news||[]).length > 0 ? (data.news||[]).slice(0,6).map(function(n,i) {
+              var catStyles = { '直接催化':'bg-violet-50 text-violet-700', '风险信息':'bg-rose-50 text-rose-600', '行业背景':'bg-sky-50 text-sky-700', '市场动态':'bg-slate-50 text-slate-600' };
+              return <div key={n.id||i} className="border-b border-slate-100/60 last:border-0 py-2 space-y-1">
+                <div className="text-xs font-medium text-slate-800 leading-relaxed">{n.title||''}</div>
+                <div className="flex items-center gap-2">
+                  <span className={'text-[9px] px-1.5 py-0.5 rounded-full font-medium '+(catStyles[n.category]||'bg-slate-50 text-slate-500')}>{n.category||'一般'}</span>
+                  {n.summary ? <span className="text-[9px] text-slate-400">{n.summary}</span> : null}
+                </div>
+              </div>;
+            }) : <p className="text-[10px] text-slate-400 text-center py-2">暂无关联新闻</p>}
           </Card>
 
           <Card label="后续观察" icon={<Clock className="w-3.5 h-3.5 text-amber-600"/>} ibg="bg-amber-50" id="watch">
