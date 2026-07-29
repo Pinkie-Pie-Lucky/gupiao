@@ -5,10 +5,12 @@
 
 import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Search, TrendingUp, TrendingDown, ChevronRight, X, AlertTriangle, ArrowUpRight, Award, MessageSquare, Flame, BarChart2, Activity, BookOpen, Sun, GraduationCap, RefreshCw } from 'lucide-react';
-import { MarketIndex, StockSector, PersonalizedAlert } from '../types';
+import { Search, TrendingUp, TrendingDown, ChevronRight, ChevronDown, X, AlertTriangle, ArrowUpRight, Award, MessageSquare, Flame, BarChart2, Activity, BookOpen, Sun, GraduationCap, RefreshCw, ShieldCheck, ThumbsUp, ThumbsDown } from 'lucide-react';
+import { MarketIndex, MarketStory, StockSector, PersonalizedAlert } from '../types';
 import { formatChineseDate, initialSectors, initialAlerts } from '../data';
 import { InteractiveChart } from './InteractiveChart';
+import { FeedbackModal } from './FeedbackModal';
+import { BubbleAvatar } from './BubbleAvatar';
 
 const LEARNING_KNOWLEDGE = [
   {
@@ -41,9 +43,10 @@ interface HomeTabProps {
   onSelectSector: (sectorId: string) => void;
   onNavigateToTab: (tabId: string) => void;
   onAskTeacherAboutStock: (stockName: string, stockCode: string) => void;
+  followedStocks?: { name: string; code: string; price: number; changePercent: number }[];
 }
 
-export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStock }: HomeTabProps) {
+export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStock, followedStocks = [] }: HomeTabProps) {
   const [indices, setIndices] = useState<MarketIndex[]>([]);
   const [selectedIndex, setSelectedIndex] = useState<MarketIndex | null>(null);
   const [selectedAlert, setSelectedAlert] = useState<PersonalizedAlert | null>(null);
@@ -59,10 +62,15 @@ export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStoc
   const [morningReport, setMorningReport] = useState<{
     summaryText: string;
     reasonBrief: string;
-    top3Themes: { title: string; evidence: string; chain: any }[];
+    stories: MarketStory[];
     sentiment: string;
     loading: boolean;
-  }>({ summaryText: '', reasonBrief: '', top3Themes: [], sentiment: '中性', loading: true });
+    promptVersion?: string;
+    promptVersions?: {
+      beginner: string;
+      professional: string;
+    };
+  }>({ summaryText: '', reasonBrief: '', stories: [], sentiment: '中性', loading: true });
 
   // 市场状态（交易时段判断）
   const [marketStatus, setMarketStatus] = useState<{
@@ -77,6 +85,32 @@ export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStoc
     bottomSectors: { name: string; changePercent: number }[];
     marketBreath: { up: number; down: number; breadthRatio?: number };
     totalVolume?: number;
+    marketTemperature?: {
+      score: number;
+      emoji: string;
+      text: string;
+      label: string;
+      description: string;
+      tone: 'hot' | 'warm' | 'neutral' | 'cool';
+      directionScore: number;
+      confirmationScore: number;
+      correction: number;
+      components: {
+        breadth: { score: number; up: number; down: number; total: number };
+        indices: { score: number; averageChange: number };
+        extremes: { score: number; limitUp: number; limitDown: number; stockCount: number; available: boolean };
+        turnover: {
+          score: number;
+          amount: number;
+          baseline: number | null;
+          ratio: number | null;
+          sampleCount: number;
+          status: string;
+        };
+        concentration: { score: number; top3Share: number | null };
+        volatility: { score: number; averageAmplitude: number | null };
+      };
+    };
   } | null>(null);
 
   // 数据是否成功加载
@@ -87,34 +121,30 @@ export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStoc
     label: '加载中', desc: ''
   });
 
-  // 当指数数据变更时才重新计算天气/情绪（而非每次渲染）
+  // 市场温度来自客观规则引擎；AI情绪只用于早报文案，不参与温度计算。
   useEffect(() => {
-    if (indices.length === 0) {
-      if (dataError) {
-        setCachedWeather({ emoji: '⚠️', text: '数据异常', bg: 'bg-yellow-50 border-yellow-200 text-yellow-700', temp: 0, label: '数据异常', desc: '行情数据获取失败' });
-      }
+    if (dataError) {
+      setCachedWeather({ emoji: '⚠️', text: '数据异常', bg: 'bg-yellow-50 border-yellow-200 text-yellow-700', temp: 0, label: '数据异常', desc: '行情数据获取失败' });
       return;
     }
-    const avg = indices.reduce((acc, idx) => acc + idx.changePercent, 0) / indices.length;
-    const base = morningReport.sentiment === '乐观' ? 72 : morningReport.sentiment === '中性' ? 50 : 28;
-    const adj = Math.round(avg * 3);
-    const temp = Math.round(Math.min(90, Math.max(10, base + adj)));
-    const label = morningReport.sentiment === '乐观' ? '情绪偏多' : morningReport.sentiment === '中性' ? '多空平衡' : '情绪偏空';
-    const desc = morningReport.sentiment === '乐观'
-      ? (temp >= 80 ? '极度贪婪' : temp >= 65 ? '中度看涨' : '温和偏多')
-      : morningReport.sentiment === '中性' ? '方向不明'
-      : (temp <= 15 ? '极度恐慌' : temp <= 30 ? '明显偏空' : '谨慎偏空');
+    const temperature = marketOverview?.marketTemperature;
+    if (!temperature) return;
 
-    if (avg > 1.2) {
-      setCachedWeather({ emoji: '🔥', text: '烈日狂飙 / 极度看涨 📈', bg: 'bg-rose-50 border-rose-100 text-rose-700', temp, label, desc });
-    } else if (avg > 0) {
-      setCachedWeather({ emoji: '☀️', text: '温和晴朗 / 科技吸金 📈', bg: 'bg-amber-50 border-amber-100 text-amber-700', temp, label, desc });
-    } else if (avg > -0.5) {
-      setCachedWeather({ emoji: '⛅', text: '多云转阴 / 区间震荡 ⚖️', bg: 'bg-slate-100 border-slate-200 text-slate-700', temp, label, desc });
-    } else {
-      setCachedWeather({ emoji: '🌧️', text: '暴风雨临 / 避险防御 📉', bg: 'bg-indigo-50 border-indigo-100 text-indigo-700', temp, label, desc });
-    }
-  }, [indices, morningReport.sentiment, dataError]);
+    const bgByTone = {
+      hot: 'bg-rose-50 border-rose-100 text-rose-700',
+      warm: 'bg-amber-50 border-amber-100 text-amber-700',
+      neutral: 'bg-slate-100 border-slate-200 text-slate-700',
+      cool: 'bg-indigo-50 border-indigo-100 text-indigo-700',
+    };
+    setCachedWeather({
+      emoji: temperature.emoji,
+      text: temperature.text,
+      bg: bgByTone[temperature.tone],
+      temp: temperature.score,
+      label: temperature.label,
+      desc: temperature.description,
+    });
+  }, [marketOverview, dataError]);
 
   async function loadMarketOverview({ cancelled }: { cancelled: boolean }) {
     try {
@@ -162,8 +192,12 @@ export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStoc
       if (!cancelled) {
         try {
           const reportRes = await fetch('/api/morning-report').then(r => r.json());
-          if (!cancelled && !reportRes.fallback) {
-            setMorningReport({ ...reportRes, loading: false });
+          if (!cancelled && !reportRes.error) {
+            setMorningReport({
+              ...reportRes,
+              stories: reportRes.stories || reportRes.top3Themes || [],
+              loading: false,
+            });
           } else if (!cancelled) {
             setMorningReport(prev => ({ ...prev, loading: false }));
           }
@@ -192,58 +226,141 @@ export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStoc
     };
   }, []);
 
-  // Dynamic market weather calculation based on simulated indices
-  const averageChange = indices.length > 0
-    ? indices.reduce((acc, idx) => acc + idx.changePercent, 0) / indices.length
-    : 0;
-  let weatherEmoji = '❓';
-  let weatherText = '暂无数据';
-  let weatherBg = 'bg-gray-50 border-gray-200 text-gray-500';
-  if (dataError) {
-    weatherEmoji = '⚠️';
-    weatherText = '数据异常';
-    weatherBg = 'bg-yellow-50 border-yellow-200 text-yellow-700';
-  } else if (indices.length > 0) {
-    if (averageChange > 1.2) {
-      weatherEmoji = '🔥';
-      weatherText = '烈日狂飙 / 极度看涨 📈';
-      weatherBg = 'bg-rose-50 border-rose-100 text-rose-700';
-    } else if (averageChange > 0) {
-      weatherEmoji = '☀️';
-      weatherText = '温和晴朗 / 科技吸金 📈';
-      weatherBg = 'bg-amber-50 border-amber-100 text-amber-700';
-    } else if (averageChange > -0.5) {
-      weatherEmoji = '⛅';
-      weatherText = '多云转阴 / 区间震荡 ⚖️';
-      weatherBg = 'bg-slate-100 border-slate-200 text-slate-700';
+  const turnoverText = (() => {
+    const amount = marketOverview?.marketTemperature?.components.turnover.amount || marketOverview?.totalVolume || 0;
+    if (!amount) return '成交额待更新';
+    if (amount >= 1_000_000_000_000) return `成交额 ${(amount / 1_000_000_000_000).toFixed(2)}万亿`;
+    return `成交额 ${Math.round(amount / 100_000_000)}亿`;
+  })();
+
+  // 今日一句话成长金句
+  const [growthQuote, setGrowthQuote] = useState('');
+  const GROWTH_QUOTES = [
+    '今天的投资思维：不要只关注涨了什么，更要关注为什么涨。',
+    '今天的投资思维：一次上涨不代表趋势改变，连续观察比一次判断更重要。',
+    '今天的投资思维：市场恐慌的时候，往往是机会开始的时候。',
+    '今天的投资思维：投资不是赌博，看不懂的时候就先别出手。',
+    '今天的投资思维：学会等待，比学会操作更难，也更重要。',
+    '今天的投资思维：亏钱不可怕，可怕的是不知道为什么亏。',
+    '今天的投资思维：分散不是买很多只股票，而是买不同逻辑的资产。',
+    '今天的投资思维：好公司不等于好股票，价格也很重要。',
+    '今天的投资思维：别人贪婪时我恐惧，别人恐惧时我贪婪。',
+    '今天的投资思维：没有人能每次都预测对，重要的是控制风险。',
+    '今天的投资思维：短期的涨跌只是情绪，长期的价值才是根本。',
+    '今天的投资思维：如果你不愿持有一只股票十年，那十分钟也不要持有。',
+    '今天的投资思维：市场永远有机会，但本金只有一次。',
+    '今天的投资思维：学习投资的第一步，是学会承认自己不懂。',
+    '今天的投资思维：牛市赚的钱，往往会在熊市还回去。',
+    '今天的投资思维：最好的投资策略是适合自己性格的策略。',
+    '今天的投资思维：不要因为涨了就觉得是自己厉害，不要因为跌了就觉得是运气不好。',
+    '今天的投资思维：每个新手都会经历"自信→怀疑→恐惧→理性"的过程。',
+    '今天的投资思维：真正的风险不是波动，而是永久性损失。',
+    '今天的投资思维：投资最难的不是技术，而是管住自己的手。',
+    '今天的投资思维：数据和事实比消息和感觉更可靠。',
+    '今天的投资思维：市场短期是投票机，长期是称重机。',
+    '今天的投资思维：当你觉得所有人都赚钱了，那可能已经到尾声了。',
+    '今天的投资思维：闲钱投资，才能在市场波动中保持冷静。',
+    '今天的投资思维：不断学习的人，最终会打败那些只想打听消息的人。',
+    '今天的投资思维：最贵的教训往往来自于"这次不一样"的错觉。',
+    '今天的投资思维：看懂一个行业，比跟风十个热点更有价值。',
+    '今天的投资思维：交易越频繁，收益越容易被费用吃掉。',
+    '今天的投资思维：不买自己不理解的东西，是最基本的投资原则。',
+    '今天的投资思维：复利是世界第八大奇迹，前提是你给它足够的时间。',
+    '今天的投资思维：每天都看盘的人，往往比每周看盘的人赚得少。',
+    '今天的投资思维：好消息已经反映在价格里了，坏消息也一样。',
+    '今天的投资思维：与其预测明天天气，不如准备一把伞。',
+    '今天的投资思维：知道自己不知道，比不知道更重要。',
+    '今天的投资思维：世界上没有免费的午餐，高收益一定有高风险。',
+    '今天的投资思维：投资是马拉松，不是百米冲刺。',
+    '今天的投资思维：不要把所有鸡蛋放在一个篮子里，但也别放在太多篮子里。',
+    '今天的投资思维：成功投资者的共同点：耐心、纪律、独立思考。',
+    '今天的投资思维：市场总是在绝望中诞生，在犹豫中上涨，在乐观中消亡。',
+    '今天的投资思维：今天的学习，是为了明天更从容地面对市场波动。',
+  ];
+
+  const [expandedStories, setExpandedStories] = useState<Set<string>>(new Set());
+  const [storyMode, setStoryMode] = useState<'beginner' | 'professional'>('beginner');
+
+  // 反馈状态
+  const [feedbackTarget, setFeedbackTarget] = useState<{
+    contentType: string;
+    contentId: string;
+    promptVersion: string;
+  } | null>(null);
+  const [thumbsFeedback, setThumbsFeedback] = useState<Record<string, 'up' | 'down' | null>>({});
+
+  const handleThumbsUp = (story: MarketStory) => {
+    const feedbackKey = `${storyMode}:${story.storyId}`;
+    if (thumbsFeedback[feedbackKey] === 'up') {
+      setThumbsFeedback(prev => ({ ...prev, [feedbackKey]: null }));
     } else {
-      weatherEmoji = '🌧️';
-      weatherText = '暴风雨临 / 避险防御 📉';
-      weatherBg = 'bg-indigo-50 border-indigo-100 text-indigo-700';
+      setThumbsFeedback(prev => ({ ...prev, [feedbackKey]: 'up' }));
+      fetch('/api/feedback', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contentType: `market_story_${storyMode}`,
+          contentId: story.storyId,
+          promptVersion: storyMode === 'beginner'
+            ? morningReport.promptVersions?.beginner || 'p3a-beginner-v1'
+            : morningReport.promptVersions?.professional || 'p3b-professional-v1',
+          rating: 'positive',
+          reasons: [],
+          comment: '',
+          timestamp: new Date().toISOString(),
+        }),
+      }).catch(() => {});
     }
-  }
+  };
 
-  const sentimentBase = morningReport.sentiment === '乐观' ? 72 : morningReport.sentiment === '中性' ? 50 : 28;
-  const sentimentAdjust = Math.round(averageChange * 3);
-  const sentimentTemp = indices.length > 0
-    ? Math.round(Math.min(90, Math.max(10, sentimentBase + sentimentAdjust)))
-    : 0;
-  const sentimentLabel =
-    dataError ? '数据异常'
-    : morningReport.sentiment === '乐观' ? '情绪偏多'
-    : morningReport.sentiment === '中性' ? '多空平衡'
-    : '情绪偏空';
-  const sentimentDesc =
-    dataError ? '行情数据获取失败'
-    : morningReport.sentiment === '乐观'
-      ? (sentimentTemp >= 80 ? '极度贪婪' : sentimentTemp >= 65 ? '中度看涨' : '温和偏多')
-      : morningReport.sentiment === '中性'
-      ? '方向不明'
-      : (sentimentTemp <= 15 ? '极度恐慌' : sentimentTemp <= 30 ? '明显偏空' : '谨慎偏空');
+  const handleThumbsDown = (story: MarketStory) => {
+    const feedbackKey = `${storyMode}:${story.storyId}`;
+    if (thumbsFeedback[feedbackKey] === 'down') {
+      setThumbsFeedback(prev => ({ ...prev, [feedbackKey]: null }));
+    } else {
+      setThumbsFeedback(prev => ({ ...prev, [feedbackKey]: 'down' }));
+      setFeedbackTarget({
+        contentType: `market_story_${storyMode}`,
+        contentId: story.storyId,
+        promptVersion: storyMode === 'beginner'
+          ? morningReport.promptVersions?.beginner || 'p3a-beginner-v1'
+          : morningReport.promptVersions?.professional || 'p3b-professional-v1',
+      });
+    }
+  };
 
-  // 使用真实API数据后，移除前端随机模拟
-  // 之前用于模拟实时跳动的 setInterval 已移除，
-  // 数据完全由后端东方财富API提供
+  const toggleStory = (storyId: string) => {
+    setExpandedStories(prev => {
+      const next = new Set(prev);
+      if (next.has(storyId)) next.delete(storyId);
+      else next.add(storyId);
+      return next;
+    });
+  };
+
+  const TYPE_LABELS: Record<string, string> = {
+    'sector_driver': '市场热点',
+    'geo_event': '地缘事件',
+    'policy_driver': '政策驱动',
+    'macro_event': '宏观事件',
+  };
+
+  const confidenceText = (story: MarketStory): string | null => {
+    if (story.reasoning.confidenceLevel === 'high') return '证据较充分';
+    if (story.reasoning.confidenceLevel === 'medium') return '存在合理依据';
+    return null;
+  };
+
+  const visibleReasoningSteps = (story: MarketStory) => {
+    const steps = story.reasoning?.steps || [];
+    const withoutRepeatedOpening = steps.filter((step, index) => !(index === 0 && step.kind === 'fact'));
+    return withoutRepeatedOpening.length > 0 ? withoutRepeatedOpening : steps;
+  };
+
+  // 初始化金句
+  useEffect(() => {
+    setGrowthQuote(GROWTH_QUOTES[Math.floor(Math.random() * GROWTH_QUOTES.length)]);
+  }, []);
 
   const handleSearchSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -350,7 +467,7 @@ export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStoc
         {/* Card Header with Module Title and Dynamic Weather */}
         <div className="flex justify-between items-center border-b border-slate-50 pb-2">
           <div className="text-xs font-bold text-gray-400 flex items-center gap-1.5">
-            AI老师每日早报
+            泡泡老师
           </div>
           {/* Dynamic Weather Badge */}
           <div className={`flex items-center gap-1 px-2.5 py-0.5 rounded-full border text-[10px] font-bold ${cachedWeather.bg} transition-all duration-300`}>
@@ -469,7 +586,7 @@ export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStoc
         <div id="sentiment-indicator-area" className="space-y-2 pt-1">
           <div className="flex justify-between text-[11px] font-bold text-gray-500">
             <span className="flex items-center gap-1">
-              情绪状态：<span className="text-indigo-600">{morningReport.loading ? '加载中...' : `${cachedWeather.label} (${cachedWeather.desc})`}</span>
+              市场温度：<span className="text-indigo-600">{marketOverview?.marketTemperature ? `${cachedWeather.label}（${cachedWeather.desc}）` : '加载中...'}</span>
             </span>
             <span className="text-indigo-600 font-mono">{cachedWeather.temp}℃ / 100℃</span>
           </div>
@@ -478,15 +595,50 @@ export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStoc
             <motion.div
               className="absolute top-0 bottom-0 w-1.5 bg-white shadow-md border border-slate-300 rounded-full"
               style={{ left: `${cachedWeather.temp}%` }}
-              animate={{ scaleY: [1, 1.2, 1] }}
-              transition={{ repeat: Infinity, duration: 2 }}
             ></motion.div>
           </div>
           <div className="flex justify-between text-[9px] text-gray-400 font-semibold px-0.5">
-            <span>极度恐慌 (10℃)</span>
+            <span>市场偏冷 (0℃)</span>
             <span>多空平衡 (50℃)</span>
-            <span>极度贪婪 (90℃)</span>
+            <span>市场活跃 (100℃)</span>
           </div>
+          {marketOverview?.marketTemperature && (
+            <div className="grid grid-cols-2 gap-2 pt-1">
+              <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2">
+                <div className="text-[9px] font-semibold text-slate-400">板块广度</div>
+                <div className="mt-0.5 text-[11px] font-bold text-slate-700">
+                  {marketOverview.marketTemperature.components.breadth.total > 0 ? (
+                    <>
+                      <span className="text-red-600">{marketOverview.marketTemperature.components.breadth.up} 个上涨</span>
+                      <span className="mx-1 text-slate-300">/</span>
+                      <span className="text-emerald-600">{marketOverview.marketTemperature.components.breadth.down} 个下跌</span>
+                    </>
+                  ) : (
+                    <span className="text-slate-500">板块数据待更新</span>
+                  )}
+                </div>
+              </div>
+              <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2">
+                <div className="text-[9px] font-semibold text-slate-400">市场成交</div>
+                <div className="mt-0.5 text-[11px] font-bold text-slate-700">{turnoverText}</div>
+              </div>
+            </div>
+          )}
+          {marketOverview?.marketTemperature && (
+            <div className="flex items-center justify-between text-[9px] text-slate-400">
+              <span>方向分 {marketOverview.marketTemperature.directionScore.toFixed(1)}</span>
+              <span>
+                确认修正 {marketOverview.marketTemperature.correction >= 0 ? '+' : ''}
+                {marketOverview.marketTemperature.correction.toFixed(1)}
+                <span className="ml-1 text-slate-300">（范围 ±15）</span>
+              </span>
+            </div>
+          )}
+          {marketOverview?.marketTemperature?.components.turnover.ratio === null && (
+            <p className="text-[9px] leading-4 text-slate-400">
+              {marketOverview.marketTemperature.components.turnover.status}；不会影响方向判断。
+            </p>
+          )}
         </div>
 
         {/* 3. 今日热点主题 */}
@@ -518,68 +670,282 @@ export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStoc
         </div>
       </div>
 
-      {/* 中间区域: 今天发生了什么 */}
-      <div id="what-happened-section" className="space-y-3 px-4">
-        <h3 id="events-heading" className="text-base font-bold text-gray-950 flex items-center gap-2">
-          <Activity className="w-4.5 h-4.5 text-indigo-600" />
-          今天发生了什么
-        </h3>
+      <section id="what-happened-section" className="px-4 space-y-3 scroll-mt-4">
+        <div className="flex items-center justify-between gap-3">
+          <h3 id="events-heading" className="text-base font-bold text-slate-950 flex items-center gap-2">
+            <Activity className="w-4 h-4 text-indigo-600" />
+            今天发生了什么
+          </h3>
+          <div className="flex items-center rounded-xl bg-slate-100 p-1" role="group" aria-label="故事阅读模式">
+            {([
+              ['beginner', '小白模式'],
+              ['professional', '专业模式'],
+            ] as const).map(([mode, label]) => (
+              <button
+                key={mode}
+                type="button"
+                aria-pressed={storyMode === mode}
+                onClick={() => {
+                  setStoryMode(mode);
+                  setExpandedStories(new Set());
+                }}
+                className={`px-2.5 py-1.5 rounded-lg text-[10px] font-bold transition-colors ${
+                  storyMode === mode
+                    ? 'bg-white text-indigo-700 shadow-sm'
+                    : 'text-slate-500 hover:text-slate-700'
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        </div>
+        <p className="text-[10px] leading-4 text-slate-500">
+          {storyMode === 'beginner'
+            ? '用一屏看懂事件和最短逻辑'
+            : '查看数据验证、多因素驱动和反向条件'}
+        </p>
 
-        {/* 3 Cards representation of Key Events */}
-        <div id="notion-events-list" className="space-y-3">
-          {morningReport.top3Themes.length > 0 ? morningReport.top3Themes
-            .filter((theme) => {
-              // 置信度 < 30 不展示
-              const score = theme.chain?.confidenceScore;
-              return score === undefined || score >= 30;
-            })
-            .map((theme, i) => {
-            const confidenceScore = theme.chain?.confidenceScore;
-            const scoreColor = confidenceScore >= 80 ? 'bg-emerald-500' : confidenceScore >= 60 ? 'bg-amber-500' : 'bg-slate-300';
-            return (
-              <div key={i} className="bg-white border border-slate-100 rounded-3xl p-4 space-y-3 shadow-sm hover:border-indigo-100 transition-all">
-                <h4 className="text-xs font-bold text-gray-950">
-                  {theme.title}
-                </h4>
-                <div className="bg-indigo-50/30 rounded-xl p-3 border border-indigo-100/20 text-[11px] text-slate-700 leading-relaxed flex gap-2">
-                  <span className="text-sm">🤖</span>
-                  <div>
-                    <span className="font-bold text-indigo-950">泡泡解读：</span>
-                    “{theme.evidence}”
-                  </div>
-                </div>
-                {theme.chain && confidenceScore !== undefined && confidenceScore >= 50 && (
-                  <div className="bg-amber-50/40 rounded-xl p-3 border border-amber-100/30 text-[11px] text-slate-700 leading-relaxed space-y-2">
-                    <div className="flex items-center justify-between">
-                      <span className="font-bold text-amber-800 flex items-center gap-1">
-                        <span className="text-sm">🔗</span>
-                        因果链
+        {morningReport.stories.length > 0 ? morningReport.stories.map((story) => {
+          const expanded = expandedStories.has(story.storyId);
+          const reasoningSteps = storyMode === 'beginner' && story.teacher.simpleChain?.length
+            ? story.teacher.simpleChain.map((text, index) => ({
+                id: `simple-${index + 1}`,
+                text,
+                kind: 'knowledge' as const,
+                evidenceIds: [],
+              }))
+            : visibleReasoningSteps(story);
+          const confidence = confidenceText(story);
+          const professional = story.professional;
+          const feedbackKey = `${storyMode}:${story.storyId}`;
+          const driverLabels = {
+            primary: '主驱动',
+            secondary: '次驱动',
+            diffusion: '扩散逻辑',
+          };
+          return (
+            <article key={story.storyId} className="bg-white rounded-2xl border border-slate-100 p-4 shadow-sm space-y-3">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[9px] font-bold text-indigo-700 bg-indigo-50 px-2 py-1 rounded-full">
+                  {TYPE_LABELS[story.type] || '市场事件'}
+                </span>
+                {storyMode === 'beginner' && confidence && (
+                  <span className="text-[9px] text-slate-500 flex items-center gap-1">
+                    <ShieldCheck className="w-3 h-3" />
+                    {confidence}
+                  </span>
+                )}
+                {storyMode === 'professional' && (
+                  <span className="text-[9px] text-slate-600 flex items-center gap-1">
+                    <ShieldCheck className="w-3 h-3 text-indigo-500" />
+                    证据评分 {professional.confidence.score}/100
+                  </span>
+                )}
+              </div>
+
+              <div>
+                <h4 className="text-sm font-bold text-slate-950">{story.title}</h4>
+                {story.metrics.length > 0 && (
+                  <div className="mt-2">
+                    {storyMode === 'professional' && (
+                      <p className="text-[9px] font-bold text-slate-400 mb-1.5">行情与数据验证</p>
+                    )}
+                    <div className="flex flex-wrap gap-1.5">
+                    {story.metrics.map((metric) => (
+                      <span key={`${metric.label}-${metric.value}`} className="text-[10px] font-semibold bg-slate-50 text-slate-600 px-2 py-1 rounded-lg">
+                        {metric.label}：{metric.value}
                       </span>
-                      <div className="flex items-center gap-1.5">
-                        <div className="w-14 h-1.5 bg-slate-200 rounded-full overflow-hidden">
-                          <div
-                            className={`h-full rounded-full ${scoreColor}`}
-                            style={{ width: `${confidenceScore}%` }}
-                          ></div>
-                        </div>
-                        <span className="text-[9px] text-slate-500 font-mono">置信度 {confidenceScore}%</span>
-                      </div>
-                    </div>
-                    <div className="text-[11px] text-slate-700">
-                      <p className="mb-1.5"><strong>📌 触发：</strong>{theme.chain.event}</p>
-                      <p><strong>💡 原因：</strong>{theme.chain.reason}</p>
+                    ))}
                     </div>
                   </div>
                 )}
               </div>
-            );
-          }) : (
-            <div className="text-center text-gray-400 text-xs py-6">
-              {morningReport.loading ? 'AI 正在分析今日热点...' : '暂无可用的热点数据'}
-            </div>
-          )}
-        </div>
-      </div>
+
+              {storyMode === 'beginner' ? (
+                <div className="flex gap-2 bg-indigo-50/60 rounded-2xl p-3 border border-indigo-100/70">
+                  <BubbleAvatar size="sm" />
+                  <p className="text-xs leading-5 text-slate-700">
+                    <strong className="text-indigo-800">泡泡解读：</strong>
+                    {story.teacher.summary}
+                  </p>
+                </div>
+              ) : (
+                <>
+                  <div className="rounded-xl bg-indigo-50/60 p-3">
+                    <p className="text-[9px] font-bold text-indigo-500 mb-1">事件结论</p>
+                    <p className="text-xs leading-5 font-medium text-slate-800">{professional.conclusion}</p>
+                  </div>
+                  {professional.drivers.length > 0 && (
+                    <div className="space-y-2">
+                      <p className="text-[9px] font-bold text-slate-400">核心驱动因素</p>
+                      {professional.drivers.map((driver, index) => (
+                        <div key={`${driver.role}-${index}`} className="flex items-start gap-2">
+                          <span className={`mt-0.5 shrink-0 rounded-md px-1.5 py-0.5 text-[9px] font-bold ${
+                            driver.role === 'primary'
+                              ? 'bg-indigo-100 text-indigo-700'
+                              : driver.role === 'secondary'
+                                ? 'bg-sky-100 text-sky-700'
+                                : 'bg-violet-100 text-violet-700'
+                          }`}>
+                            {driverLabels[driver.role]}
+                          </span>
+                          <div className="min-w-0">
+                            <p className="text-[11px] font-bold text-slate-800">{driver.title}</p>
+                            <p className="text-[10px] leading-4 text-slate-600 mt-0.5">{driver.explanation}</p>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </>
+              )}
+
+              {reasoningSteps.length > 0 && (
+                <div>
+                  <button
+                    type="button"
+                    onClick={() => toggleStory(story.storyId)}
+                    aria-expanded={expanded}
+                    className="w-full flex items-center justify-between text-[11px] font-bold text-slate-700 bg-slate-50 px-3 py-2.5 rounded-xl"
+                  >
+                    <span>{storyMode === 'beginner' ? '为什么会这样？' : '查看完整逻辑'}</span>
+                    <ChevronDown className={`w-4 h-4 transition-transform ${expanded ? 'rotate-180' : ''}`} />
+                  </button>
+                  {expanded && (
+                    <div className="mt-2 rounded-2xl bg-slate-50 border border-slate-100 p-3 space-y-3">
+                      {storyMode === 'professional' && (
+                        <p className="text-[9px] font-bold text-slate-400">完整因果链</p>
+                      )}
+                      {reasoningSteps.map((step, index) => (
+                        <div key={step.id} className="flex gap-2">
+                          <div className="flex flex-col items-center">
+                            <span className="w-5 h-5 rounded-full bg-white border border-indigo-200 text-[9px] font-bold text-indigo-700 flex items-center justify-center">
+                              {index + 1}
+                            </span>
+                            {index < reasoningSteps.length - 1 && <span className="w-px h-5 bg-indigo-200" />}
+                          </div>
+                          <div className="min-w-0 flex-1 pb-2">
+                            <p className="text-[11px] leading-5 text-slate-700">{step.text}</p>
+                            {storyMode === 'professional' && (
+                              <span className="text-[9px] text-slate-400">
+                                {step.kind === 'fact' ? '已确认事实' : step.kind === 'knowledge' ? '金融常识' : '合理推断'}
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                      ))}
+                      {storyMode === 'beginner' && (story.teacher.uncertaintyText || story.reasoning.uncertainty) && (
+                        <p className="text-[10px] leading-4 text-amber-800 border-t border-amber-200/60 pt-2">
+                          💭 {story.teacher.uncertaintyText || story.reasoning.uncertainty}
+                        </p>
+                      )}
+                      {storyMode === 'professional' && (
+                        <>
+                          <div className="border-t border-slate-200 pt-3 space-y-2">
+                            <div>
+                              <p className="text-[9px] font-bold text-emerald-700">支持证据</p>
+                              <ul className="mt-1 space-y-1">
+                                {professional.supportingEvidence.length > 0
+                                  ? professional.supportingEvidence.map((item) => <li key={item} className="text-[10px] leading-4 text-slate-600">• {item}</li>)
+                                  : <li className="text-[10px] text-slate-500">当前仅有行情事实，暂无额外支持证据。</li>}
+                              </ul>
+                            </div>
+                            <div>
+                              <p className="text-[9px] font-bold text-amber-700">证据缺口</p>
+                              <ul className="mt-1 space-y-1">
+                                {(professional.evidenceGaps.length > 0 ? professional.evidenceGaps : [story.reasoning.uncertainty])
+                                  .filter(Boolean)
+                                  .map((item) => <li key={item} className="text-[10px] leading-4 text-slate-600">• {item}</li>)}
+                              </ul>
+                            </div>
+                          </div>
+                          <div className="rounded-xl bg-white p-3 border border-slate-200">
+                            <div className="flex items-center justify-between gap-2">
+                              <p className="text-[10px] font-bold text-slate-800">证据评分 {professional.confidence.score}/100</p>
+                              <span className="text-[9px] text-slate-500">
+                                {professional.confidence.level === 'high' ? '较充分' : professional.confidence.level === 'medium' ? '中等' : '有限'}
+                              </span>
+                            </div>
+                            <div className="h-1.5 bg-slate-100 rounded-full overflow-hidden mt-2">
+                              <div className="h-full bg-indigo-500 rounded-full" style={{ width: `${professional.confidence.score}%` }} />
+                            </div>
+                            <p className="text-[10px] leading-4 text-slate-600 mt-2">{professional.confidence.explanation}</p>
+                          </div>
+                          {professional.alternativeExplanations.length > 0 && (
+                            <div>
+                              <p className="text-[9px] font-bold text-slate-700">替代解释</p>
+                              {professional.alternativeExplanations.map((item) => <p key={item} className="text-[10px] leading-4 text-slate-600 mt-1">• {item}</p>)}
+                            </div>
+                          )}
+                          {professional.counterLogic.length > 0 && (
+                            <div>
+                              <p className="text-[9px] font-bold text-rose-700">反向逻辑</p>
+                              {professional.counterLogic.map((item) => <p key={item} className="text-[10px] leading-4 text-slate-600 mt-1">• {item}</p>)}
+                            </div>
+                          )}
+                          {professional.observationIndicators.length > 0 && (
+                            <div>
+                              <p className="text-[9px] font-bold text-indigo-700">后续观察</p>
+                              <div className="flex flex-wrap gap-1.5 mt-1.5">
+                                {professional.observationIndicators.map((item) => (
+                                  <span key={item} className="text-[9px] leading-4 bg-white border border-slate-200 text-slate-600 px-2 py-1 rounded-lg">{item}</span>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                        </>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {story.evidence.length > 0 && (
+                <div className="text-[9px] text-slate-400 flex flex-wrap items-center gap-1">
+                  <span>来源：</span>
+                  {story.evidence.slice(0, 3).map((source) => source.url?.startsWith('http') ? (
+                    <a key={source.id} href={source.url} target="_blank" rel="noreferrer" className="underline hover:text-indigo-600">
+                      {source.sourceName}
+                    </a>
+                  ) : <span key={source.id}>{source.sourceName}</span>)}
+                </div>
+              )}
+
+              <div className="flex items-center justify-end gap-1.5 pt-1 border-t border-slate-50">
+                <button
+                  type="button"
+                  onClick={() => handleThumbsUp(story)}
+                  className={`flex items-center gap-1 px-2 py-1 rounded-lg text-[10px] font-medium transition-all ${
+                    thumbsFeedback[feedbackKey] === 'up'
+                      ? 'bg-indigo-50 text-indigo-600 border border-indigo-200'
+                      : 'text-gray-400 hover:text-indigo-500 hover:bg-gray-50'
+                  }`}
+                >
+                  <ThumbsUp className={`w-3 h-3 ${thumbsFeedback[feedbackKey] === 'up' ? 'fill-indigo-500' : ''}`} />
+                  有用
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleThumbsDown(story)}
+                  className={`flex items-center gap-1 px-2 py-1 rounded-lg text-[10px] font-medium transition-all ${
+                    thumbsFeedback[feedbackKey] === 'down'
+                      ? 'bg-rose-50 text-rose-600 border border-rose-200'
+                      : 'text-gray-400 hover:text-rose-500 hover:bg-gray-50'
+                  }`}
+                >
+                  <ThumbsDown className={`w-3 h-3 ${thumbsFeedback[feedbackKey] === 'down' ? 'fill-rose-500' : ''}`} />
+                  改进
+                </button>
+              </div>
+            </article>
+          );
+        }) : (
+          <div className="text-center text-gray-400 text-xs py-6">
+            {morningReport.loading ? 'AI 正在分析今日热点...' : '暂无可用的热点数据'}
+          </div>
+        )}
+      </section>
 
       {/* 下方区域: 市场地图入口 */}
       <div id="market-map-entrance-section" className="space-y-3 px-4">
@@ -619,6 +985,54 @@ export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStoc
               </div>
             );
           })}
+        </div>
+      </div>
+
+      {/* 今日一句话成长 */}
+      <div id="growth-quote-card" className="mx-4 px-5 py-4 bg-gradient-to-r from-indigo-50 to-purple-50 border border-indigo-100 rounded-3xl shadow-sm">
+        <div className="flex items-start gap-3">
+          <div className="w-9 h-9 bg-indigo-100 rounded-xl flex items-center justify-center flex-shrink-0 text-lg">
+            💡
+          </div>
+          <div>
+            <p className="text-[10px] font-bold text-indigo-400 mb-1">今日投资思维</p>
+            <p className="text-xs font-medium text-indigo-900 leading-relaxed">
+              {growthQuote || '学会等待，比学会操作更难，也更重要。'}
+            </p>
+          </div>
+        </div>
+      </div>
+
+      {/* 今天与你有关 */}
+      <div id="related-to-you-card" className="mx-4 bg-white border border-slate-100 rounded-[32px] p-5 shadow-sm">
+        <div className="flex items-center gap-2 mb-3">
+          <span className="text-sm">👤</span>
+          <span className="text-xs font-bold text-gray-700">今天与你有关</span>
+        </div>
+        <div className="bg-slate-50 rounded-2xl p-4 border border-slate-100">
+          {followedStocks && followedStocks.length > 0 ? (
+            <div className="space-y-3">
+              <p className="text-[10px] text-gray-400 font-medium mb-2">根据你的关注动态</p>
+              {followedStocks.slice(0, 3).map((stock) => {
+                const isUp = stock.changePercent >= 0;
+                return (
+                  <div key={stock.code} className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <span className={`w-1.5 h-1.5 rounded-full ${isUp ? 'bg-red-400' : 'bg-emerald-400'}`}></span>
+                      <span className="text-xs font-semibold text-gray-800">{stock.name}</span>
+                    </div>
+                    <span className={`text-[10px] font-mono font-bold ${isUp ? 'text-red-500' : 'text-emerald-500'}`}>
+                      {isUp ? '+' : ''}{stock.changePercent}%
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          ) : (
+            <p className="text-xs text-gray-400 text-center py-2">
+              今天没有影响你关注内容的重要事件，可以安心休息 😊
+            </p>
+          )}
         </div>
       </div>
 
@@ -717,6 +1131,21 @@ export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStoc
         )}
       </AnimatePresence>
 
+      {/* 反馈弹窗 - 点踩后弹出 */}
+      {feedbackTarget && (
+        <FeedbackModal
+          contentType={feedbackTarget.contentType}
+          contentId={feedbackTarget.contentId}
+          promptVersion={feedbackTarget.promptVersion}
+          onClose={() => {
+            const storyId = feedbackTarget.contentId;
+            const mode = feedbackTarget.contentType.endsWith('professional') ? 'professional' : 'beginner';
+            setFeedbackTarget(null);
+            setThumbsFeedback(prev => ({ ...prev, [`${mode}:${storyId}`]: null }));
+          }}
+        />
+      )}
+
       {/* Interactive Modal Sheet for AI Morning Report Reasons */}
       <AnimatePresence>
         {isReasonOpen && (
@@ -767,19 +1196,19 @@ export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStoc
                   </div>
                 ) : (
                   <div className="space-y-3 pt-1">
-                    {morningReport.top3Themes.length > 0 ? morningReport.top3Themes.map((theme, i) => (
-                      <div key={i} className="bg-slate-50 border border-slate-100 rounded-2xl p-4 space-y-1.5">
+                    {morningReport.stories.length > 0 ? morningReport.stories.map((story, i) => (
+                      <div key={story.storyId} className="bg-slate-50 border border-slate-100 rounded-2xl p-4 space-y-1.5">
                         <div className="flex justify-between items-center">
                           <span className="text-[10px] font-bold text-indigo-600 bg-indigo-50 px-2 py-0.5 rounded-md">
                             {i === 0 ? '核心催化' : i === 1 ? '资金风向' : '流动性保障'}
                           </span>
                         </div>
-                        <p className="text-xs font-bold text-gray-900">{theme.title}</p>
+                        <p className="text-xs font-bold text-gray-900">{story.title}</p>
                         <p className="text-[11px] text-slate-600 leading-relaxed font-medium">
-                          {theme.evidence}
-                          {theme.chain && (
+                          {story.teacher.summary}
+                          {story.reasoning.steps.length > 0 && (
                             <span className="block mt-1 text-indigo-600 font-medium">
-                              因果链: {theme.chain.event} → {theme.chain.reason}
+                              因果链：{story.reasoning.steps.map(step => step.text).join(' → ')}
                             </span>
                           )}
                         </p>

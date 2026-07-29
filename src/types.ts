@@ -62,3 +62,83 @@ export interface UserProfile {
   followedSectors: string[];
   virtualBalance: number;
 }
+
+export type MarketStoryType = 'sector_driver' | 'geo_event' | 'policy_driver' | 'macro_event';
+export type ReasoningStepKind = 'fact' | 'knowledge' | 'inference';
+export type ConfidenceLevel = 'high' | 'medium' | 'limited';
+
+export interface MarketSource {
+  id: string;
+  title: string;
+  sourceName: string;
+  publishedAt?: string;
+  url?: string;
+  kind: 'market_data' | 'news' | 'policy' | 'announcement';
+}
+
+export interface MarketMetric {
+  label: string;
+  value: string;
+}
+
+export interface MarketStoryDraft {
+  storyId: string;
+  type: MarketStoryType;
+  title: string;
+  what: string;
+  metrics: MarketMetric[];
+  evidenceIds: string[];
+  relatedSectors: string[];
+}
+
+export interface ReasoningStep {
+  id: string;
+  text: string;
+  evidenceIds: string[];
+  kind: ReasoningStepKind;
+}
+
+export interface ReasoningChain {
+  storyId: string;
+  steps: ReasoningStep[];
+  uncertainty: string;
+  confidenceLevel: ConfidenceLevel;
+  validationStatus: 'passed' | 'limited' | 'rejected';
+}
+
+export interface TeacherStoryContent {
+  storyId: string;
+  summary: string;
+  uncertaintyText: string;
+  simpleChain?: string[];
+}
+
+export interface ProfessionalDriver {
+  role: 'primary' | 'secondary' | 'diffusion';
+  title: string;
+  explanation: string;
+  evidenceIds: string[];
+}
+
+export interface ProfessionalStoryContent {
+  storyId: string;
+  conclusion: string;
+  drivers: ProfessionalDriver[];
+  supportingEvidence: string[];
+  evidenceGaps: string[];
+  alternativeExplanations: string[];
+  counterLogic: string[];
+  observationIndicators: string[];
+  confidence: {
+    score: number;
+    level: ConfidenceLevel;
+    explanation: string;
+  };
+}
+
+export interface MarketStory extends MarketStoryDraft {
+  reasoning: ReasoningChain;
+  teacher: TeacherStoryContent;
+  professional: ProfessionalStoryContent;
+  evidence: MarketSource[];
+}
