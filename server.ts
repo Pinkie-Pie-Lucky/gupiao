@@ -34,7 +34,7 @@ function getAIClient(): OpenAI {
 
 async function startServer() {
   const app = express();
-  const PORT = 3000;
+  const PORT = 8080;
 
   // Middleware for parsing JSON
   app.use(express.json());
@@ -545,6 +545,7 @@ async function startServer() {
       const req = mod.get(
         {
           hostname: u.hostname,
+          family: 4,
           path: u.pathname + u.search,
           headers: { 'User-Agent': 'Mozilla/5.0' },
         },
