@@ -876,6 +876,8 @@ async function startServer() {
 
     const volume = indices.reduce((sum: number, i: any) => sum + (i.volume || 0), 0);
 
+    // 用市场脉搏中的全量板块数据（不含排序偏差）来计算广度
+    const fullSectors = marketPulse.sectors && marketPulse.sectors.length > 0 ? marketPulse.sectors : sectors;
     const effectiveSectors = sectors.length > 0 ? sectors : marketPulse.sectors;
 
     return {
@@ -900,8 +902,10 @@ async function startServer() {
       publishedAt: timestamp.toISOString(),
       kind: 'market_data',
     };
-    const up = marketData.sectors.filter((sector: any) => Number(sector.changePercent) > 0).length;
-    const down = marketData.sectors.filter((sector: any) => Number(sector.changePercent) < 0).length;
+    // 使用全量板块数据（marketPulse.sectors）计算广度，避免fetchSectors降序取前500名的偏差
+    const breadthSectors = marketData.marketPulse?.sectors?.length ? marketData.marketPulse.sectors : marketData.sectors;
+    const up = breadthSectors.filter((sector: any) => Number(sector.changePercent) > 0).length;
+    const down = breadthSectors.filter((sector: any) => Number(sector.changePercent) < 0).length;
     const flat = Math.max(0, marketData.sectors.length - up - down);
     const missingData: string[] = [];
     if (!marketData.newsItems?.length) missingData.push('news');

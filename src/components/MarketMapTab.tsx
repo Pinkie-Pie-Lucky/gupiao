@@ -107,8 +107,8 @@ export function MarketMapTab({ selectedSectorId, onSelectSectorId, onNavigateToT
 
   const filterCounts = useMemo(() => ({
     all: sectors.length,
-    featured: sectors.filter(s => s.shouldHighlight).length,
-    anomaly: sectors.filter(s => s.isAnomaly).length,
+    featured: Math.min(10, sectors.filter(s => s.shouldHighlight).length),
+    anomaly: Math.min(10, sectors.filter(s => s.isAnomaly).length),
     followed: followedSectorIds.length,
   }), [sectors, followedSectorIds]);
 
