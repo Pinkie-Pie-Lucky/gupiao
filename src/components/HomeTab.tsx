@@ -730,12 +730,6 @@ export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStoc
                 <span className="text-[9px] font-bold text-indigo-700 bg-indigo-50 px-2 py-1 rounded-full">
                   {TYPE_LABELS[story.type] || '市场事件'}
                 </span>
-                {storyMode === 'beginner' && confidence && (
-                  <span className="text-[9px] text-slate-500 flex items-center gap-1">
-                    <ShieldCheck className="w-3 h-3" />
-                    {confidence}
-                  </span>
-                )}
                 {storyMode === 'professional' && (
                   <span className="text-[9px] text-slate-600 flex items-center gap-1">
                     <ShieldCheck className="w-3 h-3 text-indigo-500" />
@@ -904,11 +898,14 @@ export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStoc
               {story.evidence.length > 0 && (
                 <div className="text-[9px] text-slate-400 flex flex-wrap items-center gap-1">
                   <span>来源：</span>
-                  {story.evidence.slice(0, 3).map((source) => source.url?.startsWith('http') ? (
-                    <a key={source.id} href={source.url} target="_blank" rel="noreferrer" className="underline hover:text-indigo-600">
-                      {source.sourceName}
-                    </a>
-                  ) : <span key={source.id}>{source.sourceName}</span>)}
+                  {story.evidence
+                    .filter(function(src, idx, arr) { return arr.findIndex(function(s) { return s.sourceName === src.sourceName; }) === idx; })
+                    .slice(0, 3)
+                    .map(function(source) {
+                      return source.url?.startsWith('http')
+                        ? <a key={source.id} href={source.url} target="_blank" rel="noreferrer" className="underline hover:text-indigo-600">{source.sourceName}</a>
+                        : <span key={source.id}>{source.sourceName}</span>;
+                    })}
                 </div>
               )}
 
@@ -1000,39 +997,6 @@ export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStoc
               {growthQuote || '学会等待，比学会操作更难，也更重要。'}
             </p>
           </div>
-        </div>
-      </div>
-
-      {/* 今天与你有关 */}
-      <div id="related-to-you-card" className="mx-4 bg-white border border-slate-100 rounded-[32px] p-5 shadow-sm">
-        <div className="flex items-center gap-2 mb-3">
-          <span className="text-sm">👤</span>
-          <span className="text-xs font-bold text-gray-700">今天与你有关</span>
-        </div>
-        <div className="bg-slate-50 rounded-2xl p-4 border border-slate-100">
-          {followedStocks && followedStocks.length > 0 ? (
-            <div className="space-y-3">
-              <p className="text-[10px] text-gray-400 font-medium mb-2">根据你的关注动态</p>
-              {followedStocks.slice(0, 3).map((stock) => {
-                const isUp = stock.changePercent >= 0;
-                return (
-                  <div key={stock.code} className="flex items-center justify-between">
-                    <div className="flex items-center gap-2">
-                      <span className={`w-1.5 h-1.5 rounded-full ${isUp ? 'bg-red-400' : 'bg-emerald-400'}`}></span>
-                      <span className="text-xs font-semibold text-gray-800">{stock.name}</span>
-                    </div>
-                    <span className={`text-[10px] font-mono font-bold ${isUp ? 'text-red-500' : 'text-emerald-500'}`}>
-                      {isUp ? '+' : ''}{stock.changePercent}%
-                    </span>
-                  </div>
-                );
-              })}
-            </div>
-          ) : (
-            <p className="text-xs text-gray-400 text-center py-2">
-              今天没有影响你关注内容的重要事件，可以安心休息 😊
-            </p>
-          )}
         </div>
       </div>
 
