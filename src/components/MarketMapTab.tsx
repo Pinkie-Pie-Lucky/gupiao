@@ -141,7 +141,7 @@ export function MarketMapTab({ selectedSectorId, onSelectSectorId, onNavigateToT
           </div>
           {marketSummary.temperature ? <div className="text-right"><span className="text-lg">{marketSummary.temperature>=60?'🔥':marketSummary.temperature>=40?'☀️':'🌧️'}</span><span className="text-[10px] text-slate-500 ml-1">{marketSummary.temperatureLabel||''}</span></div> : null}
         </div>
-        {marketSummary.upSectors!==undefined ? <div className="flex gap-2 mt-2 text-[10px]"><span className="text-green-600 font-medium">上涨 {marketSummary.upSectors} 板块</span><span className="text-slate-300">|</span><span className="text-red-500 font-medium">下跌 {marketSummary.downSectors} 板块</span></div> : null}
+        {marketSummary.upSectors!==undefined ? <div className="flex gap-2 mt-2 text-[10px]"><span className="text-red-600 font-medium">上涨 {marketSummary.upSectors} 板块</span><span className="text-slate-300">|</span><span className="text-emerald-600 font-medium">下跌 {marketSummary.downSectors} 板块</span></div> : null}
       </div> : null}
 
       {dataError && <div className="rounded-xl bg-amber-50 p-3 text-xs text-amber-800"><AlertTriangle className="inline w-3 h-3 mr-1"/>{dataError}</div>}
@@ -167,7 +167,7 @@ export function MarketMapTab({ selectedSectorId, onSelectSectorId, onNavigateToT
         <div className="grid grid-cols-2 gap-2.5">
           {filteredSectors.map(s => (
             <button key={s.sectorId} onClick={() => selectSector(s)}
-              className={`rounded-2xl border p-3 text-left transition min-h-[100px] ${isUp(s.changePercent)?'border-red-100 bg-red-50/80':'border-emerald-100 bg-emerald-50/80'} ${s.shouldHighlight?'col-span-2':''}`}>
+              className={`rounded-2xl border p-3 text-left transition min-h-[100px] ${isUp(s.changePercent)?'border-red-100 bg-red-50/80':'border-emerald-100 bg-emerald-50/80'}`}>
               <span className="text-sm font-bold">{s.sector}</span>
               <div className={`mt-1 text-xl font-bold ${isUp(s.changePercent)?'text-red-600':'text-emerald-600'}`}>{s.change}</div>
               <div className="mt-1 flex flex-wrap gap-1">
