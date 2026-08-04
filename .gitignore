@@ -8,3 +8,7 @@ coverage/
 !.env.example
 .npm-cache/  
 .git_disabled/  
+
+# 运行时产物（运行产生的数据文件，不应入库）
+work/feedback.jsonl
+work/.runtime/
