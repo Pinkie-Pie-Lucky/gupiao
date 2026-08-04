@@ -732,7 +732,7 @@ export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStoc
         <div id="sentiment-indicator-area" className="space-y-2 pt-1">
           <div className="flex justify-between text-[11px] font-bold text-gray-500">
             <span className="flex items-center gap-1">
-              市场温度：<span className="text-indigo-600">{marketOverview?.marketTemperature ? `${cachedWeather.label}（${cachedWeather.desc}）` : '加载中...'}</span>
+              市场温度：<span className="text-indigo-600">{marketOverview?.marketTemperature ? cachedWeather.label : '加载中...'}</span>
             </span>
             <span className="text-indigo-600 font-mono">{cachedWeather.temp}℃ / 100℃</span>
           </div>
@@ -769,21 +769,6 @@ export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStoc
                 <div className="mt-0.5 text-[11px] font-bold text-slate-700">{turnoverText}</div>
               </div>
             </div>
-          )}
-          {marketOverview?.marketTemperature && (
-            <div className="flex items-center justify-between text-[9px] text-slate-400">
-              <span>方向分 {marketOverview.marketTemperature.directionScore.toFixed(1)}</span>
-              <span>
-                确认修正 {marketOverview.marketTemperature.correction >= 0 ? '+' : ''}
-                {marketOverview.marketTemperature.correction.toFixed(1)}
-                <span className="ml-1 text-slate-300">（范围 ±15）</span>
-              </span>
-            </div>
-          )}
-          {marketOverview?.marketTemperature?.components.turnover.ratio === null && (
-            <p className="text-[9px] leading-4 text-slate-400">
-              {marketOverview.marketTemperature.components.turnover.status}；不会影响方向判断。
-            </p>
           )}
         </div>
 

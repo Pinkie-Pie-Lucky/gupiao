@@ -36,7 +36,7 @@ function getAIClient(): OpenAI {
 
 async function startServer() {
   const app = express();
-  const PORT = 8080;
+  const PORT = Number(process.env.PORT) || 8080;
 
   // Middleware for parsing JSON
   app.use(express.json());
@@ -49,7 +49,16 @@ async function startServer() {
         return res.status(400).json({ error: 'Message is required' });
       }
 
-      const client = getAIClient();
+      // 未配置 DeepSeek Key 时优雅降级：明确提示，而不是抛 500 让前端误报"网络连接断开"
+      let client: OpenAI;
+      try {
+        client = getAIClient();
+      } catch {
+        return res.json({
+          reply: '泡泡老师暂时还没接通 AI 大脑哦～ 当前环境没有配置 DeepSeek API Key（DEEPSEEK_API_KEY）。\n\n请在项目根目录的 .env 文件中填入有效的 DeepSeek Key 后重启服务，泡泡就能陪你聊个股和板块啦！🎈\n\n泡泡老师提醒：股市有风险，投资需谨慎！以上研判仅供泡泡模拟盘练习参考，不构成实盘买入建议哦。',
+          suggestedPrompts: ['查看今日市场速览', '看看行业板块涨跌']
+        });
+      }
 
       const systemInstruction = `
 你是"泡泡老师" (Paopao Teacher)，一个非常可爱、亲切、专业且富有幽默感的A股智能投资研究专家，服务于"泡泡看市"应用。
@@ -715,16 +724,61 @@ ${breadth}
         '82.push2.eastmoney.com',
         'push2his.eastmoney.com',
       ];
-      // 取完整行业板块池，而不是只取涨幅前20名，否则市场广度会系统性偏高。
-      const EM_PATH = '/api/qt/clist/get?pn=1&pz=500&po=1&np=1&fltt=2&invt=2&fid=f3&fs=m:90+t:2&fields=f2,f3,f4,f12,f14';
-      // 注意：东方财富HTTPS在此环境下会ECONNRESET，与指数API相同原因，必须使用HTTP
+      // 拉取全部板块（地域 m:90 t:1 + 行业 m:90 t:2 + 概念 m:90 t:3）。
+      // 关键：东方财富单页最多返回 100 条（pz 即使设为 500 也会被截断为 100），
+      // 因此必须按 total 翻页把所有板块都取回来，否则行业(496)/概念(503)板块会被各自截成 100 个，
+      // 市场广度也会因此系统性失真（之前只拿到 ~231 个）。
+      const BOARD_QUERIES = ['m:90+t:1', 'm:90+t:2', 'm:90+t:3'];
+      const PAGE_SIZE = 100;
+      const buildPath = (fs: string, page: number) =>
+        `/api/qt/clist/get?pn=${page}&pz=${PAGE_SIZE}&po=1&np=1&fltt=2&invt=2&fid=f3&fs=${fs}&fields=f2,f3,f4,f12,f14`;
+
+      // 拉取单个板块分类的全部分页（按 total 翻页，pz=100）
+      async function fetchBoardTier(host: string, fs: string): Promise<any[]> {
+        const first = await httpGetJSON(`http://${host}${buildPath(fs, 1)}`);
+        const total = Number(first?.data?.total || 0);
+        const diffs: any[] = [...(first?.data?.diff || [])];
+        const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+        if (pages > 1) {
+          const rest = await Promise.all(
+            Array.from({ length: pages - 1 }, (_, i) =>
+              httpGetJSON(`http://${host}${buildPath(fs, i + 2)}`).catch(() => null)),
+          );
+          for (const r of rest) {
+            if (r?.data?.diff) diffs.push(...r.data.diff);
+          }
+        }
+        const out: any[] = [];
+        const seen = new Set<string>();
+        for (const d of diffs) {
+          const code = d?.f12;
+          if (!code || seen.has(code)) continue;
+          seen.add(code);
+          const name = d.f14;
+          const change = Number(d.f3);
+          if (name && Number.isFinite(change)) {
+            out.push({ name, code, changePercent: Math.round(change * 100) / 100 });
+          }
+        }
+        return out;
+      }
+
+      // 注意：东方财富HTTPS在此环境下会ECONNRESET，必须使用HTTP；逐 host 容错
       for (const host of EM_HOSTS) {
         try {
-          const result = await httpGetJSON(`http://${host}${EM_PATH}`);
-          return (result?.data?.diff || [])
-            .map((d: any) => ({ name: d.f14, code: d.f12, changePercent: Math.round(d.f3 * 100) / 100 }))
-            .filter((s: any) => s.name && s.changePercent !== undefined)
-            .sort((a: any, b: any) => b.changePercent - a.changePercent);
+          const tiers = await Promise.all(BOARD_QUERIES.map((fs) => fetchBoardTier(host, fs)));
+          const seen = new Set<string>();
+          const merged: any[] = [];
+          for (const tier of tiers) {
+            for (const s of tier) {
+              if (seen.has(s.code)) continue;
+              seen.add(s.code);
+              merged.push(s);
+            }
+          }
+          if (merged.length > 0) {
+            return merged.sort((a: any, b: any) => b.changePercent - a.changePercent);
+          }
         } catch {
           // try next host
         }
@@ -911,13 +965,12 @@ ${breadth}
 
     const volume = indices.reduce((sum: number, i: any) => sum + (i.volume || 0), 0);
 
-    // 用市场脉搏中的全量板块数据（不含排序偏差）来计算广度
-    const fullSectors = marketPulse.sectors && marketPulse.sectors.length > 0 ? marketPulse.sectors : sectors;
-    const effectiveSectors = sectors.length > 0 ? sectors : marketPulse.sectors;
+    // 板块广度优先使用完整的板块列表（行业+概念+地域全量），缺失时回退到市场脉搏聚合
+    const breadthSectors = sectors.length > 0 ? sectors : marketPulse.sectors;
 
     return {
       indices: indices.length > 0 ? indices : [],
-      sectors: effectiveSectors,
+      sectors: breadthSectors,
       announcements: [],
       newsHeadlines: newsHeadlines.length > 0 ? newsHeadlines : ['今日财经快讯获取中，请稍后刷新'],
       newsItems,
@@ -1613,7 +1666,7 @@ ${breadth}
     } else if (timeNum >= 1300 && timeNum < 1500) {
       return { isOpen: true, phase: 'afternoon', label: '交易中（下午盘）' };
     } else {
-      return { isOpen: false, phase: 'closed', label: '已收盘 — 显示昨日数据' };
+      return { isOpen: false, phase: 'closed', label: '已收盘' };
     }
   }
 
@@ -1830,7 +1883,7 @@ ${breadth}
   // Vite middleware integration for full-stack build/dev environment
   if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: { middlewareMode: true, hmr: false, watch: null },
       appType: 'spa',
     });
     app.use(vite.middlewares);
