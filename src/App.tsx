@@ -141,7 +141,7 @@ export default function App() {
         </div>
 
         {/* Global Bottom Navigation Bar - Clean 5-tab design */}
-        <nav id="bottom-tab-bar" className="sticky bottom-0 bg-white/95 backdrop-blur-md border-t border-slate-100 px-2 py-2 flex justify-between items-center z-40 h-16">
+        <nav id="bottom-tab-bar" className="fixed bottom-0 left-1/2 -translate-x-1/2 w-full max-w-md bg-white/95 backdrop-blur-md border-t border-slate-100 px-2 py-2 flex justify-between items-center z-40 h-16">
           
           {/* Tab: 首页 */}
           <button
