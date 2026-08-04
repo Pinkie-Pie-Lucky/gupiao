@@ -34,7 +34,7 @@ export function FeedbackModal({ contentType, contentId, promptVersion, onClose }
   const handleSubmit = async () => {
     setSending(true);
     try {
-      await fetch('/api/feedback', {
+      const res = await fetch('/api/feedback', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -47,8 +47,11 @@ export function FeedbackModal({ contentType, contentId, promptVersion, onClose }
           timestamp: new Date().toISOString(),
         }),
       });
-    } catch {
-      // fail silently
+      if (!res.ok) {
+        console.error('Feedback submit failed:', res.status);
+      }
+    } catch (e) {
+      console.error('Feedback submit error:', e);
     }
     setSending(false);
     setSubmitted(true);

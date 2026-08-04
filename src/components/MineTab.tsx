@@ -5,7 +5,7 @@
 
 import { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { User, Shield, Bell, HelpCircle, ArrowUpRight, TrendingUp, TrendingDown, BookOpen, ChevronRight, Check } from 'lucide-react';
+import { User, Shield, Bell, BookOpen, ChevronRight } from 'lucide-react';
 import { UserProfile, StockItem } from '../types';
 import { mockUserProfile } from '../data';
 

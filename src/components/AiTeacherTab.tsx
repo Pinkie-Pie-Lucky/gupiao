@@ -5,15 +5,17 @@
 
 import { useState, useRef, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Send, Sparkles, AlertTriangle, ArrowRight, CornerDownLeft, Volume2, ShieldCheck } from 'lucide-react';
+import { Send, Sparkles, AlertTriangle, ArrowRight, Volume2, ShieldCheck } from 'lucide-react';
 import { ChatMessage } from '../types';
 
 interface AiTeacherTabProps {
   prefilledStock: { name: string; code: string } | null;
   onClearPrefilledStock: () => void;
+  pendingPrompt?: string | null;
+  onConsumePendingPrompt?: () => void;
 }
 
-export function AiTeacherTab({ prefilledStock, onClearPrefilledStock }: AiTeacherTabProps) {
+export function AiTeacherTab({ prefilledStock, onClearPrefilledStock, pendingPrompt, onConsumePendingPrompt }: AiTeacherTabProps) {
   const [messages, setMessages] = useState<ChatMessage[]>([
     {
       id: 'greeting',
@@ -62,6 +64,19 @@ export function AiTeacherTab({ prefilledStock, onClearPrefilledStock }: AiTeache
     window.addEventListener('trigger-ai-chat', handleGlobalChatTrigger);
     return () => window.removeEventListener('trigger-ai-chat', handleGlobalChatTrigger);
   }, []);
+
+  // Send a pending prompt (e.g. sector "问泡泡") when arriving from another tab
+  useEffect(() => {
+    if (pendingPrompt) {
+      const prompt = pendingPrompt;
+      setInputValue(prompt);
+      const timer = setTimeout(() => {
+        handleSendMessage(prompt);
+        onConsumePendingPrompt?.();
+      }, 300);
+      return () => clearTimeout(timer);
+    }
+  }, [pendingPrompt]);
 
   const handleSendMessage = async (textToSend: string) => {
     const text = textToSend.trim();

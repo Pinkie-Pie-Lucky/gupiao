@@ -23,7 +23,7 @@ interface MarketMapTabProps {
   selectedSectorId: string | null;
   onSelectSectorId: (sectorId: string | null) => void;
   onNavigateToTab: (tabId: string) => void;
-  onAskTeacherAboutSector: (sector: SectorIntelligence) => void;
+  onAskTeacherAboutSector: (name: string, question: string) => void;
 }
 
 interface IntelligenceResponse {
@@ -70,7 +70,6 @@ export function MarketMapTab({ selectedSectorId, onSelectSectorId, onNavigateToT
       }
     }).catch(()=>{});
   }, []);
-
   useEffect(() => {
     let live = true;
     async function load() {
@@ -81,8 +80,12 @@ export function MarketMapTab({ selectedSectorId, onSelectSectorId, onNavigateToT
         if (!live) return;
         const s = d.sectors || [];
         setSectors(s);
-        setActiveSector(s.find(i => i.shouldHighlight) || s[0] || null);
+        const target = selectedSectorId ? s.find(i => i.sectorId === selectedSectorId) : undefined;
+        setActiveSector(target || s.find(i => i.shouldHighlight) || s[0] || null);
         setUpdatedAt(d.timestamp || null);
+        if (selectedSectorId && target) {
+          setDetailTarget({ sectorId: target.sectorId, sectorName: target.sector });
+        }
         if (!s.length) setDataError('暂时没有可用于绘制市场地图的板块数据。');
       } catch {
         if (live) setDataError('市场地图暂时无法更新，请稍后刷新重试。');
@@ -90,7 +93,7 @@ export function MarketMapTab({ selectedSectorId, onSelectSectorId, onNavigateToT
     }
     load();
     return () => { live = false; };
-  }, []);
+  }, [selectedSectorId]);
 
   useEffect(() => {
     try {
@@ -98,6 +101,18 @@ export function MarketMapTab({ selectedSectorId, onSelectSectorId, onNavigateToT
       if (Array.isArray(saved)) setFollowedSectorIds(saved.filter(i => typeof i === 'string'));
     } catch {}
   }, []);
+
+  const toggleFollowedSector = (sectorId: string) => {
+    setFollowedSectorIds(prev => {
+      const next = prev.includes(sectorId)
+        ? prev.filter(id => id !== sectorId)
+        : [...prev, sectorId];
+      try {
+        localStorage.setItem('market-map-followed-sectors', JSON.stringify(next));
+      } catch {}
+      return next;
+    });
+  };
 
   const selectSector = (sector: SectorIntelligence) => {
     setActiveSector(sector);
@@ -166,17 +181,30 @@ export function MarketMapTab({ selectedSectorId, onSelectSectorId, onNavigateToT
       ) : (
         <div className="grid grid-cols-2 gap-2.5">
           {filteredSectors.map(s => (
-            <button key={s.sectorId} onClick={() => selectSector(s)}
-              className={`rounded-2xl border p-3 text-left transition min-h-[100px] ${isUp(s.changePercent)?'border-red-100 bg-red-50/80':'border-emerald-100 bg-emerald-50/80'}`}>
-              <span className="text-sm font-bold">{s.sector}</span>
-              <div className={`mt-1 text-xl font-bold ${isUp(s.changePercent)?'text-red-600':'text-emerald-600'}`}>{s.change}</div>
-              <div className="mt-1 flex flex-wrap gap-1">
-              {s.signalTags.slice(0,2).map(t => (
-                <span key={t} className={`rounded-full px-1.5 py-0.5 text-[10px] font-semibold ${tagStyles[t]||'bg-slate-100'}`}>{t}</span>
-              ))}
-              {s.isAnomaly ? <span className="rounded-full px-1.5 py-0.5 text-[10px] font-semibold bg-amber-100 text-amber-700">⚡异动</span> : null}
-              </div>
-            </button>
+            <div key={s.sectorId} className={`rounded-2xl border p-3 transition min-h-[100px] ${isUp(s.changePercent)?'border-red-100 bg-red-50/80':'border-emerald-100 bg-emerald-50/80'}`}>
+              <button onClick={() => selectSector(s)} className="w-full text-left">
+                <span className="text-sm font-bold">{s.sector}</span>
+                <div className={`mt-1 text-xl font-bold ${isUp(s.changePercent)?'text-red-600':'text-emerald-600'}`}>{s.change}</div>
+                <div className="mt-1 flex flex-wrap gap-1">
+                {s.signalTags.slice(0,2).map(t => (
+                  <span key={t} className={`rounded-full px-1.5 py-0.5 text-[10px] font-semibold ${tagStyles[t]||'bg-slate-100'}`}>{t}</span>
+                ))}
+                {s.isAnomaly ? <span className="rounded-full px-1.5 py-0.5 text-[10px] font-semibold bg-amber-100 text-amber-700">⚡异动</span> : null}
+                </div>
+              </button>
+              <button
+                onClick={() => toggleFollowedSector(s.sectorId)}
+                className={`mt-2 flex items-center gap-1 rounded-full px-2 py-1 text-[10px] font-semibold transition ${
+                  followedSectorIds.includes(s.sectorId)
+                    ? 'bg-rose-100 text-rose-600'
+                    : 'bg-white/70 text-slate-400 hover:text-rose-500'
+                }`}
+                aria-label={followedSectorIds.includes(s.sectorId) ? '取消关注' : '关注板块'}
+              >
+                <Heart className={`w-3 h-3 ${followedSectorIds.includes(s.sectorId) ? 'fill-rose-500 text-rose-500' : ''}`} />
+                {followedSectorIds.includes(s.sectorId) ? '已关注' : '关注'}
+              </button>
+            </div>
           ))}
         </div>
       )}
@@ -195,8 +223,10 @@ export function MarketMapTab({ selectedSectorId, onSelectSectorId, onNavigateToT
             sectorId={detailTarget.sectorId}
             sectorName={detailTarget.sectorName}
             onClose={() => setDetailTarget(null)}
-            onAskTeacher={() => {}}
+            onAskTeacher={(name, question) => onAskTeacherAboutSector(name, question)}
             initialSector={activeSector}
+            isFollowed={followedSectorIds.includes(detailTarget.sectorId)}
+            onToggleFollowed={toggleFollowedSector}
           />
         )}
       </AnimatePresence>

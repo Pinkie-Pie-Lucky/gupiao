@@ -19,6 +19,7 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<TabId>('home');
   const [selectedSectorId, setSelectedSectorId] = useState<string | null>(null);
   const [prefilledStock, setPrefilledStock] = useState<{ name: string; code: string } | null>(null);
+  const [pendingPrompt, setPendingPrompt] = useState<string | null>(null);
 
   // Centralized Watchlist state shared among tabs
   const [followedStocks, setFollowedStocks] = useState<StockItem[]>([
@@ -66,8 +67,18 @@ export default function App() {
     setPrefilledStock({ name: stockName, code: stockCode });
   };
 
+  const handleAskTeacherAboutSector = (name: string, question: string) => {
+    setPrefilledStock(null);
+    setPendingPrompt(question || `${name}现在处于什么阶段？`);
+    setActiveTab('ai-teacher');
+  };
+
   const handleClearPrefilledStock = () => {
     setPrefilledStock(null);
+  };
+
+  const handleConsumePendingPrompt = () => {
+    setPendingPrompt(null);
   };
 
   return (
@@ -91,6 +102,7 @@ export default function App() {
                   onSelectSector={handleSelectSectorId}
                   onNavigateToTab={(tabId) => setActiveTab(tabId as TabId)}
                   onAskTeacherAboutStock={handleAskTeacherAboutStock}
+                  followedStocks={followedStocks}
                 />
               )}
               {activeTab === 'market-map' && (
@@ -98,7 +110,7 @@ export default function App() {
                   selectedSectorId={selectedSectorId}
                   onSelectSectorId={handleSelectSectorId}
                   onNavigateToTab={(tabId) => setActiveTab(tabId as TabId)}
-                  onAskTeacherAboutStock={handleAskTeacherAboutStock}
+                  onAskTeacherAboutSector={handleAskTeacherAboutSector}
                 />
               )}
               {activeTab === 'watchlist' && (
@@ -113,6 +125,8 @@ export default function App() {
                 <AiTeacherTab
                   prefilledStock={prefilledStock}
                   onClearPrefilledStock={handleClearPrefilledStock}
+                  pendingPrompt={pendingPrompt}
+                  onConsumePendingPrompt={handleConsumePendingPrompt}
                 />
               )}
               {activeTab === 'mine' && (

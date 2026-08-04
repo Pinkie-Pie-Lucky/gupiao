@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useState } from 'react';
+import { useState, useMemo } from 'react';
 import {
   AreaChart,
   Area,
@@ -36,21 +36,26 @@ export function InteractiveChart({
 }: InteractiveChartProps) {
   const [timeframe, setTimeframe] = useState<'1D' | '5D' | '1M' | '1Y'>('1D');
 
-  // Let's generate slightly different variations based on the selected timeframe to make it realistic
-  const getProcessedData = () => {
+  // Generate stable simulated data for non-1D timeframes using a deterministic PRNG
+  // (avoids the chart jumping on every re-render while keeping it visually plausible)
+  const chartData = useMemo(() => {
     if (timeframe === '1D') return data;
-    
-    // Simulate other timeframes
+
     const seed = data[0]?.value || 100;
     const factor = timeframe === '5D' ? 5 : timeframe === '1M' ? 30 : 250;
-    const step = timeframe === '5D' ? '日' : timeframe === '1M' ? '号' : '月';
-    
+
+    let rngState = (symbolCode ? [...symbolCode].reduce((a, c) => a + c.charCodeAt(0), 0) : 7) + factor;
+    const rng = () => {
+      rngState = (rngState * 1103515245 + 12345) % 2147483648;
+      return rngState / 2147483648;
+    };
+
     const processed = [];
     let currentVal = seed;
     for (let i = factor; i >= 0; i--) {
-      const change = currentVal * (Math.random() - (isPositive ? 0.46 : 0.54)) * 0.015;
+      const change = currentVal * (rng() - (isPositive ? 0.46 : 0.54)) * 0.015;
       currentVal = currentVal + change;
-      
+
       let label = '';
       if (timeframe === '5D') {
         label = `D-${Math.ceil(i/4)} ${9 + (i % 4) * 2}:00`;
@@ -59,17 +64,16 @@ export function InteractiveChart({
       } else {
         label = `${2025 + Math.floor((250 - i) / 24)}年${Math.max(1, Math.ceil((250 - i) / 21) % 12 + 1)}月`;
       }
-      
+
       processed.push({
         time: label,
         value: parseFloat(currentVal.toFixed(2)),
-        volume: Math.floor(Math.random() * 80000 + 20000),
+        volume: Math.floor(rng() * 80000 + 20000),
       });
     }
     return processed.reverse();
-  };
+  }, [timeframe, data, symbolCode, isPositive]);
 
-  const chartData = getProcessedData();
   const isDataEmpty = timeframe === '1D' && (!data || data.length === 0);
 
   const values = chartData.map((d) => d.value);

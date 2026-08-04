@@ -5,7 +5,8 @@
 
 import { useState, useEffect } from 'react';
 import { motion } from 'motion/react';
-import { TrendingUp, BarChart3, Activity, Newspaper, Clock, MessageCircle, ChevronDown, ChevronUp, Sparkles, Heart, X, ArrowUpRight, Shield } from 'lucide-react';
+import { TrendingUp, BarChart3, Activity, Newspaper, Clock, MessageCircle, ChevronDown, ChevronUp, Heart, ArrowUpRight, Shield } from 'lucide-react';
+import { SectorIntelligence } from '../types';
 
 const tagStyles = {
   '今日主线':'bg-violet-100 text-violet-700','异动上涨':'bg-amber-100 text-amber-800',
@@ -21,9 +22,20 @@ const stageStyles = {
   no_clear_trend:{label:'暂无明确趋势',cls:'bg-gray-100 text-gray-600 border-gray-200'},
 };
 
-export function SectorDetailPanel({ sectorId, sectorName, onClose, onAskTeacher, initialSector }) {
-  const [data, setData] = useState(null);
+interface SectorDetailPanelProps {
+  sectorId: string;
+  sectorName: string;
+  onClose: () => void;
+  onAskTeacher?: (name: string, question: string) => void;
+  initialSector?: SectorIntelligence | null;
+  isFollowed?: boolean;
+  onToggleFollowed?: (sectorId: string) => void;
+}
+
+export function SectorDetailPanel({ sectorId, sectorName, onClose, onAskTeacher, initialSector, isFollowed, onToggleFollowed }: SectorDetailPanelProps) {
+  const [data, setData] = useState<Record<string, any> | null>(null);
   const [loading, setLoading] = useState(true);
+  const [showLagging, setShowLagging] = useState(false);
   const [sections, setSections] = useState(new Set(['overview']));
   const toggle = (k) => setSections(p => { const n = new Set(p); n.has(k) ? n.delete(k) : n.add(k); return n; });
 
@@ -36,7 +48,7 @@ export function SectorDetailPanel({ sectorId, sectorName, onClose, onAskTeacher,
     return () => { live = false; };
   }, [sectorId, sectorName]);
 
-  if (loading) return <div className="fixed inset-0 bg-black/40 z-50 flex items-end justify-center"><div className="bg-white rounded-t-[32px] w-full max-w-md p-4 animate-pulse"><div className="h-6 bg-slate-100 rounded w-1/3"/>lo</div></div>;
+  if (loading) return <div className="fixed inset-0 bg-black/40 z-50 flex items-end justify-center"><div className="bg-white rounded-t-[32px] w-full max-w-md p-4 animate-pulse"><div className="h-6 bg-slate-100 rounded w-1/3"/></div></div>;
   if (!data) return null;
 
   const isUp = (data.todayChangePercent || 0) >= 0;
@@ -67,9 +79,15 @@ export function SectorDetailPanel({ sectorId, sectorName, onClose, onAskTeacher,
                   {data.sector || sectorName}
                   {data.stage && data.stage !== 'no_clear_trend' && <span className={`text-[9px] px-1.5 py-0.5 rounded-full border font-bold ${stageStyles[data.stage]?.cls || ''}`}>{stageStyles[data.stage]?.label || ''}</span>}
                 </h2>
-                <span className={`text-3xl font-bold font-mono ${isUp ? 'text-red-600' : 'text-emerald-600'}`}>{data.todayChange || '--'}</span>
+                <span className={`text-3xl font-bold font-mono ${isUp ? 'text-red-600' : 'text-emerald-600'}`}>{data.todayChange ?? '--'}</span>
               </div>
-              <button className="p-1.5 bg-rose-50 rounded-full text-rose-400"><Heart className="w-4 h-4"/></button>
+              <button
+                onClick={() => onToggleFollowed?.(sectorId)}
+                className={`p-1.5 rounded-full transition ${isFollowed ? 'bg-rose-50 text-rose-500' : 'bg-rose-50 text-rose-400'}`}
+                aria-label={isFollowed ? '取消关注' : '关注板块'}
+              >
+                <Heart className={`w-4 h-4 ${isFollowed ? 'fill-rose-500 text-rose-500' : ''}`} />
+              </button>
             </div>
 
             <div className="flex gap-3 text-[11px] bg-slate-50 rounded-2xl p-3">
@@ -137,8 +155,8 @@ export function SectorDetailPanel({ sectorId, sectorName, onClose, onAskTeacher,
                     <span className={'font-mono font-bold '+(s.changePercent>=0?'text-red-500':'text-emerald-500')}>{s.changePercent>=0?'+':''}{s.changePercent.toFixed(2)+'%'}</span>
                   </div>;
                 })}
-                {(data.laggingStocks||[]).length > 0 ? <><button onClick={function(e){e.stopPropagation();window._showLagging=!window._showLagging;console.log(window._showLagging)}} className="text-[10px] text-slate-400 font-medium">查看表现较弱的公司 <ChevronDown className="w-3 h-3 inline"/></button>
-                {window._showLagging ? (data.laggingStocks||[]).slice(0,3).map(function(s,i) {
+                {(data.laggingStocks||[]).length > 0 ? <><button onClick={function(){setShowLagging(v => !v)}} className="text-[10px] text-slate-400 font-medium">查看表现较弱的公司 <ChevronDown className="w-3 h-3 inline"/></button>
+                {showLagging ? (data.laggingStocks||[]).slice(0,3).map(function(s,i) {
                   return <div key={s.code||i} className="bg-white rounded-2xl border border-slate-100 p-3 flex items-center justify-between">
                     <span className="text-xs font-medium text-slate-700">{s.name}</span>
                     <span className={'font-mono font-bold '+(s.changePercent>=0?'text-red-500':'text-emerald-500')}>{s.changePercent>=0?'+':''}{s.changePercent.toFixed(2)+'%'}</span>

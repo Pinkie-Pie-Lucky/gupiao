@@ -27,6 +27,8 @@ function getAIClient(): OpenAI {
     aiClient = new OpenAI({
       baseURL: process.env.AI_BASE_URL || 'https://api.deepseek.com',
       apiKey,
+      timeout: 30_000,
+      maxRetries: 2,
     });
   }
   return aiClient;
@@ -65,14 +67,18 @@ async function startServer() {
         { role: 'system', content: systemInstruction },
       ];
       if (history && Array.isArray(history)) {
-        for (const turn of history) {
-          messages.push({
-            role: turn.role,
-            content: turn.parts?.[0]?.text || '',
-          });
+        const validRoles = new Set(['system', 'user', 'assistant']);
+        const recent = history.slice(-20);
+        for (const turn of recent) {
+          if (!turn || typeof turn !== 'object') continue;
+          const role = validRoles.has(turn.role) ? turn.role : null;
+          if (!role) continue;
+          const content = String(turn.parts?.[0]?.text || '').slice(0, 2000);
+          if (!content) continue;
+          messages.push({ role, content });
         }
       }
-      messages.push({ role: 'user', content: message });
+      messages.push({ role: 'user', content: String(message).slice(0, 2000) });
 
       const completion = await client.chat.completions.create({
         model: AI_MODEL,
@@ -118,21 +124,39 @@ async function startServer() {
 
   // API Route: One-click Comprehensive Market Digest Analysis
   app.post('/api/market-report', async (req, res) => {
+    let fallback = false;
     try {
       const client = getAIClient();
+      const marketData = await fetchMarketData();
+
+      const indexLines = (marketData.indices || [])
+        .slice(0, 3)
+        .map((index: any) => `- ${index.name}：${Number(index.price) || '--'}点，${Number(index.changePercent) >= 0 ? '上涨' : '下跌'} ${Math.abs(Number(index.changePercent)).toFixed(2)}%`)
+        .join('\n');
+      const sortedSectors = [...(marketData.sectors || [])]
+        .sort((a: any, b: any) => Number(b.changePercent) - Number(a.changePercent));
+      const topSectors = sortedSectors.slice(0, 3)
+        .map((s: any) => `- ${s.name}：${Number(s.changePercent) >= 0 ? '+' : ''}${Number(s.changePercent).toFixed(2)}%`)
+        .join('\n');
+      const turnoverAmount = marketData.marketPulse?.turnoverAmount
+        ? `- 两市合计成交额约 ${(Number(marketData.marketPulse.turnoverAmount) / 100000000).toFixed(0)} 亿元`
+        : '';
+      const breadth = marketData.marketPulse
+        ? `- 涨停约 ${marketData.marketPulse.limitUp || 0} 家，跌停约 ${marketData.marketPulse.limitDown || 0} 家`
+        : '';
 
       const prompt = `
 针对今天以下A股大市数据进行一键深度研判，并用可爱的泡泡老师口吻输出一个精炼的报告（150字以内，排版美观，加粗突出重点）：
-- 上证指数：3026.49点，上涨 +0.72%
-- 深证成指：9730.87点，上涨 +1.25%
-- 创业板指：1905.15点，上涨 +1.48%
-- 异动预警：AI算力板块今日涨幅高达 +4.32%，但盘中主力大单资金出现高位松动流出（约23.5亿元），存在短线筹码震荡回撤风险。
-- 接力板块：国产半导体设备、机器人具身智能放量逆势补涨，主力资金净流入积极。
+${indexLines || '- 指数数据暂不可用'}
+${topSectors ? '今日表现居前的板块：\n' + topSectors : ''}
+${turnoverAmount}
+${breadth}
 
 请输出：
 1. 【大势泡泡评】 总结今日大市涨跌性质。
-2. 【泡泡异动警示】 警告AI算力板块高位筹码出逃风险。
-3. 【泡泡埋伏点睛】 推荐关注半导体与机器人低吸机会。
+2. 【泡泡异动警示】 指出今日异动板块及其风险。
+3. 【泡泡埋伏点睛】 基于今日数据给出理性关注方向。
+注意：只基于以上真实行情数据，不得编造具体数值。
       `;
 
       const completion = await client.chat.completions.create({
@@ -141,14 +165,20 @@ async function startServer() {
         temperature: 0.5,
       });
 
+      const report = completion.choices[0]?.message?.content || '';
+      if (!report) fallback = true;
+
       res.json({
-        report: completion.choices[0]?.message?.content
-          || '今日大盘震荡上行，科创指数强势领涨，建议高避题材炒作，积极低吸半导体龙头。'
+        report: report
+          || '泡泡老师今天发现，市场整体氛围需要结合具体行情观察。当前未能生成实时解盘，请稍后重试。',
+        fallback,
       });
     } catch (error: any) {
       console.error('Error in /api/market-report:', error.message);
+      fallback = true;
       res.json({
-        report: '【泡泡一键解盘】\n\n🎈今日大势回暖，上证成功收复**3026点**！多头攻势积极。但**AI算力**高位筹码松动明显（主力流出），注意短线回调风险。资金有回流**半导体**与**机器人**国产替代设备板块的低位补涨态势。建议逢低吸纳高壁垒龙头股。股市有风险，投资需谨慎！'
+        report: '泡泡老师今天发现，当前行情数据暂未获取成功，暂时无法生成一键解盘。请稍后再试。股市有风险，投资需谨慎！',
+        fallback: true,
       });
     }
   });
@@ -458,10 +488,10 @@ async function startServer() {
     const metricText = story.metrics.map((metric) => `${metric.label}${metric.value}`).join('，');
     return {
       storyId: story.storyId,
-      steps: [
+      steps: ([
         { id: 'step-1', text: story.what, evidenceIds: story.evidenceIds, kind: 'fact' },
         { id: 'step-2', text: metricText || '行情数据确认了该市场变化', evidenceIds: story.evidenceIds, kind: 'fact' },
-      ].filter((step) => step.text),
+      ] as ReasoningStep[]).filter((step) => step.text),
       uncertainty: '当前只确认了市场表现，具体驱动原因仍需更多可信信息验证。',
       confidenceLevel: 'limited',
       validationStatus: 'limited',
@@ -551,8 +581,13 @@ async function startServer() {
         },
         (res: any) => {
           let data = '';
+          res.setEncoding('utf8');
           res.on('data', (chunk: string) => (data += chunk));
           res.on('end', () => {
+            if (res.statusCode && res.statusCode >= 400) {
+              reject(new Error(`HTTP ${res.statusCode}`));
+              return;
+            }
             try {
               resolve(JSON.parse(data));
             } catch {
@@ -603,7 +638,7 @@ async function startServer() {
     });
   }
 
-  async function fetchMarketData() {
+  async function fetchMarketDataInner() {
     const WSCN_NEWS = 'https://api-one.wallstcn.com/apiv1/content/lives?channel=global-channel&limit=10';
 
     // A股指数：改用东方财富API（中国大陆可用，免Key）
@@ -890,6 +925,29 @@ async function startServer() {
       marketPulse,
       timestamp: new Date(),
     };
+  }
+
+  // fetchMarketData 整体缓存 + in-flight 去重：
+  // 多个接口（sectors/overview/morning-report/sector-detail）共享同一份行情数据，
+  // 避免每次请求都重复全量拉取指数、板块和新闻。
+  async function fetchMarketData() {
+    const cacheState = fetchMarketData as any;
+    const now = Date.now();
+    if (cacheState._dataCache && cacheState._dataCache.expiresAt > now) {
+      return cacheState._dataCache.value;
+    }
+    if (cacheState._dataPromise) return cacheState._dataPromise;
+
+    const dataPromise = fetchMarketDataInner().then((value) => {
+      cacheState._dataCache = { expiresAt: Date.now() + 15_000, value };
+      return value;
+    });
+    cacheState._dataPromise = dataPromise;
+    try {
+      return await dataPromise;
+    } finally {
+      cacheState._dataPromise = null;
+    }
   }
 
   function buildMarketSnapshot(marketData: Awaited<ReturnType<typeof fetchMarketData>>): MarketSnapshot {
@@ -1185,14 +1243,42 @@ async function startServer() {
 
   // POST /api/feedback — 用户反馈闭环
   app.post('/api/feedback', async (req, res) => {
+    const body = req.body;
+    if (!body || typeof body !== 'object') {
+      return res.status(400).json({ error: 'invalid body' });
+    }
+    const contentType = typeof body.contentType === 'string' ? body.contentType.slice(0, 100) : '';
+    const contentId = typeof body.contentId === 'string' ? body.contentId.slice(0, 200) : '';
+    const promptVersion = typeof body.promptVersion === 'string' ? body.promptVersion.slice(0, 100) : '';
+    const rating = body.rating === 'positive' || body.rating === 'negative' ? body.rating : '';
+    const reasons = Array.isArray(body.reasons)
+      ? body.reasons.map((r: any) => String(r).slice(0, 100)).slice(0, 10)
+      : [];
+    const comment = typeof body.comment === 'string' ? body.comment.slice(0, 2000) : '';
+    if (!contentType || !contentId || !rating) {
+      return res.status(400).json({ error: 'missing required fields' });
+    }
+
     const dir = path.join(process.cwd(), 'work');
     const file = path.join(dir, 'feedback.jsonl');
     try {
       fs.mkdirSync(dir, { recursive: true });
-      fs.appendFileSync(file, JSON.stringify(req.body) + '\n');
+      fs.appendFileSync(
+        file,
+        JSON.stringify({
+          contentType,
+          contentId,
+          promptVersion,
+          rating,
+          reasons,
+          comment,
+          timestamp: body.timestamp || new Date().toISOString(),
+        }) + '\n',
+      );
       res.json({ ok: true });
-    } catch {
-      res.json({ ok: true });
+    } catch (e: any) {
+      console.error('[feedback] write failed:', e.message);
+      res.status(500).json({ error: 'feedback save failed' });
     }
   });
 
@@ -1229,6 +1315,7 @@ async function startServer() {
 
   // POST /api/morning-report — Prompt 1 → 2 → 3 pipeline
   let morningReportCache: { data: any; timestamp: number } | null = null;
+  let morningReportPromise: Promise<any> | null = null;
   // 调用频率控制：开发阶段3小时（10800000ms），生产环境30分钟（1800000ms）
   const REPORT_CACHE_TTL = process.env.NODE_ENV === 'production' ? 30 * 60 * 1000 : 3 * 60 * 60 * 1000;
 
@@ -1240,217 +1327,238 @@ async function startServer() {
       return res.json(morningReportCache.data);
     }
 
+    // 缓存过期期间并发请求共享同一个生成任务，避免重复执行昂贵的 AI pipeline
+    if (morningReportPromise) {
+      try {
+        return res.json(await morningReportPromise);
+      } catch (e: any) {
+        console.error('[morning-report] shared generation failed:', e.message);
+      }
+    }
+
     const startedAt = Date.now();
-    try {
-      const marketData = await fetchMarketData();
-      const snapshot = buildMarketSnapshot(marketData);
-      console.log('[morning-report] step 0: market data fetched');
-
-      const p1Input = JSON.stringify({
-        snapshotId: snapshot.snapshotId,
-        market: snapshot.market,
-        marketDate: snapshot.marketDate,
-        indices: snapshot.indices,
-        totalTurnoverAmount: snapshot.totalTurnoverAmount,
-        marketBreadth: snapshot.marketBreadth,
-        marketStatus: snapshot.marketStatus,
-        sectorCandidates: [...snapshot.sectors]
-          .sort((a, b) => Math.abs(b.changePercent) - Math.abs(a.changePercent))
-          .slice(0, 30),
-        sources: snapshot.sources,
-        missingData: snapshot.missingData,
-      }, null, 2);
-
-      let fallback = false;
-      let sentiment = '中性';
-      let storyDrafts: MarketStoryDraft[] = [];
+    const reportPromise = (async () => {
       try {
-        const p1Raw = await callAI(PROMPT_1_SYSTEM, p1Input, 0.1);
-        const p1Result = parseAIJson(p1Raw);
-        if (['乐观', '中性', '谨慎'].includes(p1Result?.marketSentiment)) {
-          sentiment = p1Result.marketSentiment;
-        }
-        storyDrafts = normalizeStories(p1Result?.stories, snapshot);
-      } catch (error: any) {
-        console.error('[morning-report] P1 failed:', error.message);
-        fallback = true;
-      }
-      console.log('[morning-report] step 1: market understanding done');
-      if (storyDrafts.length === 0) {
-        storyDrafts = fallbackStories(snapshot);
-        fallback = true;
-      }
+        const marketData = await fetchMarketData();
+        const snapshot = buildMarketSnapshot(marketData);
+        console.log('[morning-report] step 0: market data fetched');
 
-      let chains: ReasoningChain[] = [];
-      try {
-        const p2Raw = await callAI(
-          PROMPT_2_SYSTEM,
-          JSON.stringify({ stories: storyDrafts, sources: snapshot.sources }, null, 2),
-          0.05,
-        );
-        chains = normalizeChains(parseAIJson(p2Raw)?.chains, storyDrafts, snapshot);
-      } catch (error: any) {
-        console.error('[morning-report] P2 failed:', error.message);
-        fallback = true;
-      }
-      console.log('[morning-report] step 2: causal reasoning done');
-      const chainByStory = new Map(chains.map((chain) => [chain.storyId, chain]));
-      const sourceById = new Map(snapshot.sources.map((source) => [source.id, source]));
-      const evidenceConfidenceByStory = new Map(
-        storyDrafts.map((story) => {
-          const chain = chainByStory.get(story.storyId) || defaultReasoning(story);
-          const independentSourceCount = new Set(
-            story.evidenceIds
-              .map((id) => sourceById.get(id)?.sourceName)
-              .filter(Boolean),
-          ).size;
-          return [story.storyId, calculateEvidenceConfidence(chain, independentSourceCount)];
-        }),
-      );
-      const sharedP3Input = {
-        marketOverview: {
-          indices: snapshot.indices.map((index: any) => ({
-            name: index.name,
-            changePercent: index.changePercent,
-          })),
-          marketBreadth: snapshot.marketBreadth,
+        const p1Input = JSON.stringify({
+          snapshotId: snapshot.snapshotId,
+          market: snapshot.market,
+          marketDate: snapshot.marketDate,
+          indices: snapshot.indices,
           totalTurnoverAmount: snapshot.totalTurnoverAmount,
+          marketBreadth: snapshot.marketBreadth,
           marketStatus: snapshot.marketStatus,
+          sectorCandidates: [...snapshot.sectors]
+            .sort((a, b) => Math.abs(b.changePercent) - Math.abs(a.changePercent))
+            .slice(0, 30),
+          sources: snapshot.sources,
           missingData: snapshot.missingData,
-        },
-        sentiment,
-        stories: storyDrafts,
-        chains: storyDrafts.map((story) => chainByStory.get(story.storyId) || defaultReasoning(story)),
-      };
-      const p3BeginnerInput = JSON.stringify(sharedP3Input, null, 2);
-      const p3ProfessionalInput = JSON.stringify({
-        ...sharedP3Input,
-        confidenceByStory: storyDrafts.map((story) => ({
-          storyId: story.storyId,
-          ...evidenceConfidenceByStory.get(story.storyId),
-        })),
-      }, null, 2);
+        }, null, 2);
 
-      const [beginnerResponse, professionalResponse] = await Promise.allSettled([
-        callAI(PROMPT_3_BEGINNER_SYSTEM, p3BeginnerInput, 0.35),
-        callAI(PROMPT_3_PROFESSIONAL_SYSTEM, p3ProfessionalInput, 0.2),
-      ]);
-      let p3BeginnerResult: any = {};
-      let p3ProfessionalResult: any = {};
-      if (beginnerResponse.status === 'fulfilled') {
+        let fallback = false;
+        let sentiment = '中性';
+        let storyDrafts: MarketStoryDraft[] = [];
         try {
-          p3BeginnerResult = parseAIJson(beginnerResponse.value);
+          const p1Raw = await callAI(PROMPT_1_SYSTEM, p1Input, 0.1);
+          const p1Result = parseAIJson(p1Raw);
+          if (['乐观', '中性', '谨慎'].includes(p1Result?.marketSentiment)) {
+            sentiment = p1Result.marketSentiment;
+          }
+          storyDrafts = normalizeStories(p1Result?.stories, snapshot);
         } catch (error: any) {
-          console.error('[morning-report] P3 beginner parse failed:', error.message);
+          console.error('[morning-report] P1 failed:', error.message);
           fallback = true;
         }
-      } else {
-        console.error('[morning-report] P3 beginner failed:', beginnerResponse.reason?.message);
-        fallback = true;
-      }
-      if (professionalResponse.status === 'fulfilled') {
-        try {
-          p3ProfessionalResult = parseAIJson(professionalResponse.value);
-        } catch (error: any) {
-          console.error('[morning-report] P3 professional parse failed:', error.message);
+        console.log('[morning-report] step 1: market understanding done');
+        if (storyDrafts.length === 0) {
+          storyDrafts = fallbackStories(snapshot);
           fallback = true;
         }
-      } else {
-        console.error('[morning-report] P3 professional failed:', professionalResponse.reason?.message);
-        fallback = true;
-      }
-      console.log('[morning-report] step 3: beginner and professional expression done');
 
-      const summaryText = sanitizeTeacherText(p3BeginnerResult?.summaryText, 92)
-        || fallbackDailySummary(marketData, storyDrafts);
-      const reasonBrief = sanitizeTeacherText(p3BeginnerResult?.reasonBrief, 170)
-        || '泡泡会继续结合指数、板块涨跌分布和当天热点，帮助你理解今天市场为何呈现这样的状态。';
-      const teacherItems: TeacherStoryContent[] = Array.isArray(p3BeginnerResult?.stories)
-        ? p3BeginnerResult.stories.map((item: any) => ({
-            storyId: String(item?.storyId || ''),
-            summary: sanitizeTeacherText(item?.summary, 180),
-            uncertaintyText: sanitizeTeacherText(item?.uncertaintyText, 180),
-            simpleChain: normalizeTextList(item?.simpleChain, 3, 80),
-          })).filter((item: TeacherStoryContent) => item.storyId && item.summary)
-        : [];
-      const teacherByStory = new Map(teacherItems.map((item) => [item.storyId, item]));
-      const sourceIds = new Set(snapshot.sources.map((source) => source.id));
-      const validRoles = new Set(['primary', 'secondary', 'diffusion']);
-      const professionalItems: ProfessionalStoryContent[] = Array.isArray(p3ProfessionalResult?.stories)
-        ? p3ProfessionalResult.stories.map((item: any) => {
-            const storyId = String(item?.storyId || '');
-            const calculatedConfidence = evidenceConfidenceByStory.get(storyId);
-            if (!calculatedConfidence) return null;
-            return {
-              storyId,
-              conclusion: sanitizeTeacherText(item?.conclusion, 220),
-              drivers: Array.isArray(item?.drivers)
-                ? item.drivers.slice(0, 3).map((driver: any, index: number) => ({
-                    role: validRoles.has(driver?.role) ? driver.role : index === 0 ? 'primary' : 'secondary',
-                    title: sanitizeTeacherText(driver?.title, 40),
-                    explanation: sanitizeTeacherText(driver?.explanation, 120),
-                    evidenceIds: Array.isArray(driver?.evidenceIds)
-                      ? [...new Set<string>(driver.evidenceIds.map(String).filter((id: string) => sourceIds.has(id)))]
-                      : [],
-                  })).filter((driver: any) => driver.title && driver.explanation)
-                : [],
-              supportingEvidence: normalizeTextList(item?.supportingEvidence),
-              evidenceGaps: normalizeTextList(item?.evidenceGaps),
-              alternativeExplanations: normalizeTextList(item?.alternativeExplanations),
-              counterLogic: normalizeTextList(item?.counterLogic),
-              observationIndicators: normalizeTextList(item?.observationIndicators),
-              confidence: {
-                score: calculatedConfidence.score,
-                level: calculatedConfidence.level,
-                explanation: calculatedConfidence.calculation,
-              },
-            } satisfies ProfessionalStoryContent;
-          }).filter(Boolean) as ProfessionalStoryContent[]
-        : [];
-      const professionalByStory = new Map(professionalItems.map((item) => [item.storyId, item]));
-      const stories = storyDrafts.map((draft) => {
-        const reasoning = chainByStory.get(draft.storyId) || defaultReasoning(draft);
-        const teacher = teacherByStory.get(draft.storyId) || defaultTeacherContent(draft, reasoning);
-        const evidenceConfidence = evidenceConfidenceByStory.get(draft.storyId)
-          || calculateEvidenceConfidence(reasoning, new Set(
-            draft.evidenceIds.map((id) => sourceById.get(id)?.sourceName).filter(Boolean),
-          ).size);
-        const professional = professionalByStory.get(draft.storyId)
-          || defaultProfessionalContent(draft, reasoning, evidenceConfidence);
-        return {
-          ...draft,
-          reasoning,
-          teacher,
-          professional,
-          evidence: draft.evidenceIds.map((id) => sourceById.get(id)).filter(Boolean),
+        let chains: ReasoningChain[] = [];
+        try {
+          const p2Raw = await callAI(
+            PROMPT_2_SYSTEM,
+            JSON.stringify({ stories: storyDrafts, sources: snapshot.sources }, null, 2),
+            0.05,
+          );
+          chains = normalizeChains(parseAIJson(p2Raw)?.chains, storyDrafts, snapshot);
+        } catch (error: any) {
+          console.error('[morning-report] P2 failed:', error.message);
+          fallback = true;
+        }
+        console.log('[morning-report] step 2: causal reasoning done');
+        const chainByStory = new Map(chains.map((chain) => [chain.storyId, chain]));
+        const sourceById = new Map(snapshot.sources.map((source) => [source.id, source]));
+        const evidenceConfidenceByStory = new Map(
+          storyDrafts.map((story) => {
+            const chain = chainByStory.get(story.storyId) || defaultReasoning(story);
+            const independentSourceCount = new Set(
+              story.evidenceIds
+                .map((id) => sourceById.get(id)?.sourceName)
+                .filter(Boolean),
+            ).size;
+            return [story.storyId, calculateEvidenceConfidence(chain, independentSourceCount)];
+          }),
+        );
+        const sharedP3Input = {
+          marketOverview: {
+            indices: snapshot.indices.map((index: any) => ({
+              name: index.name,
+              changePercent: index.changePercent,
+            })),
+            marketBreadth: snapshot.marketBreadth,
+            totalTurnoverAmount: snapshot.totalTurnoverAmount,
+            marketStatus: snapshot.marketStatus,
+            missingData: snapshot.missingData,
+          },
+          sentiment,
+          stories: storyDrafts,
+          chains: storyDrafts.map((story) => chainByStory.get(story.storyId) || defaultReasoning(story)),
         };
-      });
+        const p3BeginnerInput = JSON.stringify(sharedP3Input, null, 2);
+        const p3ProfessionalInput = JSON.stringify({
+          ...sharedP3Input,
+          confidenceByStory: storyDrafts.map((story) => ({
+            storyId: story.storyId,
+            ...evidenceConfidenceByStory.get(story.storyId),
+          })),
+        }, null, 2);
 
-      const elapsed = ((Date.now() - startedAt) / 1000).toFixed(1);
-      console.log(`[morning-report] completed in ${elapsed}s`);
+        const [beginnerResponse, professionalResponse] = await Promise.allSettled([
+          callAI(PROMPT_3_BEGINNER_SYSTEM, p3BeginnerInput, 0.35),
+          callAI(PROMPT_3_PROFESSIONAL_SYSTEM, p3ProfessionalInput, 0.2),
+        ]);
+        let p3BeginnerResult: any = {};
+        let p3ProfessionalResult: any = {};
+        if (beginnerResponse.status === 'fulfilled') {
+          try {
+            p3BeginnerResult = parseAIJson(beginnerResponse.value);
+          } catch (error: any) {
+            console.error('[morning-report] P3 beginner parse failed:', error.message);
+            fallback = true;
+          }
+        } else {
+          console.error('[morning-report] P3 beginner failed:', beginnerResponse.reason?.message);
+          fallback = true;
+        }
+        if (professionalResponse.status === 'fulfilled') {
+          try {
+            p3ProfessionalResult = parseAIJson(professionalResponse.value);
+          } catch (error: any) {
+            console.error('[morning-report] P3 professional parse failed:', error.message);
+            fallback = true;
+          }
+        } else {
+          console.error('[morning-report] P3 professional failed:', professionalResponse.reason?.message);
+          fallback = true;
+        }
+        console.log('[morning-report] step 3: beginner and professional expression done');
 
-      const result = {
-        sentiment,
-        summaryText,
-        reasonBrief,
-        stories,
-        top3Themes: stories,
-        promptVersion: 'market-stories-v4-dual-p3',
-        promptVersions: {
-          beginner: 'p3a-beginner-v1',
-          professional: 'p3b-professional-v1',
-        },
-        fallback,
-        timestamp: marketData.timestamp,
-      };
-      morningReportCache = { data: result, timestamp: Date.now() };
+        const summaryText = sanitizeTeacherText(p3BeginnerResult?.summaryText, 92)
+          || fallbackDailySummary(marketData, storyDrafts);
+        const reasonBrief = sanitizeTeacherText(p3BeginnerResult?.reasonBrief, 170)
+          || '泡泡会继续结合指数、板块涨跌分布和当天热点，帮助你理解今天市场为何呈现这样的状态。';
+        const teacherItems: TeacherStoryContent[] = Array.isArray(p3BeginnerResult?.stories)
+          ? p3BeginnerResult.stories.map((item: any) => ({
+              storyId: String(item?.storyId || ''),
+              summary: sanitizeTeacherText(item?.summary, 180),
+              uncertaintyText: sanitizeTeacherText(item?.uncertaintyText, 180),
+              simpleChain: normalizeTextList(item?.simpleChain, 3, 80),
+            })).filter((item: TeacherStoryContent) => item.storyId && item.summary)
+          : [];
+        const teacherByStory = new Map(teacherItems.map((item) => [item.storyId, item]));
+        const sourceIds = new Set(snapshot.sources.map((source) => source.id));
+        const validRoles = new Set(['primary', 'secondary', 'diffusion']);
+        const professionalItems: ProfessionalStoryContent[] = Array.isArray(p3ProfessionalResult?.stories)
+          ? p3ProfessionalResult.stories.map((item: any) => {
+              const storyId = String(item?.storyId || '');
+              const calculatedConfidence = evidenceConfidenceByStory.get(storyId);
+              if (!calculatedConfidence) return null;
+              return {
+                storyId,
+                conclusion: sanitizeTeacherText(item?.conclusion, 220),
+                drivers: Array.isArray(item?.drivers)
+                  ? item.drivers.slice(0, 3).map((driver: any, index: number) => ({
+                      role: validRoles.has(driver?.role) ? driver.role : index === 0 ? 'primary' : 'secondary',
+                      title: sanitizeTeacherText(driver?.title, 40),
+                      explanation: sanitizeTeacherText(driver?.explanation, 120),
+                      evidenceIds: Array.isArray(driver?.evidenceIds)
+                        ? [...new Set<string>(driver.evidenceIds.map(String).filter((id: string) => sourceIds.has(id)))]
+                        : [],
+                    })).filter((driver: any) => driver.title && driver.explanation)
+                  : [],
+                supportingEvidence: normalizeTextList(item?.supportingEvidence),
+                evidenceGaps: normalizeTextList(item?.evidenceGaps),
+                alternativeExplanations: normalizeTextList(item?.alternativeExplanations),
+                counterLogic: normalizeTextList(item?.counterLogic),
+                observationIndicators: normalizeTextList(item?.observationIndicators),
+                confidence: {
+                  score: calculatedConfidence.score,
+                  level: calculatedConfidence.level,
+                  explanation: calculatedConfidence.calculation,
+                },
+              } satisfies ProfessionalStoryContent;
+            }).filter(Boolean) as ProfessionalStoryContent[]
+          : [];
+        const professionalByStory = new Map(professionalItems.map((item) => [item.storyId, item]));
+        const stories = storyDrafts.map((draft) => {
+          const reasoning = chainByStory.get(draft.storyId) || defaultReasoning(draft);
+          const teacher = teacherByStory.get(draft.storyId) || defaultTeacherContent(draft, reasoning);
+          const evidenceConfidence = evidenceConfidenceByStory.get(draft.storyId)
+            || calculateEvidenceConfidence(reasoning, new Set(
+              draft.evidenceIds.map((id) => sourceById.get(id)?.sourceName).filter(Boolean),
+            ).size);
+          const professional = professionalByStory.get(draft.storyId)
+            || defaultProfessionalContent(draft, reasoning, evidenceConfidence);
+          return {
+            ...draft,
+            reasoning,
+            teacher,
+            professional,
+            evidence: draft.evidenceIds.map((id) => sourceById.get(id)).filter(Boolean),
+          };
+        });
+
+        const elapsed = ((Date.now() - startedAt) / 1000).toFixed(1);
+        console.log(`[morning-report] completed in ${elapsed}s`);
+
+        const result = {
+          sentiment,
+          summaryText,
+          reasonBrief,
+          stories,
+          top3Themes: stories,
+          promptVersion: 'market-stories-v4-dual-p3',
+          promptVersions: {
+            beginner: 'p3a-beginner-v1',
+            professional: 'p3b-professional-v1',
+          },
+          fallback,
+          timestamp: marketData.timestamp,
+        };
+        morningReportCache = { data: result, timestamp: Date.now() };
+        return result;
+      } catch (error: any) {
+        console.error('[morning-report] error:', error.message);
+        throw error;
+      }
+    })();
+
+    morningReportPromise = reportPromise;
+    try {
+      const result = await reportPromise;
       res.json(result);
     } catch (error: any) {
-      console.error('[morning-report] error:', error.message);
       res.status(500).json({
         error: '早报生成失败，请稍后重试',
         fallback: true,
       });
+    } finally {
+      morningReportPromise = null;
     }
   });
 
@@ -1473,12 +1581,21 @@ async function startServer() {
     }
   });
 
-  // 判断是否为A股交易时段
+  // 判断是否为A股交易时段（按上海时区，避免服务器本地时区偏移导致误判）
   function getMarketStatus() {
-    const now = new Date();
-    const day = now.getDay(); // 0=周日, 1-5=周一至周五, 6=周六
-    const hour = now.getHours();
-    const minute = now.getMinutes();
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: 'Asia/Shanghai',
+      weekday: 'short',
+      hour: '2-digit',
+      minute: '2-digit',
+      hourCycle: 'h23',
+    }).formatToParts(new Date());
+    const part = (type: string) => Number(parts.find((item) => item.type === type)?.value || 0);
+    const day = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].indexOf(
+      parts.find((item) => item.type === 'weekday')?.value || 'Sun',
+    );
+    const hour = part('hour');
+    const minute = part('minute');
     const timeNum = hour * 100 + minute;
 
     // 周末不开盘
@@ -1564,7 +1681,7 @@ async function startServer() {
     return rs.find(r => r.m.test(s))?.c || ['上游供给','行业需求',s];
   }
   function buildMarketMapIntelligence(md) {
-    const all = [...(md.sectors||[]),...(md.conceptSectors||[])]
+    const all = (md.sectors||[])
       .map((s,i) => ({id: s.code ? (s.category+'-'+s.code) : 'sector-'+i, name: String(s.name||'').trim(), category: s.category==='concept'?'concept':'industry', changePercent: Number(s.changePercent)||0, turnoverAmount: Number.isFinite(Number(s.turnoverAmount))?Number(s.turnoverAmount):null}))
       .filter(s => s.name);
     const ranked = [...all].sort((a,b) => Math.abs(b.changePercent)-Math.abs(a.changePercent));
@@ -1631,7 +1748,7 @@ async function startServer() {
 
   app.get('/api/sector-detail', async (req, res) => {
     try {
-      const sn = req.query.sectorName; if(!sn) return res.status(400).json({error:'sectorName is required'});
+      const sn = String(req.query.sectorName || ''); if(!sn) return res.status(400).json({error:'sectorName is required'});
       const md = await fetchMarketData(); const sec = (md.sectors||[]).find(s => s.name === sn); const pct = Number(sec?.changePercent)||0;
       const subs = (md.sectors||[]).filter(s => s.name !== sn && s.name && s.name.includes(sn.slice(0,2))).slice(0,5);
       
@@ -1658,8 +1775,7 @@ async function startServer() {
       var rawNews = (md.newsItems||[]);
       var catalystKeywords = ['政策','利好','扶持','补贴','规划','推动','支持','印发','发布'];
       var riskKeywords = ['风险','警告','监管','处罚','降温','收紧','利空','下跌','回调'];
-      var industryKeywords = [sn.slice(0,2),'板块','行业','市场','景气','需求'];
-      
+      var industryKeywords = [sn.slice(0,2),'板块','行业','市场','景气','需求'];      
       var newsItems = rawNews.slice(0,6).map(function(n) {
         var t = n.title || '';
         var isCatalyst = catalystKeywords.some(function(k) { return t.includes(k); });

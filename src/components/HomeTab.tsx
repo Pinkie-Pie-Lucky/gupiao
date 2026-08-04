@@ -5,8 +5,8 @@
 
 import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Search, TrendingUp, TrendingDown, ChevronRight, ChevronDown, X, AlertTriangle, ArrowUpRight, Award, MessageSquare, Flame, BarChart2, Activity, BookOpen, Sun, GraduationCap, RefreshCw, ShieldCheck, ThumbsUp, ThumbsDown } from 'lucide-react';
-import { MarketIndex, MarketStory, StockSector, PersonalizedAlert } from '../types';
+import { Search, TrendingUp, TrendingDown, ChevronRight, ChevronDown, X, AlertTriangle, ArrowUpRight, Award, MessageSquare, Flame, BarChart2, Activity, BookOpen, Sun, GraduationCap, RefreshCw, ShieldCheck, ThumbsUp, ThumbsDown, Star } from 'lucide-react';
+import { MarketIndex, MarketStory, StockSector } from '../types';
 import { formatChineseDate, initialSectors, initialAlerts } from '../data';
 import { InteractiveChart } from './InteractiveChart';
 import { FeedbackModal } from './FeedbackModal';
@@ -49,10 +49,14 @@ interface HomeTabProps {
 export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStock, followedStocks = [] }: HomeTabProps) {
   const [indices, setIndices] = useState<MarketIndex[]>([]);
   const [selectedIndex, setSelectedIndex] = useState<MarketIndex | null>(null);
-  const [selectedAlert, setSelectedAlert] = useState<PersonalizedAlert | null>(null);
-  const [selectedSector, setSelectedSector] = useState<StockSector | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [isSearching, setIsSearching] = useState(false);
+  const [searchResult, setSearchResult] = useState<{
+    type: 'stock' | 'sector';
+    stock?: { name: string; code: string; price: number; changePercent: number; volume?: string; turnover?: string };
+    sector?: StockSector;
+    query: string;
+  } | null>(null);
   const [isReasonOpen, setIsReasonOpen] = useState(false);
   const [knowledgeIndex, setKnowledgeIndex] = useState(() => {
     return Math.floor(Math.random() * LEARNING_KNOWLEDGE.length);
@@ -164,14 +168,30 @@ export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStoc
         setMarketOverview(overviewData);
         setMarketStatus(overviewData.marketStatus || null);
         if (overviewData.indices?.length) {
-          setIndices(overviewData.indices.map((i: any) => ({
-            name: i.name,
-            code: i.code,
-            value: i.price,
-            changePercent: i.changePercent,
-            changeValue: parseFloat((i.price * i.changePercent / 100).toFixed(2)),
-            history: [],
-          })));
+          setIndices(overviewData.indices.map((i: any) => {
+            const value = Number(i.price) || 0;
+            const changePercent = Number(i.changePercent) || 0;
+            const prevClose = changePercent !== 0 ? value / (1 + changePercent / 100) : value;
+            // 生成当日分时近似曲线（真实分时接口不可用时的兜底展示）
+            const history = Array.from({ length: 24 }, (_, idx) => {
+              const progress = idx / 23;
+              const eased = 0.5 - 0.5 * Math.cos(progress * Math.PI);
+              const intradayValue = prevClose + (value - prevClose) * eased;
+              return {
+                time: `${String(9 + Math.floor((idx * 30) / 60)).padStart(2, '0')}:${String((idx * 30) % 60).padStart(2, '0')}`,
+                value: Math.round(intradayValue * 100) / 100,
+                volume: Math.floor(Math.random() * 8000 + 2000),
+              };
+            });
+            return {
+              name: i.name,
+              code: i.code,
+              value,
+              changePercent,
+              changeValue: parseFloat((value * changePercent / 100).toFixed(2)),
+              history,
+            };
+          }));
         }
       }
     } catch {
@@ -210,11 +230,11 @@ export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStoc
 
     // 自动刷新行情（仅交易时段每 10 秒刷新一次）
     const autoRefresh = setInterval(() => {
-      // 白天9:30-15:00交易时段才刷新
+      // 白天9:30-11:30、13:00-15:00交易时段才刷新
       const h = new Date().getHours();
       const m = new Date().getMinutes();
       const t = h * 100 + m;
-      const isTrading = h >= 9 && h < 15 && !(h === 9 && m < 30) && !(h >= 11 && h < 13);
+      const isTrading = (t >= 930 && t < 1130) || (t >= 1300 && t < 1500);
       if (isTrading) {
         loadMarketOverview({ cancelled });
       }
@@ -382,12 +402,20 @@ export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStoc
     }
 
     if (foundStock) {
-      onAskTeacherAboutStock(foundStock.name, foundStock.code);
-      onNavigateToTab('ai-teacher');
+      setSearchResult({
+        type: 'stock',
+        stock: foundStock,
+        sector: foundSector,
+        query: searchQuery.trim(),
+      });
     } else if (foundSector) {
-      onSelectSector(foundSector.id);
-      onNavigateToTab('market-map');
+      setSearchResult({
+        type: 'sector',
+        sector: foundSector,
+        query: searchQuery.trim(),
+      });
     } else {
+      setSearchResult(null);
       onNavigateToTab('ai-teacher');
       setTimeout(() => {
         const customEvent = new CustomEvent('trigger-ai-chat', { detail: searchQuery });
@@ -396,6 +424,33 @@ export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStoc
     }
     setSearchQuery('');
     setIsSearching(false);
+  };
+
+  const handleAskAboutSearchResult = (name: string, code: string) => {
+    setSearchResult(null);
+    onAskTeacherAboutStock(name, code);
+    onNavigateToTab('ai-teacher');
+  };
+
+  const handleAddSearchResultToWatchlist = (stock: { name: string; code: string; price: number; changePercent: number; volume?: string; turnover?: string }) => {
+    const customEvent = new CustomEvent('add-stock-portfolio', {
+      detail: {
+        code: stock.code,
+        name: stock.name,
+        price: stock.price,
+        changePercent: stock.changePercent,
+        volume: stock.volume || '--',
+        turnover: stock.turnover || '--',
+        history: [],
+      },
+    });
+    window.dispatchEvent(customEvent);
+  };
+
+  const handleOpenSearchSector = (sectorId: string) => {
+    setSearchResult(null);
+    onSelectSector(sectorId);
+    onNavigateToTab('market-map');
   };
 
   return (
@@ -441,6 +496,97 @@ export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStoc
           </form>
         )}
       </div>
+
+      {/* 搜索结果卡片 */}
+      {searchResult && (
+        <div id="home-search-result" className="mx-4">
+          <div className="bg-white border border-indigo-100 rounded-3xl p-4 shadow-sm space-y-3">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-bold text-gray-800">
+                {searchResult.type === 'stock'
+                  ? `个股「${searchResult.stock?.name}」`
+                  : `板块「${searchResult.sector?.name}」`}
+              </span>
+              <button onClick={() => setSearchResult(null)} className="p-1 text-gray-300 hover:text-gray-500 rounded-full hover:bg-gray-50">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {searchResult.type === 'stock' && searchResult.stock ? (
+              <>
+                <div className="flex items-center justify-between bg-slate-50 rounded-2xl p-3">
+                  <div>
+                    <div className="text-sm font-bold text-gray-900">{searchResult.stock.name}</div>
+                    <div className="text-[10px] text-gray-400 font-mono">{searchResult.stock.code} · {searchResult.sector?.name || '未分类'}</div>
+                  </div>
+                  <div className="text-right">
+                    <div className="font-mono font-bold text-sm">¥{searchResult.stock.price.toFixed(2)}</div>
+                    <div className={`text-[10px] font-bold font-mono ${searchResult.stock.changePercent >= 0 ? 'text-red-500' : 'text-emerald-500'}`}>
+                      {searchResult.stock.changePercent >= 0 ? '+' : ''}{searchResult.stock.changePercent}%
+                    </div>
+                  </div>
+                </div>
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => handleAddSearchResultToWatchlist(searchResult.stock!)}
+                    className={`flex-1 text-[10px] font-bold py-2 rounded-xl transition-all flex items-center justify-center gap-1 ${
+                      followedStocks.some(s => s.code === searchResult.stock?.code)
+                        ? 'bg-gray-100 text-gray-400'
+                        : 'bg-indigo-50 hover:bg-indigo-100 text-indigo-600'
+                    }`}
+                  >
+                    <Star className="w-3.5 h-3.5" />
+                    {followedStocks.some(s => s.code === searchResult.stock?.code) ? '已在自选中' : '加入自选'}
+                  </button>
+                  <button
+                    onClick={() => handleAskAboutSearchResult(searchResult.stock!.name, searchResult.stock!.code)}
+                    className="flex-1 bg-indigo-600 hover:bg-indigo-700 text-white text-[10px] font-bold py-2 rounded-xl transition-all flex items-center justify-center gap-1"
+                  >
+                    <MessageSquare className="w-3.5 h-3.5" />
+                    向泡泡提问
+                  </button>
+                </div>
+              </>
+            ) : searchResult.sector ? (
+              <>
+                <div className="flex items-center justify-between bg-slate-50 rounded-2xl p-3">
+                  <div>
+                    <div className="text-sm font-bold text-gray-900">{searchResult.sector.name}</div>
+                    <div className="text-[10px] text-gray-400">{searchResult.sector.description}</div>
+                  </div>
+                  <div className={`text-sm font-bold font-mono ${searchResult.sector.changePercent >= 0 ? 'text-red-500' : 'text-emerald-500'}`}>
+                    {searchResult.sector.changePercent >= 0 ? '+' : ''}{searchResult.sector.changePercent}%
+                  </div>
+                </div>
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => handleOpenSearchSector(searchResult.sector!.id)}
+                    className="flex-1 bg-indigo-600 hover:bg-indigo-700 text-white text-[10px] font-bold py-2 rounded-xl transition-all flex items-center justify-center gap-1"
+                  >
+                    <ArrowUpRight className="w-3.5 h-3.5" />
+                    查看板块详情
+                  </button>
+                  <button
+                    onClick={() => {
+                      const name = searchResult.sector!.name;
+                      setSearchResult(null);
+                      onNavigateToTab('ai-teacher');
+                      setTimeout(() => {
+                        const customEvent = new CustomEvent('trigger-ai-chat', { detail: `分析${name}板块` });
+                        window.dispatchEvent(customEvent);
+                      }, 100);
+                    }}
+                    className="flex-1 bg-indigo-50 hover:bg-indigo-100 text-indigo-600 text-[10px] font-bold py-2 rounded-xl transition-all flex items-center justify-center gap-1"
+                  >
+                    <MessageSquare className="w-3.5 h-3.5" />
+                    向泡泡提问
+                  </button>
+                </div>
+              </>
+            ) : null}
+          </div>
+        </div>
+      )}
 
       {/* 市场状态 Banner - 非交易时段醒目提示 */}
       {marketStatus && !marketStatus.isOpen && (

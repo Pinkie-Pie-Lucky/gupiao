@@ -5,7 +5,7 @@
 
 import React, { useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Star, ChevronRight, MessageSquare, Trash2, Bell, Sparkles, TrendingUp, TrendingDown, ArrowUpRight, Check, X } from 'lucide-react';
+import { Star, MessageSquare, Trash2, Bell, ArrowUpRight, X } from 'lucide-react';
 import { StockItem, PersonalizedAlert } from '../types';
 import { initialAlerts } from '../data';
 
@@ -126,7 +126,10 @@ export function WatchlistTab({
                       向泡泡提问此股
                     </button>
                     <button
-                      onClick={() => onNavigateToTab('market-map')}
+                      onClick={() => {
+                        onAskTeacherAboutStock(stock.name, stock.code);
+                        onNavigateToTab('ai-teacher');
+                      }}
                       className="flex-1 bg-gray-50 hover:bg-gray-100 text-gray-600 font-bold text-[10px] py-1.5 rounded-xl transition-all flex items-center justify-center gap-1"
                     >
                       <ArrowUpRight className="w-3.5 h-3.5" />
@@ -167,7 +170,6 @@ export function WatchlistTab({
                       {isWarning ? '风控预警' : '热点提示'} · {alert.time}
                     </span>
                   </div>
-                  <span className="text-[10px] font-mono opacity-50">{alert.time}</span>
                 </div>
 
                 <p className="text-xs font-semibold mt-2 leading-relaxed text-gray-800">
