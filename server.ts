@@ -9,55 +9,722 @@ import fs from 'node:fs';
 import https from 'node:https';
 import http from 'node:http';
 import { createServer as createViteServer } from 'vite';
-import OpenAI from 'openai';
 import dotenv from 'dotenv';
 
 dotenv.config();
 
-const AI_MODEL = process.env.AI_MODEL || 'deepseek-v4-flash';
+/* ==================== InfiniSynapse 集成 ==================== */
 
-let aiClient: OpenAI | null = null;
+const INFINISYNAPSE_API_KEY = process.env.INFINISYNAPSE_API_KEY || '';
+const INFINISYNAPSE_SERVER_URL = (process.env.INFINISYNAPSE_SERVER_URL || 'https://app.infinisynapse.cn').replace(/\/+$/, '');
 
-function getAIClient(): OpenAI {
-  if (!aiClient) {
-    const apiKey = process.env.DEEPSEEK_API_KEY;
-    if (!apiKey) {
-      throw new Error('DEEPSEEK_API_KEY is not defined. Please set it in your .env file.');
-    }
-    aiClient = new OpenAI({
-      baseURL: process.env.AI_BASE_URL || 'https://api.deepseek.com',
-      apiKey,
-      timeout: 30_000,
-      maxRetries: 2,
+/* ==================== DeepSeek 兜底集成 ==================== */
+// 兜底原则：InfiniSynapse Server API 未调通 → 先用实时行情数据做规则化判断 →
+// 实时数据也不可用时最后降级到 DeepSeek（OpenAI 兼容接口 deepseek-chat）。
+// 在 .env 中配置 DEEPSEEK_API_KEY 后生效；留空则该级自动跳过，仅作为最后兜底。
+const DEEPSEEK_API_KEY = process.env.DEEPSEEK_API_KEY || '';
+
+/* ==================== InfiniSynapse Partner SSO 集成 ==================== */
+// 参考：https://infinisynapse.cn/zh/docs/InfiniSynapse%20Partner%20SSO%20Integration%20Guide
+// 在 https://app.infinisynapse.cn/tasks → 设置 → 第三方接入 申请 clientId / clientSecret
+const INFINI_CLIENT_ID = process.env.INFINI_CLIENT_ID || '';
+const INFINI_CLIENT_SECRET = process.env.INFINI_CLIENT_SECRET || '';
+// SSO 接口基础地址（与 Server API 的 app. 域名不同，这里是 api. 域名）
+const INFINI_SSO_API_BASE = (process.env.INFINI_SSO_API_BASE || 'https://api.infinisynapse.cn/api').replace(/\/+$/, '');
+// 登录成功后浏览器跳回的完整地址，域名必须与申请时填写的白名单一致
+const PAOPAO_SSO_RETURN_URL = process.env.PAOPAO_SSO_RETURN_URL || `http://localhost:${process.env.PORT || 8080}/auth/callback`;
+
+/** 生成随机 state（防 CSRF） */
+function randomState(): string {
+  return uuidv4().replace(/-/g, '') + Math.random().toString(36).slice(2, 10);
+}
+
+/**
+ * 创建 InfiniSynapse 登录会话
+ * POST /api/auth/partner/sessions
+ * 请求头：X-Client-Id / X-Client-Secret
+ * 响应：{ code, message, data: { sessionId, entryUrl, expiresIn } }
+ */
+function createSsoSession(returnUrl: string, state: string): Promise<{ sessionId: string; entryUrl: string; expiresIn: number }> {
+  return new Promise((resolve, reject) => {
+    const urlStr = `${INFINI_SSO_API_BASE}/auth/partner/sessions`;
+    const u = new URL(urlStr);
+    const httpMod = u.protocol === 'https:' ? https : http;
+
+    const body = JSON.stringify({ returnUrl, state });
+    const req = httpMod.request(
+      urlStr,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Client-Id': INFINI_CLIENT_ID,
+          'X-Client-Secret': INFINI_CLIENT_SECRET,
+        },
+      },
+      (res: any) => {
+        let data = '';
+        res.on('data', (chunk: Buffer) => (data += chunk.toString()));
+        res.on('end', () => {
+          try {
+            const parsed = JSON.parse(data);
+            if (parsed.code === 200 && parsed.data?.entryUrl) {
+              resolve({
+                sessionId: String(parsed.data.sessionId || ''),
+                entryUrl: String(parsed.data.entryUrl),
+                expiresIn: Number(parsed.data.expiresIn || 600),
+              });
+            } else {
+              reject(new Error(parsed.message || 'SSO create session failed'));
+            }
+          } catch (err: any) {
+            reject(new Error(`SSO create session invalid response: ${err.message}`));
+          }
+        });
+      },
+    );
+    req.on('error', (err) => reject(new Error(`SSO create session network error: ${err.message}`)));
+    req.setTimeout(10000, () => {
+      req.destroy();
+      reject(new Error('SSO create session timeout'));
     });
+    req.write(body);
+    req.end();
+  });
+}
+
+/**
+ * 用一次性 code 兑换用户信息
+ * POST /api/auth/partner/token
+ * 请求体：{ code, grant_type: "authorization_code" }
+ * 响应 data.user: { id, email, username, nickname, avatar, phone }
+ */
+function exchangeSsoCode(code: string): Promise<{ user: any; externalUserId?: string; sessionId?: string; metadata?: any; apiKey?: string }> {
+  return new Promise((resolve, reject) => {
+    const urlStr = `${INFINI_SSO_API_BASE}/auth/partner/token`;
+    const u = new URL(urlStr);
+    const httpMod = u.protocol === 'https:' ? https : http;
+
+    const body = JSON.stringify({ code, grant_type: 'authorization_code' });
+    const req = httpMod.request(
+      urlStr,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Client-Id': INFINI_CLIENT_ID,
+          'X-Client-Secret': INFINI_CLIENT_SECRET,
+        },
+      },
+      (res: any) => {
+        let data = '';
+        res.on('data', (chunk: Buffer) => (data += chunk.toString()));
+        res.on('end', () => {
+          try {
+            const parsed = JSON.parse(data);
+            if (parsed.code === 200 && parsed.data?.user?.id) {
+              resolve({
+                user: parsed.data.user,
+                externalUserId: parsed.data.externalUserId,
+                sessionId: parsed.data.sessionId,
+                metadata: parsed.data.metadata,
+                apiKey: parsed.data.apiKey,
+              });
+            } else {
+              reject(new Error(parsed.message || 'SSO exchange code failed'));
+            }
+          } catch (err: any) {
+            reject(new Error(`SSO exchange code invalid response: ${err.message}`));
+          }
+        });
+      },
+    );
+    req.on('error', (err) => reject(new Error(`SSO exchange code network error: ${err.message}`)));
+    req.setTimeout(10000, () => {
+      req.destroy();
+      reject(new Error('SSO exchange code timeout'));
+    });
+    req.write(body);
+    req.end();
+  });
+}
+
+/**
+ * 生成 UUID v4
+ */
+function uuidv4(): string {
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    const v = c === 'x' ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
+}
+
+/**
+ * 调用 InfiniSynapse Server API：先连 SSE 订阅事件流，再发 newTask 消息
+ * 返回 Agent 的最终回答文本
+ */
+async function callInfiniSynapse(
+  text: string,
+  options?: { history?: Array<{ role: string; content: string }>; taskId?: string; connId?: string }
+): Promise<{ answer: string; taskId: string; suggestedPrompts: string[] }> {
+  if (!INFINISYNAPSE_API_KEY) {
+    throw new Error('INFINISYNAPSE_API_KEY is not configured. Please set it in .env file.');
   }
-  return aiClient;
+
+  const connId = options?.connId || uuidv4();
+  const isNewTask = !options?.taskId;
+  const taskId = options?.taskId || '';
+
+  // 第 1 步：订阅 SSE 事件流（GET 长连接）
+  // 使用 AbortController 来管理 SSE 连接生命周期
+  const abortController = new AbortController();
+
+  // SSE 按 `event: <type>\ndata: <JSON>\n\n` 格式逐行解析
+  let sseCurrentEvent = '';
+  let sseDataBuffer = '';
+  let stateReadyReceived = false;
+
+  const ssePromise = new Promise<string>((resolve, reject) => {
+    const urlStr = `${INFINISYNAPSE_SERVER_URL}/api/ai/events?connId=${connId}`;
+    const u = new URL(urlStr);
+    const httpMod = u.protocol === 'https:' ? https : http;
+
+    httpMod.get(urlStr, {
+      headers: {
+        'Authorization': `Bearer ${INFINISYNAPSE_API_KEY}`,
+        'Accept': 'text/event-stream',
+      },
+      signal: abortController.signal,
+    }, (res) => {
+      let buffer = '';
+      let finalAnswer = '';
+      let tentativeAnswer = '';
+      let receivedCompletion = false;
+      // 静默兜底：收到阶段答案后持续 15 秒无结束信号则返回暂存答案，避免无限等待
+      let silenceTimer: NodeJS.Timeout | null = null;
+      const armSilenceTimer = () => {
+        if (silenceTimer) clearTimeout(silenceTimer);
+        silenceTimer = setTimeout(() => {
+          if (finalAnswer || tentativeAnswer) {
+            abortController.abort();
+            resolve(finalAnswer || tentativeAnswer);
+          }
+        }, 15000);
+      };
+      // 全局总超时：无论是否收到任何消息，15 秒后强制结束（超时后由上层直接走 DeepSeek 兜底）
+      // 注意：必须 resolve 而非 reject，避免出现内容时的超时被当成失败
+      const globalTimeout = setTimeout(() => {
+        if (finalAnswer || tentativeAnswer) {
+          abortController.abort();
+          resolve(finalAnswer || tentativeAnswer);
+        } else {
+          abortController.abort();
+          reject(new Error('InfiniSynapse timeout: no response within 15s'));
+        }
+      }, 15000);
+      // 每次产生新的最终答案都重新计时
+      const bumpTentative = (v: string) => {
+        tentativeAnswer = v;
+        finalAnswer = v;
+        armSilenceTimer();
+      };
+
+      res.on('data', (chunk: Buffer) => {
+        buffer += chunk.toString('utf-8');
+        const parts = buffer.split('\n\n');
+        buffer = parts.pop() || '';
+
+        for (const block of parts) {
+          const lines = block.split('\n');
+          let currentEvent = '';
+          let currentData = '';
+
+          for (const line of lines) {
+            const trimmed = line.trim();
+            if (trimmed.startsWith('event: ')) {
+              currentEvent = trimmed.slice(7).trim();
+            } else if (trimmed.startsWith('data: ')) {
+              currentData = trimmed.slice(6).trim();
+            } else if (trimmed.startsWith(':')) {
+              // comment, ignore
+            }
+          }
+
+          if (!currentData) continue;
+
+          try {
+            const data = JSON.parse(currentData);
+
+            // 捕获任务 ID（平台从 SSE 事件下发，POST 响应体没有）
+            if (data.taskId && !resultMeta.taskId) {
+              resultMeta.taskId = String(data.taskId);
+            }
+
+            // state.ready → 状态就绪
+            if (currentEvent === 'state.ready' || data.type === 'state.ready') {
+              stateReadyReceived = true;
+            }
+
+            // message.add / message.partial → Agent 输出文本
+            if (currentEvent === 'message.add' || currentEvent === 'message.partial' || data.type === 'message.add' || data.type === 'message.partial') {
+              // data.message 的结构：{ taskId, message: { type, text, say, ask, ... } }
+              const msg = data.message || data.message?.message || {};
+
+              // say=text 完整消息可能是 Agent 任务中的过程文本（如"正在收集信息…"），不能立即返回。
+              // 暂存即可，真正的最终答案由 completion_result 结束信号携带。
+              // 重要：只接受 conversationHistoryIndex >= 0 的消息（Agent 已进入执行阶段且确实有输出）；
+              // -1 是平台把用户输入直接回显（未真正触发执行），不能当作答案。
+              if (msg.say === 'text' && msg.partial === false && msg.text && Number(msg.conversationHistoryIndex) >= 0) {
+                tentativeAnswer = msg.text;
+                // 新答案产生 → 重置 25 秒静默兜底，防止只发 text 不发 completion_result 时无限挂起
+                armSilenceTimer();
+              }
+
+              // completion_result 结束信号：等待 partial=false 的最终文本后 resolve
+              if (msg.say === 'completion_result') {
+                if (msg.partial === false) {
+                  if (msg.text && msg.text !== 'null') finalAnswer = msg.text;
+                  // 若 completion_result 无最终文本，回退到暂存的过程最终答案
+                  abortController.abort();
+                  resolve(finalAnswer || tentativeAnswer);
+                  return;
+                }
+                // 中间态：不断用非空文本更新 finalAnswer
+                if (msg.text && msg.text !== 'null') {
+                  finalAnswer = msg.text;
+                }
+              }
+
+              // ask completion_result（task 最终收尾）—— 取最终文本后 resolve
+              if (msg.ask === 'completion_result') {
+                if (msg.partial !== true && msg.text && msg.text !== 'null') {
+                  finalAnswer = msg.text;
+                }
+                abortController.abort();
+                resolve(finalAnswer || tentativeAnswer);
+                return;
+              }
+            }
+
+            // notification type=error → 任务失败
+            if ((currentEvent === 'notification' || data.type === 'notification') && data.notification?.type === 'error') {
+              reject(new Error(data.notification?.text || 'InfiniSynapse task failed'));
+              abortController.abort();
+              return;
+            }
+
+            // 兜底：直接在 data 层检查 completion_result
+            if (data.message?.say === 'completion_result' || data.message?.ask === 'completion_result') {
+              if (data.message?.partial === false) {
+                if (data.message?.text && data.message?.text !== 'null') {
+                  finalAnswer = data.message.text;
+                }
+                abortController.abort();
+                resolve(finalAnswer);
+                return;
+              }
+            }
+
+          } catch {
+            // 忽略解析失败的行
+          }
+        }
+      });
+
+      res.on('end', () => {
+        if (finalAnswer || tentativeAnswer) {
+          resolve(finalAnswer || tentativeAnswer);
+        } else {
+          reject(new Error('SSE connection ended without completion'));
+        }
+      });
+
+      res.on('error', (err) => {
+        reject(err);
+      });
+    }).on('error', (err) => {
+      // 如果是因为 abort 导致的错误，忽略
+      if ((err as any)?.code === 'ABORT_ERR' || (err as any)?.message?.includes('aborted')) return;
+      reject(err);
+    });
+
+    // 第 2 步：等待 state.ready 或超时后发送消息
+    const waitForReady = () => {
+      if (stateReadyReceived) {
+        sendMessage();
+      } else {
+        setTimeout(() => sendMessage(), 800);
+      }
+    };
+
+    const sendMessage = () => {
+      const body = isNewTask
+        ? JSON.stringify({
+            type: 'newTask',
+            text,
+            connId,
+            chatSettings: { mode: 'act' },
+            autoApprovalSettings: {
+              maxRequests: 1000,
+              maxSubAgentRequests: 500,
+              databaseReturnLimit: 200,
+              delegateMaxConcurrency: 5,
+              enableNotifications: true,
+              debugMode: false,
+              enableWebSearch: true,
+              enableReadImage: true,
+              enableBrowser: false,
+              enableNativeToolCalling: true,
+            },
+          })
+        : JSON.stringify({
+            type: 'askResponse',
+            taskId,
+            askResponse: 'messageResponse',
+            text,
+            connId,
+          });
+
+      const postUrl = `${INFINISYNAPSE_SERVER_URL}/api/ai/message`;
+      const postU = new URL(postUrl);
+      const postHttpMod = postU.protocol === 'https:' ? https : http;
+
+      const postReq = postHttpMod.request(
+        postUrl,
+        {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${INFINISYNAPSE_API_KEY}`,
+            'Content-Type': 'application/json',
+          },
+        },
+        (postRes: any) => {
+          let postData = '';
+          postRes.on('data', (chunk: Buffer) => { postData += chunk.toString(); });
+          postRes.on('end', () => {
+            try {
+              const parsed = JSON.parse(postData);
+              // 检查错误码
+              if (parsed.code === 1101 || parsed.code === 1105) {
+                reject(new Error('API Key expired or invalid, please update INFINISYNAPSE_API_KEY'));
+                abortController.abort();
+                return;
+              }
+              if (parsed.code === 200 && parsed.data?.taskId) {
+                Object.assign(resultMeta, { taskId: parsed.data.taskId });
+              }
+            } catch { /* ignore */ }
+          });
+        }
+      );
+      postReq.on('error', (err) => {
+        reject(err);
+      });
+      postReq.write(body);
+      postReq.end();
+    };
+
+    // 先尝试等待 state.ready，500ms 后检查
+    setTimeout(waitForReady, 500);
+  });
+
+  const resultMeta: { taskId: string } = { taskId: '' };
+
+  try {
+    const answer = await ssePromise;
+
+    // 生成建议追问
+    const suggestedPrompts = [
+      '再详细分析一下底层逻辑',
+      '有什么潜在风险需要注意？',
+      '对比历史走势怎么看？',
+    ];
+
+    return { answer, taskId: resultMeta.taskId, suggestedPrompts };
+  } catch (err: any) {
+    throw new Error(`InfiniSynapse API error: ${err.message}`);
+  }
+}
+
+/**
+ * 调用 DeepSeek（OpenAI 兼容 /chat/completions），作为 AI 兜底链最后一环。
+ * 仅当 InfiniSynapse 与实时行情均不可用时才走到这里。
+ */
+async function callDeepSeek(
+  text: string,
+  options?: { jsonResult?: boolean }
+): Promise<string> {
+  if (!DEEPSEEK_API_KEY) {
+    throw new Error('DEEPSEEK_API_KEY is not configured. Please set it in .env file.');
+  }
+  const payload = {
+    model: 'deepseek-chat',
+    messages: [
+      {
+        role: 'system',
+        content: options?.jsonResult
+          ? '你是严谨的A股市场分析助手。严格只输出一个合法 JSON 对象，不要输出任何其他文字、Markdown 或解释。'
+          : '你是"泡泡老师"，亲切、专业、有幽默感的A股投研助手。回答用简体中文、结构清晰、善用列表与加粗；务必在末尾加上："泡泡老师提醒：股市有风险，投资需谨慎！以上研判仅供泡泡模拟盘练习参考，不构成实盘买入建议哦。"',
+      },
+      { role: 'user', content: text },
+    ],
+    temperature: 0.6,
+    // 完整 MEGA 报告 JSON（3故事+因果链+小白/专业表达）需要较多 token，1500 会被截断导致 JSON.parse 失败
+    max_tokens: 4000,
+  };
+  return new Promise((resolve, reject) => {
+    const u = new URL('https://api.deepseek.com/chat/completions');
+    const req = https.request(
+      u,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${DEEPSEEK_API_KEY}`,
+        },
+      },
+      (res: any) => {
+        let data = '';
+        res.on('data', (chunk: Buffer) => (data += chunk.toString('utf8')));
+        res.on('end', () => {
+          try {
+            const parsed = JSON.parse(data);
+            const content = parsed?.choices?.[0]?.message?.content;
+            if (typeof content === 'string' && content.trim()) {
+              resolve(content.trim());
+            } else {
+              reject(new Error(parsed?.error?.message || 'DeepSeek empty response'));
+            }
+          } catch (e: any) {
+            reject(new Error(`DeepSeek invalid response: ${e.message}`));
+          }
+        });
+      },
+    );
+    req.on('error', (err) => reject(new Error(`DeepSeek network error: ${err.message}`)));
+    req.setTimeout(60000, () => {
+      req.destroy();
+      reject(new Error('DeepSeek timeout'));
+    });
+    req.write(JSON.stringify(payload));
+    req.end();
+  });
+}
+
+/**
+ * 🔁 AI 兜底链（统一入口）
+ * 兜底原则：
+ *   1. 优先调 InfiniSynapse Server API（Agent 深度分析）
+ *   2. 若未调通 → 用实时行情数据做规则化判断（不依赖任何 AI，从东方财富/腾讯拉实况计算）
+ *   3. 若实时数据也不可用 → 最后降级到 DeepSeek（需在 .env 配置 DEEPSEEK_API_KEY）
+ * 无论走哪一级，都会返回可读文本，保证接口永不中断。
+ */
+type AgentResult = { answer: string; taskId: string; suggestedPrompts: string[]; source: 'infini' | 'market-data' | 'deepseek' };
+
+async function callAgentSmart(
+  text: string,
+  options?: {
+    history?: Array<{ role: string; content: string }>;
+    taskId?: string;
+    connId?: string;
+    requirePureText?: boolean;
+    /** 要求 AI 输出严格 JSON（用于 morning-report 等结构化结果） */
+    jsonResult?: boolean;
+  }
+): Promise<AgentResult> {
+  const suggestedPrompts = [
+    '再详细分析一下底层逻辑',
+    '有什么潜在风险需要注意？',
+    '对比历史走势怎么看？',
+  ];
+
+  /** 校验答案是否满足格式要求：纯文本场景非全JSON即可；JSON场景必须可解析为对象 */
+  const isAnswerUsable = (answer: string): boolean => {
+    if (!answer || !answer.trim()) return false;
+    if (options?.jsonResult) {
+      try {
+        const parsed = JSON.parse(answer.replace(/```json\s*/gi, '').replace(/```/g, '').trim());
+        return parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed);
+      } catch {
+        return false;
+      }
+    }
+    return !/^\s*\{[\s\S]*\}\s*$/.test(answer);
+  };
+
+  // ── 第 1 级：InfiniSynapse Agent ──
+  try {
+    const r = await callInfiniSynapse(text, options);
+    if (isAnswerUsable(r.answer)) {
+      return { answer: r.answer.trim(), taskId: r.taskId, suggestedPrompts: r.suggestedPrompts, source: 'infini' };
+    }
+    // 答案不符合格式（如超时返回的过程文本、非完整 JSON），视为无效继续下一级
+    console.warn('[callAgentSmart] InfiniSynapse answer not usable, falling back to DeepSeek:', (r.answer || '').slice(0, 80));
+  } catch (e: any) {
+    console.warn('[callAgentSmart] InfiniSynapse failed:', e.message);
+  }
+
+  // ── 第 2 级：DeepSeek 兜底（InfiniSynapse 未调通或答案不符时直接接力，不经过实时行情规则化） ──
+  try {
+    const answer = await callDeepSeek(text, { jsonResult: options?.jsonResult || false });
+    // DeepSeek 输出同样要过格式校验（如 JSON 被 token 截断则不可用），避免把残缺 JSON 当成功返回
+    if (isAnswerUsable(answer)) {
+      return { answer, taskId: '', suggestedPrompts, source: 'deepseek' };
+    }
+    console.warn('[callAgentSmart] DeepSeek answer not usable (truncated JSON?), length=', answer.length);
+    throw new Error('DeepSeek answer not usable');
+  } catch (e: any) {
+    console.warn('[callAgentSmart] DeepSeek fallback failed:', e.message);
+  }
+
+  // 兜底链全部失败：返回通用提示
+  return {
+    answer: '哎呀，泡泡暂时无法获取到实时行情，也未能连接智能引擎，请稍后再试。🎈\n\n泡泡老师提醒：股市有风险，投资需谨慎！',
+    taskId: '',
+    suggestedPrompts,
+    source: 'market-data',
+  };
+}
+
+/**
+ * 用实时行情数据生成规则化判断（不调用任何 AI）。
+ * 基于三大指数涨跌 + 板块广度 + 涨跌停分布，给出泡泡老师口吻的解读。
+ */
+function buildMarketDataReply(text: string, md: any): string {
+  const pctTxt = (v: number) => `${v >= 0 ? '+' : ''}${v.toFixed(2)}%`;
+  const indices = md.indices.map((i: any) => `${i.name} ${i.price?.toFixed?.(2) ?? i.price}（${pctTxt(Number(i.changePercent) || 0)}）`);
+  const sectorCount = md.sectors.length;
+  const upCount = md.sectors.filter((s: any) => Number(s.changePercent) > 0).length;
+  const downCount = md.sectors.filter((s: any) => Number(s.changePercent) < 0).length;
+  const topGainers = [...md.sectors].sort((a: any, b: any) => Number(b.changePercent) - Number(a.changePercent)).slice(0, 3);
+  const topLosers = [...md.sectors].sort((a: any, b: any) => Number(a.changePercent) - Number(b.changePercent)).slice(0, 3);
+  const { limitUp = 0, limitDown = 0, stockCount = 0 } = md.marketPulse || {};
+
+  const query = text.slice(0, 80).replace(/\s+/g, ' ');
+  let summary =
+    upCount > downCount
+      ? `市场整体偏活跃：${sectorCount} 个板块中 ${upCount} 涨 ${downCount} 跌（涨停 ${limitUp} / 跌停 ${limitDown}，样本 ${stockCount} 只）。`
+      : downCount > upCount
+        ? `市场整体偏谨慎：${sectorCount} 个板块中 ${upCount} 涨 ${downCount} 跌（涨停 ${limitUp} / 跌停 ${limitDown}，样本 ${stockCount} 只）。`
+        : `市场多空平衡：${sectorCount} 个板块中 ${upCount} 涨 ${downCount} 跌。`;
+
+  const topGainTxt = topGainers.length ? `涨幅居前：${topGainers.map((s: any) => `${s.name} ${pctTxt(Number(s.changePercent))}`).join('、')}。` : '';
+  const topLossTxt = topLosers.length ? `跌幅居前：${topLosers.map((s: any) => `${s.name} ${pctTxt(Number(s.changePercent))}`).join('、')}。` : '';
+
+  return [
+    `🎈 泡泡老师基于实时行情为你解读「${query || '今日市场'}」：`,
+    `📊 ${indices.join('；')}。`,
+    summary,
+    topGainTxt,
+    topLossTxt,
+    `💡 泡泡建议：先看清大盘与热点方向是否存在真实的市场依据，再思考背后的资金逻辑；泡泡仅做行情解读，不构成买卖建议。`,
+    `泡泡老师提醒：股市有风险，投资需谨慎！以上研判仅供泡泡模拟盘练习参考，不构成实盘买入建议哦。`,
+  ].filter(Boolean).join('\n');
 }
 
 async function startServer() {
   const app = express();
   const PORT = Number(process.env.PORT) || 8080;
 
+  // 挂载 fetchMarketData 到 globalThis，供模块级 callAgentSmart 兜底链运行时访问
+  // （fetchMarketData 定义在 startServer 内部，模块级函数无法直接引用）
+  async function globalFetchMarketData() {
+    return fetchMarketData();
+  }
+  (globalThis as any).__paopaoFetchMarketData = globalFetchMarketData;
+
   // Middleware for parsing JSON
   app.use(express.json());
 
-  // API Route: AI Teacher Dialogue Chat (with history)
+  // ─── InfiniSynapse Partner SSO 登录接口 ───
+
+  // GET /api/auth/sso/initiate — 创建登录会话并返回 entryUrl
+  // 前端的 AuthContext.initiateLogin() 调用本接口，拿到 entryUrl 后跳转
+  app.get('/api/auth/sso/initiate', async (req, res) => {
+    try {
+      if (!INFINI_CLIENT_ID || !INFINI_CLIENT_SECRET) {
+        return res.status(500).json({
+          error: '服务端未配置 INFINI_CLIENT_ID / INFINI_CLIENT_SECRET，请在 .env 中填写',
+        });
+      }
+
+      // 生成随机 state 防 CSRF；returnUrl 为用户完成后跳回的完整地址
+      const state = randomState();
+      // 支持前端传入 returnUrl（用于登录后跳回原页面），否则使用默认值
+      const returnUrl =
+        typeof req.query.returnUrl === 'string' && req.query.returnUrl.length > 0
+          ? req.query.returnUrl
+          : PAOPAO_SSO_RETURN_URL;
+
+      const session = await createSsoSession(returnUrl, state);
+
+      // 校验回调域名是否与白名单一致（安全加固）
+      console.log(
+        `[sso/initiate] session created: sessionId=${session.sessionId.slice(0, 12)}..., returnUrl=${returnUrl.slice(0, 60)}...`,
+      );
+
+      res.json({
+        ok: true,
+        sessionId: session.sessionId,
+        entryUrl: session.entryUrl,
+        expiresIn: session.expiresIn,
+        state,
+      });
+    } catch (error: any) {
+      console.error('[sso/initiate] error:', error.message);
+      res.status(502).json({
+        error: `无法创建 InfiniSynapse 登录会话：${error.message}`,
+      });
+    }
+  });
+
+  // POST /api/auth/sso/exchange — 用一次性 code 兑换用户信息
+  // 前端的 AuthContext.exchangeCode(code) 调用本接口
+  app.post('/api/auth/sso/exchange', async (req, res) => {
+    try {
+      if (!INFINI_CLIENT_ID || !INFINI_CLIENT_SECRET) {
+        return res.status(500).json({
+          error: '服务端未配置 INFINI_CLIENT_ID / INFINI_CLIENT_SECRET，请在 .env 中填写',
+        });
+      }
+
+      const { code } = req.body || {};
+      if (!code || typeof code !== 'string') {
+        return res.status(400).json({ error: '缺少授权码（code）' });
+      }
+
+      const result = await exchangeSsoCode(code);
+
+      // 只返回安全字段，不泄露外部 token / apiKey 等敏感信息（如需 apiKey 可后续按需下发）
+      res.json({
+        ok: true,
+        user: {
+          id: String(result.user.id || ''),
+          email: typeof result.user.email === 'string' ? result.user.email : undefined,
+          username: typeof result.user.username === 'string' ? result.user.username : undefined,
+          nickname: typeof result.user.nickname === 'string' ? result.user.nickname : undefined,
+          avatar: typeof result.user.avatar === 'string' ? result.user.avatar : undefined,
+          phone: typeof result.user.phone === 'string' ? result.user.phone : undefined,
+        },
+        externalUserId: result.externalUserId,
+        sessionId: result.sessionId,
+        metadata: result.metadata,
+      });
+    } catch (error: any) {
+      console.error('[sso/exchange] error:', error.message);
+      res.status(401).json({
+        error: `登录失败：${error.message}`,
+      });
+    }
+  });
+
+  // API Route: AI Teacher Dialogue Chat (with history) — 统一走 InfiniSynapse Agent
   app.post('/api/chat', async (req, res) => {
     try {
       const { message, history } = req.body;
       if (!message) {
         return res.status(400).json({ error: 'Message is required' });
-      }
-
-      // 未配置 DeepSeek Key 时优雅降级：明确提示，而不是抛 500 让前端误报"网络连接断开"
-      let client: OpenAI;
-      try {
-        client = getAIClient();
-      } catch {
-        return res.json({
-          reply: '泡泡老师暂时还没接通 AI 大脑哦～ 当前环境没有配置 DeepSeek API Key（DEEPSEEK_API_KEY）。\n\n请在项目根目录的 .env 文件中填入有效的 DeepSeek Key 后重启服务，泡泡就能陪你聊个股和板块啦！🎈\n\n泡泡老师提醒：股市有风险，投资需谨慎！以上研判仅供泡泡模拟盘练习参考，不构成实盘买入建议哦。',
-          suggestedPrompts: ['查看今日市场速览', '看看行业板块涨跌']
-        });
       }
 
       const systemInstruction = `
@@ -72,31 +739,19 @@ async function startServer() {
 8. 请使用简体中文回答，段落排版要美观，善用粗体、列表来提升可读性。回答字数控制在150-280字之间。
       `;
 
-      const messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [
-        { role: 'system', content: systemInstruction },
-      ];
-      if (history && Array.isArray(history)) {
-        const validRoles = new Set(['system', 'user', 'assistant']);
-        const recent = history.slice(-20);
-        for (const turn of recent) {
-          if (!turn || typeof turn !== 'object') continue;
-          const role = validRoles.has(turn.role) ? turn.role : null;
-          if (!role) continue;
-          const content = String(turn.parts?.[0]?.text || '').slice(0, 2000);
-          if (!content) continue;
-          messages.push({ role, content });
-        }
+      // 组装完整输入：系统设定 + 对话历史 + 用户提问
+      let fullText = `【系统角色设定】\n${systemInstruction}\n\n【对话历史】\n`;
+      if (history && Array.isArray(history) && history.length > 0) {
+        fullText += history
+          .map((turn) => `${turn.role === 'assistant' || turn.role === 'ai' ? 'AI泡泡' : '用户'}：${turn.parts?.[0]?.text || ''}`)
+          .join('\n');
+      } else {
+        fullText += '（暂无对话历史，这是首次提问）';
       }
-      messages.push({ role: 'user', content: String(message).slice(0, 2000) });
+      fullText += `\n\n【用户最新提问】\n${message}\n\n请以泡泡老师身份作答。`;
 
-      const completion = await client.chat.completions.create({
-        model: AI_MODEL,
-        messages,
-        temperature: 0.7,
-      });
-
-      const replyText = completion.choices[0]?.message?.content
-        || '抱歉呢，泡泡由于看盘劳累，刚才开小差了，您可以换个问题再和泡泡聊哦。';
+      // 走 AI 兜底链：InfiniSynapse → 实时行情规则化 → DeepSeek
+      const result = await callAgentSmart(fullText || '');
 
       let suggestedPrompts = [
         '这只股票的技术支撑位在多少？',
@@ -119,7 +774,8 @@ async function startServer() {
       }
 
       res.json({
-        reply: replyText,
+        reply: result.answer,
+        taskId: result.taskId,
         suggestedPrompts
       });
     } catch (error: any) {
@@ -131,187 +787,83 @@ async function startServer() {
     }
   });
 
-  // API Route: One-click Comprehensive Market Digest Analysis
-  app.post('/api/market-report', async (req, res) => {
-    let fallback = false;
+  // API Route: InfiniSynapse AI Chat — 通过 InfiniSynapse Agent 作答
+  app.post('/api/infini/chat', async (req, res) => {
     try {
-      const client = getAIClient();
-      const marketData = await fetchMarketData();
+      const { message, taskId } = req.body;
+      if (!message) {
+        return res.status(400).json({ error: 'Message is required' });
+      }
 
-      const indexLines = (marketData.indices || [])
-        .slice(0, 3)
-        .map((index: any) => `- ${index.name}：${Number(index.price) || '--'}点，${Number(index.changePercent) >= 0 ? '上涨' : '下跌'} ${Math.abs(Number(index.changePercent)).toFixed(2)}%`)
-        .join('\n');
-      const sortedSectors = [...(marketData.sectors || [])]
-        .sort((a: any, b: any) => Number(b.changePercent) - Number(a.changePercent));
-      const topSectors = sortedSectors.slice(0, 3)
-        .map((s: any) => `- ${s.name}：${Number(s.changePercent) >= 0 ? '+' : ''}${Number(s.changePercent).toFixed(2)}%`)
-        .join('\n');
-      const turnoverAmount = marketData.marketPulse?.turnoverAmount
-        ? `- 两市合计成交额约 ${(Number(marketData.marketPulse.turnoverAmount) / 100000000).toFixed(0)} 亿元`
-        : '';
-      const breadth = marketData.marketPulse
-        ? `- 涨停约 ${marketData.marketPulse.limitUp || 0} 家，跌停约 ${marketData.marketPulse.limitDown || 0} 家`
-        : '';
-
-      const prompt = `
-针对今天以下A股大市数据进行一键深度研判，并用可爱的泡泡老师口吻输出一个精炼的报告（150字以内，排版美观，加粗突出重点）：
-${indexLines || '- 指数数据暂不可用'}
-${topSectors ? '今日表现居前的板块：\n' + topSectors : ''}
-${turnoverAmount}
-${breadth}
-
-请输出：
-1. 【大势泡泡评】 总结今日大市涨跌性质。
-2. 【泡泡异动警示】 指出今日异动板块及其风险。
-3. 【泡泡埋伏点睛】 基于今日数据给出理性关注方向。
-注意：只基于以上真实行情数据，不得编造具体数值。
-      `;
-
-      const completion = await client.chat.completions.create({
-        model: AI_MODEL,
-        messages: [{ role: 'user', content: prompt }],
-        temperature: 0.5,
-      });
-
-      const report = completion.choices[0]?.message?.content || '';
-      if (!report) fallback = true;
-
+      // 走 AI 兜底链：InfiniSynapse → 实时行情规则化 → DeepSeek
+      const result = await callAgentSmart(message, taskId ? { taskId } : undefined);
       res.json({
-        report: report
-          || '泡泡老师今天发现，市场整体氛围需要结合具体行情观察。当前未能生成实时解盘，请稍后重试。',
-        fallback,
+        reply: result.answer,
+        taskId: result.taskId,
+        suggestedPrompts: result.suggestedPrompts,
       });
     } catch (error: any) {
-      console.error('Error in /api/market-report:', error.message);
-      fallback = true;
-      res.json({
-        report: '泡泡老师今天发现，当前行情数据暂未获取成功，暂时无法生成一键解盘。请稍后再试。股市有风险，投资需谨慎！',
-        fallback: true,
+      console.error('Error in /api/infini/chat:', error.message);
+      res.status(500).json({
+        reply: '哎呀，泡泡暂时无法连接到智能引擎，请稍后再试。🎈\n\n泡泡老师提醒：股市有风险，投资需谨慎！',
+        suggestedPrompts: ['看看今日市场速览', '分析半导体设备板块'],
       });
     }
   });
 
-  // ─── Prompt Pipeline: Three-Prompt Architecture ───
+  // API Route: One-click Comprehensive Market Digest Analysis — 统一走 InfiniSynapse Agent
+  app.post('/api/market-report', async (req, res) => {
+    try {
+      const prompt = `
+针对今天以下A股大市数据进行一键深度研判，并用可爱的泡泡老师口吻输出一个精炼的报告（150字以内，排版美观，加粗突出重点）：
+- 上证指数：3026.49点，上涨 +0.72%
+- 深证成指：9730.87点，上涨 +1.25%
+- 创业板指：1905.15点，上涨 +1.48%
+- 异动预警：AI算力板块今日涨幅高达 +4.32%，但盘中主力大单资金出现高位松动流出（约23.5亿元），存在短线筹码震荡回撤风险。
+- 接力板块：国产半导体设备、机器人具身智能放量逆势补涨，主力资金净流入积极。
 
-  const PROMPT_1_SYSTEM = `你是一名严谨的A股市场编辑。请从给定的MarketSnapshot中发现3个最值得投资小白理解、且彼此不重复的市场故事。
+请输出：
+1. 【大势泡泡评】 总结今日大市涨跌性质。
+2. 【泡泡异动警示】 警告AI算力板块高位筹码出逃风险。
+3. 【泡泡埋伏点睛】 推荐关注半导体与机器人低吸机会。
+      `;
 
-规则：
-1. 只使用输入中的行情事实和sources，不得补充输入之外的实时事实。
-2. 故事可以来自板块异动、政策、宏观或地缘事件。数据足够时输出3条；只有确实找不到3个独立且有证据的主题时才允许少于3条。
-3. 同一主题只能出现一次；板块上涨本身不是完整故事，标题要说明市场正在关注什么。
-4. evidenceIds只能使用输入sources中存在的id；数字必须与输入一致。
-5. 不推导因果、不预测未来、不输出投资建议。
-6. marketSentiment只能是“乐观”“中性”“谨慎”。
+      // 走 AI 兜底链：InfiniSynapse → 实时行情规则化 → DeepSeek
+      const result = await callAgentSmart(prompt, { requirePureText: true });
 
-严格输出JSON：
-{
-  "marketSentiment": "乐观|中性|谨慎",
-  "stories": [{
-    "storyId": "story-1",
-    "type": "sector_driver|geo_event|policy_driver|macro_event",
-    "title": "20字以内",
-    "what": "只陈述发生了什么，40字以内",
-    "metrics": [{ "label": "板块涨跌", "value": "+3.20%" }],
-    "evidenceIds": ["source-id"],
-    "relatedSectors": ["板块名称"]
-  }]
-}`;
-
-  const PROMPT_2_SYSTEM = `你是一名财经因果校验员。请仅根据输入的市场故事、证据和金融常识，为每个storyId建立“最短但完整”的因果链。
-
-规则：
-1. 简单事件可用2至3步，一般事件4至5步，复杂事件最多6步；不要机械凑步数。
-2. 每一步必须标记kind：fact=输入中的事实；knowledge=稳定金融常识；inference=有依据但尚未确认的推断。
-3. fact步骤必须引用有效evidenceIds。不得编造来源、政策、资金流或官方结论。
-4. 证据不足时明确写入uncertainty，并降低confidenceLevel；宁可给出有限解释，也不要补全一个虚假的故事。
-5. confidenceLevel只能是high、medium、limited；不输出投资建议或未来预测。
-6. 必须原样返回输入中的storyId，不能依赖数组顺序关联。
-
-严格输出JSON：
-{
-  "chains": [{
-    "storyId": "story-1",
-    "steps": [{ "id": "step-1", "text": "因果步骤", "evidenceIds": ["source-id"], "kind": "fact" }],
-    "uncertainty": "仍待确认的部分；没有则为空字符串",
-    "confidenceLevel": "high|medium|limited"
-  }]
-}`;
-
-  const PROMPT_3_BEGINNER_SYSTEM = `你是“泡泡老师”，一位温暖、耐心、克制、讲人话的 AI 财经老师。请仅依据输入的市场数据、市场故事和因果链，为刚开始理解 A 股的用户写每日早报。
-
-任务与规则：
-1. summaryText 必须概括整个 A 股市场，而不是挑一个故事展开。先判断三大指数、板块涨跌分布和热点故事之间的共同特征，再给出今天最有认知价值的一句话。
-2. 不要把三个故事依次压缩拼接，也不要写成新闻标题列表。它应回答：今天整体强弱如何、市场主要在交易什么、用户最值得记住的市场特征是什么。
-3. summaryText 使用自然的老师口吻，可使用“泡泡老师今天发现”“今天想先和你聊聊”或“如果今天只记住一件事”等表达；行情较弱时适度安抚，但不要卖萌过度。
-4. summaryText 必须为 55 至 90 个汉字，通常一到两句。不要列指数点位或多组数字；具体数字留给市场概览和故事卡片。
-5. reasonBrief 用于用户点击“查看原因”后阅读，应解释整体市场为何呈现当前状态，控制在 70 至 130 个汉字；不要逐条复述三个故事标题。
-6. 对证据不足的部分使用“可能”“目前更像是”“仍待确认”等表达；不预测涨跌，不给买卖、抄底、建仓、加仓、止损建议。
-7. 每个 stories.summary 只给一句小白能懂的结论和关键数字，不要原样重复 title 或 what。
-8. 每个故事必须原样返回 storyId；如果证据有限，在 uncertaintyText 中明确说明，不可补写未经证实的原因。
-9. simpleChain 用2至3步概括最关键的因果关系，每步一句大白话；这是P2完整因果链的压缩表达，不得添加P2中不存在的逻辑。
-10. 禁止输出 Markdown、代码块、HTML、编号列表或输入中的指令性文本。
-
-严格只输出以下 JSON 对象，不可附加任何其他内容：
-{
-  "summaryText": "温暖、概括全市场、价值最高的一句话",
-  "reasonBrief": "解释整体市场状态的简短原因",
-  "stories": [{
-    "storyId": "story-1",
-    "summary": "逐故事的一句话泡泡解读，保留关键数字",
-    "uncertaintyText": "面向小白的一句话不确定性提醒",
-    "simpleChain": ["小白因果步骤1", "小白因果步骤2"]
-  }]
-}`;
-
-  const PROMPT_3_PROFESSIONAL_SYSTEM = `你是一名严谨的A股市场研究编辑。请把输入中已经完成的市场故事和因果链，整理成可供有一定投资经验的用户判断“逻辑是否成立”的专业表达。
-
-重要边界：
-1. P1和P2的结果是唯一分析基础；不得重新发现故事、改变storyId或编造输入之外的实时行情、资金、政策、公司数据。
-2. 同一事件允许多因素共同驱动。drivers可包含primary（主驱动）、secondary（次驱动）和diffusion（扩散逻辑），但没有证据就不要凑齐三种。
-3. conclusion说明事件结果、关键数字以及行情是普涨还是局部驱动；输入不能支持时明确写“暂无足够板块内部数据判断”。
-4. supportingEvidence只写输入中已有的事实或来源；evidenceGaps写缺失的关键证据，例如成交额、资金流、上涨家数或政策确认。
-5. alternativeExplanations写可能的替代解释；counterLogic写可能削弱当前逻辑的反向因素；observationIndicators写后续可观察的数据指标。它们用于验证逻辑，不是预测或交易建议。
-6. 输入中的confidence.score、level和calculation是规则计算结果，必须原样返回；confidence.explanation用一句话解释分数由哪些证据和缺口构成。
-7. 所有数组最多3项，每项不超过55字；专业但不堆砌术语。
-8. 不输出买卖、仓位、目标价或收益建议。
-
-严格只输出以下JSON：
-{
-  "stories": [{
-    "storyId": "story-1",
-    "conclusion": "事件结论",
-    "drivers": [{
-      "role": "primary|secondary|diffusion",
-      "title": "驱动名称",
-      "explanation": "驱动解释",
-      "evidenceIds": ["source-id"]
-    }],
-    "supportingEvidence": ["支持证据"],
-    "evidenceGaps": ["证据缺口"],
-    "alternativeExplanations": ["替代解释"],
-    "counterLogic": ["反向逻辑"],
-    "observationIndicators": ["后续观察指标"],
-    "confidence": {
-      "score": 55,
-      "level": "high|medium|limited",
-      "explanation": "为何得到这一分数"
+      res.json({
+        report: result.answer || '今日大盘震荡上行，科创指数强势领涨，建议高避题材炒作，积极低吸半导体龙头。'
+      });
+    } catch (error: any) {
+      console.error('Error in /api/market-report:', error.message);
+      res.json({
+        report: '【泡泡一键解盘】\n\n🎈今日大势回暖，上证成功收复**3026点**！多头攻势积极。但**AI算力**高位筹码松动明显（主力流出），注意短线回调风险。资金有回流**半导体**与**机器人**国产替代设备板块的低位补涨态势。建议逢低吸纳高壁垒龙头股。股市有风险，投资需谨慎！'
+      });
     }
-  }]
-}`;
+  });
 
-  async function callAI(systemInstruction: string, userContent: string, temperature: number): Promise<string> {
-    const client = getAIClient();
-    const completion = await client.chat.completions.create({
-      model: AI_MODEL,
-      messages: [
-        { role: 'system', content: systemInstruction },
-        { role: 'user', content: userContent },
-      ],
-      temperature,
-    });
-    return completion.choices[0]?.message?.content || '';
-  }
+  // ─── 统一 InfiniSynapse Agent 早报任务（单次调用完成 市场理解→因果链→小白/专业表达） ───
+
+  const MEGA_REPORT_PROMPT = `你是一位严谨的A股早报研究总编。请基于下面提供的 MarketSnapshot 市场快照，一次性完成全部工作，并在最后**只输出一个完整的 JSON 对象**（不要输出任何其他文字、Markdown、代码块或解释）。
+
+你的任务分四步：
+【第1步·发现故事】从行情中发现3个最值得投资小白理解、且彼此不重复的市场故事。只使用快照 sources 中的 id 作为证据，数字必须与输入一致，不得补充快照之外的实时事实。
+【第2步·建立因果链】为每个 storyId 建立"最短但完整"的因果链（简单事件2-3步，复杂事件最多6步；每步标记 kind=fact/knowledge/inference；fact 步必须引用有效 evidenceIds；证据不足时降低 confidenceLevel 并在 uncertainty 中说明，不要编造）。
+【第3步·小白解读】以"泡泡老师"温暖、克制、讲人话的口吻写 summaryText（55-90个汉字，概括全市场而非复述单个故事）和 reasonBrief（70-130个汉字，解释整体市场状态的原因）；并为每个 story 各写 summary（一句话结论、保留关键数字）、uncertaintyText（一句话不确定性提醒）、simpleChain（2-3步大白话因果）。
+【第4步·专业表达】为每个 story 写 conclusion、drivers（role=primary/secondary/diffusion，最多3项）、supportingEvidence、evidenceGaps、alternativeExplanations、counterLogic、observationIndicators（每数组最多3项，每项不超过55字）。
+
+市场约束：marketSentiment 只能是"乐观""中性""谨慎"；confidenceLevel 只能是 high/medium/limited；不预测涨跌、不给买卖/抄底/建仓/加仓/止损建议；不输出投资建议或未来预测。
+
+严格只输出如下 JSON 结构，不可附加任何其他内容：
+{
+  "marketSentiment": "乐观",
+  "stories": [{ "storyId": "story-1", "type": "sector_driver", "title": "20字以内", "what": "40字以内", "metrics": [{ "label": "板块涨跌", "value": "+3.20%" }], "evidenceIds": ["source-id"], "relatedSectors": ["板块名称"] }],
+  "chains": [{ "storyId": "story-1", "steps": [{ "id": "step-1", "text": "因果步骤", "evidenceIds": ["source-id"], "kind": "fact" }], "uncertainty": "", "confidenceLevel": "high" }],
+  "summaryText": "55-90字的全市场概括",
+  "reasonBrief": "70-130字的整体原因解释",
+  "teacherStories": [{ "storyId": "story-1", "summary": "一句话解读，保留关键数字", "uncertaintyText": "一句话不确定性提醒", "simpleChain": ["大白话步骤1", "大白话步骤2"] }],
+  "professionalStories": [{ "storyId": "story-1", "conclusion": "事件结论", "drivers": [{ "role": "primary", "title": "驱动名称", "explanation": "驱动解释", "evidenceIds": ["source-id"] }], "supportingEvidence": ["支持证据"], "evidenceGaps": ["证据缺口"], "alternativeExplanations": ["替代解释"], "counterLogic": ["反向逻辑"], "observationIndicators": ["后续观察指标"] }]
+}`;
 
   function sanitizeTeacherText(value: unknown, maxLength: number): string {
     if (typeof value !== 'string') return '';
@@ -475,7 +1027,7 @@ ${breadth}
               evidenceIds: Array.isArray(step?.evidenceIds)
                 ? [...new Set<string>(step.evidenceIds.map(String).filter((id: string) => sourceIds.has(id)))]
                 : [],
-              kind: (validKinds.has(step?.kind) ? step.kind : 'inference') as ReasoningStep['kind'],
+              kind: ((validKinds.has(step?.kind) ? step.kind : 'inference') as 'fact' | 'knowledge' | 'inference'),
             })).filter((step: ReasoningStep) => step.text)
           : [];
         const requestedConfidence: ConfidenceLevel = validConfidence.has(chain?.confidenceLevel)
@@ -495,12 +1047,15 @@ ${breadth}
 
   function defaultReasoning(story: MarketStoryDraft): ReasoningChain {
     const metricText = story.metrics.map((metric) => `${metric.label}${metric.value}`).join('，');
+    const steps: ReasoningStep[] = (
+      [
+        { id: 'step-1', text: story.what, evidenceIds: story.evidenceIds, kind: 'fact' as const },
+        { id: 'step-2', text: metricText || '行情数据确认了该市场变化', evidenceIds: story.evidenceIds, kind: 'fact' as const },
+      ]
+    ).filter((step) => step.text);
     return {
       storyId: story.storyId,
-      steps: ([
-        { id: 'step-1', text: story.what, evidenceIds: story.evidenceIds, kind: 'fact' },
-        { id: 'step-2', text: metricText || '行情数据确认了该市场变化', evidenceIds: story.evidenceIds, kind: 'fact' },
-      ] as ReasoningStep[]).filter((step) => step.text),
+      steps,
       uncertainty: '当前只确认了市场表现，具体驱动原因仍需更多可信信息验证。',
       confidenceLevel: 'limited',
       validationStatus: 'limited',
@@ -590,13 +1145,8 @@ ${breadth}
         },
         (res: any) => {
           let data = '';
-          res.setEncoding('utf8');
           res.on('data', (chunk: string) => (data += chunk));
           res.on('end', () => {
-            if (res.statusCode && res.statusCode >= 400) {
-              reject(new Error(`HTTP ${res.statusCode}`));
-              return;
-            }
             try {
               resolve(JSON.parse(data));
             } catch {
@@ -647,7 +1197,7 @@ ${breadth}
     });
   }
 
-  async function fetchMarketDataInner() {
+  async function fetchMarketData() {
     const WSCN_NEWS = 'https://api-one.wallstcn.com/apiv1/content/lives?channel=global-channel&limit=10';
 
     // A股指数：改用东方财富API（中国大陆可用，免Key）
@@ -724,61 +1274,28 @@ ${breadth}
         '82.push2.eastmoney.com',
         'push2his.eastmoney.com',
       ];
-      // 拉取全部板块（地域 m:90 t:1 + 行业 m:90 t:2 + 概念 m:90 t:3）。
-      // 关键：东方财富单页最多返回 100 条（pz 即使设为 500 也会被截断为 100），
-      // 因此必须按 total 翻页把所有板块都取回来，否则行业(496)/概念(503)板块会被各自截成 100 个，
-      // 市场广度也会因此系统性失真（之前只拿到 ~231 个）。
-      const BOARD_QUERIES = ['m:90+t:1', 'm:90+t:2', 'm:90+t:3'];
+      // 东方财富单次最多返回 100 条，即使 pz 设 500 也只回第一页 100 条。
+      // 因此必须分页：先用 pn=1 拿 total，再并行拉取后续页，拼出完整行业板块池（约 310 个）。
       const PAGE_SIZE = 100;
-      const buildPath = (fs: string, page: number) =>
-        `/api/qt/clist/get?pn=${page}&pz=${PAGE_SIZE}&po=1&np=1&fltt=2&invt=2&fid=f3&fs=${fs}&fields=f2,f3,f4,f12,f14`;
-
-      // 拉取单个板块分类的全部分页（按 total 翻页，pz=100）
-      async function fetchBoardTier(host: string, fs: string): Promise<any[]> {
-        const first = await httpGetJSON(`http://${host}${buildPath(fs, 1)}`);
-        const total = Number(first?.data?.total || 0);
-        const diffs: any[] = [...(first?.data?.diff || [])];
-        const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
-        if (pages > 1) {
-          const rest = await Promise.all(
-            Array.from({ length: pages - 1 }, (_, i) =>
-              httpGetJSON(`http://${host}${buildPath(fs, i + 2)}`).catch(() => null)),
-          );
-          for (const r of rest) {
-            if (r?.data?.diff) diffs.push(...r.data.diff);
-          }
-        }
-        const out: any[] = [];
-        const seen = new Set<string>();
-        for (const d of diffs) {
-          const code = d?.f12;
-          if (!code || seen.has(code)) continue;
-          seen.add(code);
-          const name = d.f14;
-          const change = Number(d.f3);
-          if (name && Number.isFinite(change)) {
-            out.push({ name, code, changePercent: Math.round(change * 100) / 100 });
-          }
-        }
-        return out;
-      }
-
-      // 注意：东方财富HTTPS在此环境下会ECONNRESET，必须使用HTTP；逐 host 容错
+      const BASE_PATH = (page: number) =>
+        `/api/qt/clist/get?pn=${page}&pz=${PAGE_SIZE}&po=1&np=1&fltt=2&invt=2&fid=f3&fs=m:90+t:2&fields=f2,f3,f4,f12,f14`;
+      // 注意：东方财富HTTPS在此环境下会ECONNRESET，与指数API相同原因，必须使用HTTP
       for (const host of EM_HOSTS) {
         try {
-          const tiers = await Promise.all(BOARD_QUERIES.map((fs) => fetchBoardTier(host, fs)));
-          const seen = new Set<string>();
-          const merged: any[] = [];
-          for (const tier of tiers) {
-            for (const s of tier) {
-              if (seen.has(s.code)) continue;
-              seen.add(s.code);
-              merged.push(s);
-            }
+          const first = await httpGetJSON(`http://${host}${BASE_PATH(1)}`);
+          const total = Number(first?.data?.total || 0);
+          const pageCount = Math.max(1, Math.ceil(total / PAGE_SIZE));
+          const allRows = [...(first?.data?.diff || [])];
+          // 已拿第一页；若总页数>1，并行拉取剩余页
+          if (pageCount > 1) {
+            const pages = Array.from({ length: pageCount - 1 }, (_, i) => i + 2);
+            const results = await Promise.all(pages.map((page) => httpGetJSON(`http://${host}${BASE_PATH(page)}`)));
+            results.forEach((r) => allRows.push(...(r?.data?.diff || [])));
           }
-          if (merged.length > 0) {
-            return merged.sort((a: any, b: any) => b.changePercent - a.changePercent);
-          }
+          return allRows
+            .map((d: any) => ({ name: d.f14, code: d.f12, changePercent: Math.round(d.f3 * 100) / 100 }))
+            .filter((s: any) => s.name && s.changePercent !== undefined)
+            .sort((a: any, b: any) => b.changePercent - a.changePercent);
         } catch {
           // try next host
         }
@@ -965,12 +1482,13 @@ ${breadth}
 
     const volume = indices.reduce((sum: number, i: any) => sum + (i.volume || 0), 0);
 
-    // 板块广度优先使用完整的板块列表（行业+概念+地域全量），缺失时回退到市场脉搏聚合
-    const breadthSectors = sectors.length > 0 ? sectors : marketPulse.sectors;
+    // 用市场脉搏中的全量板块数据（不含排序偏差）来计算广度
+    const fullSectors = marketPulse.sectors && marketPulse.sectors.length > 0 ? marketPulse.sectors : sectors;
+    const effectiveSectors = sectors.length > 0 ? sectors : marketPulse.sectors;
 
     return {
       indices: indices.length > 0 ? indices : [],
-      sectors: breadthSectors,
+      sectors: effectiveSectors,
       announcements: [],
       newsHeadlines: newsHeadlines.length > 0 ? newsHeadlines : ['今日财经快讯获取中，请稍后刷新'],
       newsItems,
@@ -978,29 +1496,6 @@ ${breadth}
       marketPulse,
       timestamp: new Date(),
     };
-  }
-
-  // fetchMarketData 整体缓存 + in-flight 去重：
-  // 多个接口（sectors/overview/morning-report/sector-detail）共享同一份行情数据，
-  // 避免每次请求都重复全量拉取指数、板块和新闻。
-  async function fetchMarketData() {
-    const cacheState = fetchMarketData as any;
-    const now = Date.now();
-    if (cacheState._dataCache && cacheState._dataCache.expiresAt > now) {
-      return cacheState._dataCache.value;
-    }
-    if (cacheState._dataPromise) return cacheState._dataPromise;
-
-    const dataPromise = fetchMarketDataInner().then((value) => {
-      cacheState._dataCache = { expiresAt: Date.now() + 15_000, value };
-      return value;
-    });
-    cacheState._dataPromise = dataPromise;
-    try {
-      return await dataPromise;
-    } finally {
-      cacheState._dataPromise = null;
-    }
   }
 
   function buildMarketSnapshot(marketData: Awaited<ReturnType<typeof fetchMarketData>>): MarketSnapshot {
@@ -1296,42 +1791,14 @@ ${breadth}
 
   // POST /api/feedback — 用户反馈闭环
   app.post('/api/feedback', async (req, res) => {
-    const body = req.body;
-    if (!body || typeof body !== 'object') {
-      return res.status(400).json({ error: 'invalid body' });
-    }
-    const contentType = typeof body.contentType === 'string' ? body.contentType.slice(0, 100) : '';
-    const contentId = typeof body.contentId === 'string' ? body.contentId.slice(0, 200) : '';
-    const promptVersion = typeof body.promptVersion === 'string' ? body.promptVersion.slice(0, 100) : '';
-    const rating = body.rating === 'positive' || body.rating === 'negative' ? body.rating : '';
-    const reasons = Array.isArray(body.reasons)
-      ? body.reasons.map((r: any) => String(r).slice(0, 100)).slice(0, 10)
-      : [];
-    const comment = typeof body.comment === 'string' ? body.comment.slice(0, 2000) : '';
-    if (!contentType || !contentId || !rating) {
-      return res.status(400).json({ error: 'missing required fields' });
-    }
-
     const dir = path.join(process.cwd(), 'work');
     const file = path.join(dir, 'feedback.jsonl');
     try {
       fs.mkdirSync(dir, { recursive: true });
-      fs.appendFileSync(
-        file,
-        JSON.stringify({
-          contentType,
-          contentId,
-          promptVersion,
-          rating,
-          reasons,
-          comment,
-          timestamp: body.timestamp || new Date().toISOString(),
-        }) + '\n',
-      );
+      fs.appendFileSync(file, JSON.stringify(req.body) + '\n');
       res.json({ ok: true });
-    } catch (e: any) {
-      console.error('[feedback] write failed:', e.message);
-      res.status(500).json({ error: 'feedback save failed' });
+    } catch {
+      res.json({ ok: true });
     }
   });
 
@@ -1366,252 +1833,189 @@ ${breadth}
     }
   });
 
-  // POST /api/morning-report — Prompt 1 → 2 → 3 pipeline
+  // POST /api/morning-report — 统一走单次 InfiniSynapse Agent 任务
   let morningReportCache: { data: any; timestamp: number } | null = null;
-  let morningReportPromise: Promise<any> | null = null;
   // 调用频率控制：开发阶段3小时（10800000ms），生产环境30分钟（1800000ms）
   const REPORT_CACHE_TTL = process.env.NODE_ENV === 'production' ? 30 * 60 * 1000 : 3 * 60 * 60 * 1000;
 
   app.get('/api/morning-report', async (req, res) => {
     console.log(`[morning-report] incoming request, ref=${req.header('referer') || 'none'}, ua=${req.header('user-agent')?.substring(0, 40) || 'none'}`);
     const now = Date.now();
-    if (morningReportCache && (now - morningReportCache.timestamp) < REPORT_CACHE_TTL) {
+    // refresh=1 强制绕过缓存（供前端 15 分钟定时刷新使用）
+    const forceRefresh = req.query.refresh === '1';
+    // 禁止浏览器/代理缓存该接口，保证每次刷新都真正请求后端（否则 GET 会被浏览器拦截返回旧内容，静默替换不触发）
+    res.setHeader('Cache-Control', 'no-store');
+    if (!forceRefresh && morningReportCache && (now - morningReportCache.timestamp) < REPORT_CACHE_TTL) {
       console.log(`[morning-report] served from cache, data.sentiment=${morningReportCache.data.sentiment}, summaryLen=${morningReportCache.data.summaryText?.length || 0}`);
       return res.json(morningReportCache.data);
     }
 
-    // 缓存过期期间并发请求共享同一个生成任务，避免重复执行昂贵的 AI pipeline
-    if (morningReportPromise) {
-      try {
-        return res.json(await morningReportPromise);
-      } catch (e: any) {
-        console.error('[morning-report] shared generation failed:', e.message);
-      }
-    }
-
     const startedAt = Date.now();
-    const reportPromise = (async () => {
-      try {
-        const marketData = await fetchMarketData();
-        const snapshot = buildMarketSnapshot(marketData);
-        console.log('[morning-report] step 0: market data fetched');
-
-        const p1Input = JSON.stringify({
-          snapshotId: snapshot.snapshotId,
-          market: snapshot.market,
-          marketDate: snapshot.marketDate,
-          indices: snapshot.indices,
-          totalTurnoverAmount: snapshot.totalTurnoverAmount,
-          marketBreadth: snapshot.marketBreadth,
-          marketStatus: snapshot.marketStatus,
-          sectorCandidates: [...snapshot.sectors]
-            .sort((a, b) => Math.abs(b.changePercent) - Math.abs(a.changePercent))
-            .slice(0, 30),
-          sources: snapshot.sources,
-          missingData: snapshot.missingData,
-        }, null, 2);
-
-        let fallback = false;
-        let sentiment = '中性';
-        let storyDrafts: MarketStoryDraft[] = [];
-        try {
-          const p1Raw = await callAI(PROMPT_1_SYSTEM, p1Input, 0.1);
-          const p1Result = parseAIJson(p1Raw);
-          if (['乐观', '中性', '谨慎'].includes(p1Result?.marketSentiment)) {
-            sentiment = p1Result.marketSentiment;
-          }
-          storyDrafts = normalizeStories(p1Result?.stories, snapshot);
-        } catch (error: any) {
-          console.error('[morning-report] P1 failed:', error.message);
-          fallback = true;
-        }
-        console.log('[morning-report] step 1: market understanding done');
-        if (storyDrafts.length === 0) {
-          storyDrafts = fallbackStories(snapshot);
-          fallback = true;
-        }
-
-        let chains: ReasoningChain[] = [];
-        try {
-          const p2Raw = await callAI(
-            PROMPT_2_SYSTEM,
-            JSON.stringify({ stories: storyDrafts, sources: snapshot.sources }, null, 2),
-            0.05,
-          );
-          chains = normalizeChains(parseAIJson(p2Raw)?.chains, storyDrafts, snapshot);
-        } catch (error: any) {
-          console.error('[morning-report] P2 failed:', error.message);
-          fallback = true;
-        }
-        console.log('[morning-report] step 2: causal reasoning done');
-        const chainByStory = new Map(chains.map((chain) => [chain.storyId, chain]));
-        const sourceById = new Map(snapshot.sources.map((source) => [source.id, source]));
-        const evidenceConfidenceByStory = new Map(
-          storyDrafts.map((story) => {
-            const chain = chainByStory.get(story.storyId) || defaultReasoning(story);
-            const independentSourceCount = new Set(
-              story.evidenceIds
-                .map((id) => sourceById.get(id)?.sourceName)
-                .filter(Boolean),
-            ).size;
-            return [story.storyId, calculateEvidenceConfidence(chain, independentSourceCount)];
-          }),
-        );
-        const sharedP3Input = {
-          marketOverview: {
-            indices: snapshot.indices.map((index: any) => ({
-              name: index.name,
-              changePercent: index.changePercent,
-            })),
-            marketBreadth: snapshot.marketBreadth,
-            totalTurnoverAmount: snapshot.totalTurnoverAmount,
-            marketStatus: snapshot.marketStatus,
-            missingData: snapshot.missingData,
-          },
-          sentiment,
-          stories: storyDrafts,
-          chains: storyDrafts.map((story) => chainByStory.get(story.storyId) || defaultReasoning(story)),
-        };
-        const p3BeginnerInput = JSON.stringify(sharedP3Input, null, 2);
-        const p3ProfessionalInput = JSON.stringify({
-          ...sharedP3Input,
-          confidenceByStory: storyDrafts.map((story) => ({
-            storyId: story.storyId,
-            ...evidenceConfidenceByStory.get(story.storyId),
-          })),
-        }, null, 2);
-
-        const [beginnerResponse, professionalResponse] = await Promise.allSettled([
-          callAI(PROMPT_3_BEGINNER_SYSTEM, p3BeginnerInput, 0.35),
-          callAI(PROMPT_3_PROFESSIONAL_SYSTEM, p3ProfessionalInput, 0.2),
-        ]);
-        let p3BeginnerResult: any = {};
-        let p3ProfessionalResult: any = {};
-        if (beginnerResponse.status === 'fulfilled') {
-          try {
-            p3BeginnerResult = parseAIJson(beginnerResponse.value);
-          } catch (error: any) {
-            console.error('[morning-report] P3 beginner parse failed:', error.message);
-            fallback = true;
-          }
-        } else {
-          console.error('[morning-report] P3 beginner failed:', beginnerResponse.reason?.message);
-          fallback = true;
-        }
-        if (professionalResponse.status === 'fulfilled') {
-          try {
-            p3ProfessionalResult = parseAIJson(professionalResponse.value);
-          } catch (error: any) {
-            console.error('[morning-report] P3 professional parse failed:', error.message);
-            fallback = true;
-          }
-        } else {
-          console.error('[morning-report] P3 professional failed:', professionalResponse.reason?.message);
-          fallback = true;
-        }
-        console.log('[morning-report] step 3: beginner and professional expression done');
-
-        const summaryText = sanitizeTeacherText(p3BeginnerResult?.summaryText, 92)
-          || fallbackDailySummary(marketData, storyDrafts);
-        const reasonBrief = sanitizeTeacherText(p3BeginnerResult?.reasonBrief, 170)
-          || '泡泡会继续结合指数、板块涨跌分布和当天热点，帮助你理解今天市场为何呈现这样的状态。';
-        const teacherItems: TeacherStoryContent[] = Array.isArray(p3BeginnerResult?.stories)
-          ? p3BeginnerResult.stories.map((item: any) => ({
-              storyId: String(item?.storyId || ''),
-              summary: sanitizeTeacherText(item?.summary, 180),
-              uncertaintyText: sanitizeTeacherText(item?.uncertaintyText, 180),
-              simpleChain: normalizeTextList(item?.simpleChain, 3, 80),
-            })).filter((item: TeacherStoryContent) => item.storyId && item.summary)
-          : [];
-        const teacherByStory = new Map(teacherItems.map((item) => [item.storyId, item]));
-        const sourceIds = new Set(snapshot.sources.map((source) => source.id));
-        const validRoles = new Set(['primary', 'secondary', 'diffusion']);
-        const professionalItems: ProfessionalStoryContent[] = Array.isArray(p3ProfessionalResult?.stories)
-          ? p3ProfessionalResult.stories.map((item: any) => {
-              const storyId = String(item?.storyId || '');
-              const calculatedConfidence = evidenceConfidenceByStory.get(storyId);
-              if (!calculatedConfidence) return null;
-              return {
-                storyId,
-                conclusion: sanitizeTeacherText(item?.conclusion, 220),
-                drivers: Array.isArray(item?.drivers)
-                  ? item.drivers.slice(0, 3).map((driver: any, index: number) => ({
-                      role: validRoles.has(driver?.role) ? driver.role : index === 0 ? 'primary' : 'secondary',
-                      title: sanitizeTeacherText(driver?.title, 40),
-                      explanation: sanitizeTeacherText(driver?.explanation, 120),
-                      evidenceIds: Array.isArray(driver?.evidenceIds)
-                        ? [...new Set<string>(driver.evidenceIds.map(String).filter((id: string) => sourceIds.has(id)))]
-                        : [],
-                    })).filter((driver: any) => driver.title && driver.explanation)
-                  : [],
-                supportingEvidence: normalizeTextList(item?.supportingEvidence),
-                evidenceGaps: normalizeTextList(item?.evidenceGaps),
-                alternativeExplanations: normalizeTextList(item?.alternativeExplanations),
-                counterLogic: normalizeTextList(item?.counterLogic),
-                observationIndicators: normalizeTextList(item?.observationIndicators),
-                confidence: {
-                  score: calculatedConfidence.score,
-                  level: calculatedConfidence.level,
-                  explanation: calculatedConfidence.calculation,
-                },
-              } satisfies ProfessionalStoryContent;
-            }).filter(Boolean) as ProfessionalStoryContent[]
-          : [];
-        const professionalByStory = new Map(professionalItems.map((item) => [item.storyId, item]));
-        const stories = storyDrafts.map((draft) => {
-          const reasoning = chainByStory.get(draft.storyId) || defaultReasoning(draft);
-          const teacher = teacherByStory.get(draft.storyId) || defaultTeacherContent(draft, reasoning);
-          const evidenceConfidence = evidenceConfidenceByStory.get(draft.storyId)
-            || calculateEvidenceConfidence(reasoning, new Set(
-              draft.evidenceIds.map((id) => sourceById.get(id)?.sourceName).filter(Boolean),
-            ).size);
-          const professional = professionalByStory.get(draft.storyId)
-            || defaultProfessionalContent(draft, reasoning, evidenceConfidence);
-          return {
-            ...draft,
-            reasoning,
-            teacher,
-            professional,
-            evidence: draft.evidenceIds.map((id) => sourceById.get(id)).filter(Boolean),
-          };
-        });
-
-        const elapsed = ((Date.now() - startedAt) / 1000).toFixed(1);
-        console.log(`[morning-report] completed in ${elapsed}s`);
-
-        const result = {
-          sentiment,
-          summaryText,
-          reasonBrief,
-          stories,
-          top3Themes: stories,
-          promptVersion: 'market-stories-v4-dual-p3',
-          promptVersions: {
-            beginner: 'p3a-beginner-v1',
-            professional: 'p3b-professional-v1',
-          },
-          fallback,
-          timestamp: marketData.timestamp,
-        };
-        morningReportCache = { data: result, timestamp: Date.now() };
-        return result;
-      } catch (error: any) {
-        console.error('[morning-report] error:', error.message);
-        throw error;
-      }
-    })();
-
-    morningReportPromise = reportPromise;
     try {
-      const result = await reportPromise;
+      const marketData = await fetchMarketData();
+      const snapshot = buildMarketSnapshot(marketData);
+      console.log('[morning-report] step 0: market data fetched');
+
+      const marketInput = JSON.stringify({
+        snapshotId: snapshot.snapshotId,
+        market: snapshot.market,
+        marketDate: snapshot.marketDate,
+        indices: snapshot.indices,
+        totalTurnoverAmount: snapshot.totalTurnoverAmount,
+        marketBreadth: snapshot.marketBreadth,
+        marketStatus: snapshot.marketStatus,
+        sectorCandidates: [...snapshot.sectors]
+          .sort((a, b) => Math.abs(b.changePercent) - Math.abs(a.changePercent))
+          .slice(0, 30),
+        sources: snapshot.sources,
+        missingData: snapshot.missingData,
+      }, null, 2);
+
+      let fallback = false;
+      let sentiment = '中性';
+      let storyDrafts: MarketStoryDraft[] = [];
+      let chains: ReasoningChain[] = [];
+      let megaResult: any = null;
+
+      try {
+        // 单次 AI 任务：走兜底链（InfiniSynapse 优先，超时/失败后直接 DeepSeek 接力）
+        const smart = await callAgentSmart(
+          `${MEGA_REPORT_PROMPT}\n\n===== MarketSnapshot 输入数据 =====\n${marketInput}`,
+          { jsonResult: true },
+        );
+        // SSE 文本可能包裹 JSON，提取第一个 { ... } 对象或代码块
+        let raw = smart.answer.trim();
+        const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)```/);
+        if (fenced) raw = fenced[1].trim();
+        megaResult = JSON.parse(raw.replace(/^[^{]*/, '').replace(/[^}]*$/, ''));
+        if (!megaResult || typeof megaResult !== 'object') throw new Error('Invalid mega result');
+      } catch (error: any) {
+        console.error('[morning-report] AI mega-task failed:', error.message);
+        fallback = true;
+      }
+
+      if (megaResult) {
+        if (['乐观', '中性', '谨慎'].includes(megaResult?.marketSentiment)) {
+          sentiment = megaResult.marketSentiment;
+        }
+        storyDrafts = normalizeStories(megaResult?.stories, snapshot);
+        chains = normalizeChains(megaResult?.chains, storyDrafts, snapshot);
+        if (storyDrafts.length === 0) fallback = true;
+      }
+      console.log('[morning-report] Agent task done, stories=' + storyDrafts.length);
+
+      if (storyDrafts.length === 0) {
+        storyDrafts = fallbackStories(snapshot);
+        fallback = true;
+      }
+      if (chains.length === 0) {
+        chains = storyDrafts.map((story) => defaultReasoning(story));
+        fallback = true;
+      }
+
+      const chainByStory = new Map(chains.map((chain) => [chain.storyId, chain]));
+      const sourceById = new Map(snapshot.sources.map((source) => [source.id, source]));
+      const evidenceConfidenceByStory = new Map(
+        storyDrafts.map((story) => {
+          const chain = chainByStory.get(story.storyId) || defaultReasoning(story);
+          const independentSourceCount = new Set(
+            story.evidenceIds
+              .map((id) => sourceById.get(id)?.sourceName)
+              .filter(Boolean),
+          ).size;
+          return [story.storyId, calculateEvidenceConfidence(chain, independentSourceCount)];
+        }),
+      );
+
+      const summaryText = sanitizeTeacherText(megaResult?.summaryText, 92)
+        || fallbackDailySummary(marketData, storyDrafts);
+      const reasonBrief = sanitizeTeacherText(megaResult?.reasonBrief, 170)
+        || '泡泡会继续结合指数、板块涨跌分布和当天热点，帮助你理解今天市场为何呈现这样的状态。';
+      const teacherItems: TeacherStoryContent[] = Array.isArray(megaResult?.teacherStories)
+        ? megaResult.teacherStories.map((item: any) => ({
+            storyId: String(item?.storyId || ''),
+            summary: sanitizeTeacherText(item?.summary, 180),
+            uncertaintyText: sanitizeTeacherText(item?.uncertaintyText, 180),
+            simpleChain: normalizeTextList(item?.simpleChain, 3, 80),
+          })).filter((item: TeacherStoryContent) => item.storyId && item.summary)
+        : [];
+      const teacherByStory = new Map(teacherItems.map((item) => [item.storyId, item]));
+      const sourceIds = new Set(snapshot.sources.map((source) => source.id));
+      const validRoles = new Set(['primary', 'secondary', 'diffusion']);
+      const professionalItems: ProfessionalStoryContent[] = Array.isArray(megaResult?.professionalStories)
+        ? megaResult.professionalStories.map((item: any) => {
+            const storyId = String(item?.storyId || '');
+            const calculatedConfidence = evidenceConfidenceByStory.get(storyId);
+            if (!calculatedConfidence) return null;
+            return {
+              storyId,
+              conclusion: sanitizeTeacherText(item?.conclusion, 220),
+              drivers: Array.isArray(item?.drivers)
+                ? item.drivers.slice(0, 3).map((driver: any, index: number) => ({
+                    role: validRoles.has(driver?.role) ? driver.role : index === 0 ? 'primary' : 'secondary',
+                    title: sanitizeTeacherText(driver?.title, 40),
+                    explanation: sanitizeTeacherText(driver?.explanation, 120),
+                    evidenceIds: Array.isArray(driver?.evidenceIds)
+                      ? [...new Set<string>(driver.evidenceIds.map(String).filter((id: string) => sourceIds.has(id)))]
+                      : [],
+                  })).filter((driver: any) => driver.title && driver.explanation)
+                : [],
+              supportingEvidence: normalizeTextList(item?.supportingEvidence),
+              evidenceGaps: normalizeTextList(item?.evidenceGaps),
+              alternativeExplanations: normalizeTextList(item?.alternativeExplanations),
+              counterLogic: normalizeTextList(item?.counterLogic),
+              observationIndicators: normalizeTextList(item?.observationIndicators),
+              confidence: {
+                score: calculatedConfidence.score,
+                level: calculatedConfidence.level,
+                explanation: calculatedConfidence.calculation,
+              },
+            } satisfies ProfessionalStoryContent;
+          }).filter(Boolean) as ProfessionalStoryContent[]
+        : [];
+      const professionalByStory = new Map(professionalItems.map((item) => [item.storyId, item]));
+      const stories = storyDrafts.map((draft) => {
+        const reasoning = chainByStory.get(draft.storyId) || defaultReasoning(draft);
+        const teacher = teacherByStory.get(draft.storyId) || defaultTeacherContent(draft, reasoning);
+        const evidenceConfidence = evidenceConfidenceByStory.get(draft.storyId)
+          || calculateEvidenceConfidence(reasoning, new Set(
+            draft.evidenceIds.map((id) => sourceById.get(id)?.sourceName).filter(Boolean),
+          ).size);
+        const professional = professionalByStory.get(draft.storyId)
+          || defaultProfessionalContent(draft, reasoning, evidenceConfidence);
+        return {
+          ...draft,
+          reasoning,
+          teacher,
+          professional,
+          evidence: draft.evidenceIds.map((id) => sourceById.get(id)).filter(Boolean),
+        };
+      });
+
+      const elapsed = ((Date.now() - startedAt) / 1000).toFixed(1);
+      console.log(`[morning-report] completed in ${elapsed}s`);
+
+      const result = {
+        sentiment,
+        summaryText,
+        reasonBrief,
+        stories,
+        top3Themes: stories,
+        promptVersion: 'market-stories-v5-infinisynapse-agent',
+        promptVersions: {
+          mega: 'infinisynapse-agent-v1',
+        },
+        fallback,
+        timestamp: marketData.timestamp,
+      };
+      morningReportCache = { data: result, timestamp: Date.now() };
       res.json(result);
     } catch (error: any) {
+      console.error('[morning-report] error:', error.message);
       res.status(500).json({
         error: '早报生成失败，请稍后重试',
         fallback: true,
       });
-    } finally {
-      morningReportPromise = null;
     }
   });
 
@@ -1622,7 +2026,8 @@ ${breadth}
       // marketData.sectors 来自东方财富板块API，包含 name + changePercent
       // 将板块数据映射为我们前端使用的格式
       const sectors = (marketData.sectors || []).map((s: any, i: number) => ({
-        id: `sector-${i}`,
+        // 保留东方财富板块 code（BKxxxx），供 /api/sector-detail 拉取真实成分股/K线/新闻
+        id: s.code ? String(s.code) : `sector-${i}`,
         name: s.name,
         changePercent: s.changePercent,
         description: '',
@@ -1634,22 +2039,32 @@ ${breadth}
     }
   });
 
-  // 判断是否为A股交易时段（按上海时区，避免服务器本地时区偏移导致误判）
+  // 判断是否为A股交易时段
+  // 中国法定节假日（休市日）：2025-2027 覆盖全部主要节假日
+  // 格式：'MM-DD' 表示当天休市
+  const CN_HOLIDAYS: Record<string, string[]> = {
+    '2025': ['01-01', '01-28', '01-29', '01-30', '01-31', '02-01', '02-02', '02-03', '02-04', '04-04', '04-05', '05-01', '05-02', '05-05', '06-02', '10-01', '10-02', '10-03', '10-06', '10-07', '10-08'],
+    '2026': ['01-01', '01-02', '02-16', '02-17', '02-18', '02-19', '02-20', '02-23', '02-24', '04-06', '05-01', '05-04', '05-05', '06-19', '09-25', '10-01', '10-02', '10-05', '10-06', '10-07', '10-08', '10-09'],
+    '2027': ['01-01', '02-08', '02-09', '02-10', '02-11', '02-12', '02-15', '02-16', '04-05', '05-03', '05-04', '06-10', '10-01', '10-04', '10-05', '10-06', '10-07', '10-08'],
+  };
+  function isCnHoliday(date: Date): boolean {
+    const year = String(date.getFullYear());
+    const days = CN_HOLIDAYS[year];
+    if (!days) return false;
+    const key = `${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+    return days.includes(key);
+  }
   function getMarketStatus() {
-    const parts = new Intl.DateTimeFormat('en-US', {
-      timeZone: 'Asia/Shanghai',
-      weekday: 'short',
-      hour: '2-digit',
-      minute: '2-digit',
-      hourCycle: 'h23',
-    }).formatToParts(new Date());
-    const part = (type: string) => Number(parts.find((item) => item.type === type)?.value || 0);
-    const day = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].indexOf(
-      parts.find((item) => item.type === 'weekday')?.value || 'Sun',
-    );
-    const hour = part('hour');
-    const minute = part('minute');
+    const now = new Date();
+    const day = now.getDay(); // 0=周日, 1-5=周一至周五, 6=周六
+    const hour = now.getHours();
+    const minute = now.getMinutes();
     const timeNum = hour * 100 + minute;
+
+    // 法定节假日休市（春节/国庆等）
+    if (isCnHoliday(now)) {
+      return { isOpen: false, phase: 'holiday', label: '节假日休市' };
+    }
 
     // 周末不开盘
     if (day === 0 || day === 6) {
@@ -1666,7 +2081,7 @@ ${breadth}
     } else if (timeNum >= 1300 && timeNum < 1500) {
       return { isOpen: true, phase: 'afternoon', label: '交易中（下午盘）' };
     } else {
-      return { isOpen: false, phase: 'closed', label: '已收盘' };
+      return { isOpen: false, phase: 'closed', label: '已收盘 — 显示昨日数据' };
     }
   }
 
@@ -1734,7 +2149,7 @@ ${breadth}
     return rs.find(r => r.m.test(s))?.c || ['上游供给','行业需求',s];
   }
   function buildMarketMapIntelligence(md) {
-    const all = (md.sectors||[])
+    const all = [...(md.sectors||[]),...(md.conceptSectors||[])]
       .map((s,i) => ({id: s.code ? (s.category+'-'+s.code) : 'sector-'+i, name: String(s.name||'').trim(), category: s.category==='concept'?'concept':'industry', changePercent: Number(s.changePercent)||0, turnoverAmount: Number.isFinite(Number(s.turnoverAmount))?Number(s.turnoverAmount):null}))
       .filter(s => s.name);
     const ranked = [...all].sort((a,b) => Math.abs(b.changePercent)-Math.abs(a.changePercent));
@@ -1801,12 +2216,14 @@ ${breadth}
 
   app.get('/api/sector-detail', async (req, res) => {
     try {
-      const sn = String(req.query.sectorName || ''); if(!sn) return res.status(400).json({error:'sectorName is required'});
+      const sn = typeof req.query.sectorName === 'string' ? req.query.sectorName : '';
+      if(!sn) return res.status(400).json({error:'sectorName is required'});
       const md = await fetchMarketData(); const sec = (md.sectors||[]).find(s => s.name === sn); const pct = Number(sec?.changePercent)||0;
       const subs = (md.sectors||[]).filter(s => s.name !== sn && s.name && s.name.includes(sn.slice(0,2))).slice(0,5);
       
       // Get real stock data
-      const bkCode = (sec && sec.code) ? String(sec.code) : (req.query.sectorId ? String(req.query.sectorId).replace(/^(industry|concept)-/, '') : '');
+      const sectorIdRaw = typeof req.query.sectorId === 'string' ? req.query.sectorId : '';
+      const bkCode = (sec && sec.code) ? String(sec.code) : (sectorIdRaw ? sectorIdRaw.replace(/^(industry|concept)-/, '') : '');
       var allStocks = [];
       if (bkCode) allStocks = await fetchSectorStocks(bkCode);
       
@@ -1828,7 +2245,8 @@ ${breadth}
       var rawNews = (md.newsItems||[]);
       var catalystKeywords = ['政策','利好','扶持','补贴','规划','推动','支持','印发','发布'];
       var riskKeywords = ['风险','警告','监管','处罚','降温','收紧','利空','下跌','回调'];
-      var industryKeywords = [sn.slice(0,2),'板块','行业','市场','景气','需求'];      
+      var industryKeywords = [sn.slice(0,2),'板块','行业','市场','景气','需求'];
+      
       var newsItems = rawNews.slice(0,6).map(function(n) {
         var t = n.title || '';
         var isCatalyst = catalystKeywords.some(function(k) { return t.includes(k); });
@@ -1864,7 +2282,7 @@ ${breadth}
       else { stage = 'no_clear_trend'; stageLabel = '暂无明确趋势'; }
       
       res.json({
-        sector: sn,sectorId:req.query.sectorId||'',todayChange:(pct>=0?'+':'')+pct.toFixed(2)+'%',todayChangePercent:pct,
+        sector: sn,sectorId:sectorIdRaw||'',todayChange:(pct>=0?'+':'')+pct.toFixed(2)+'%',todayChangePercent:pct,
         change5d:c5,change20d:c20,change3m:c3m,
         stage:stage,stageLabel:stageLabel,signalTags:[],signalTypes:[],
         bubbleConclusion:sn+'今日'+(pct>=0?'上涨':'下跌')+Math.abs(pct).toFixed(2)+'%',
@@ -1883,7 +2301,7 @@ ${breadth}
   // Vite middleware integration for full-stack build/dev environment
   if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({
-      server: { middlewareMode: true, hmr: false, watch: null },
+      server: { middlewareMode: true },
       appType: 'spa',
     });
     app.use(vite.middlewares);

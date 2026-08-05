@@ -22,11 +22,5 @@
     },
     "allowImportingTsExtensions": true,
     "noEmit": true
-  },
-  "exclude": [
-    "node_modules",
-    "dist",
-    "work",
-    "server.bak.ts"
-  ]
+  }
 }

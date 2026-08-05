@@ -16,7 +16,11 @@ export default defineConfig(() => {
       // Do not modify — file watching is disabled to prevent flickering during agent edits.
       hmr: process.env.DISABLE_HMR !== 'true',
       // Disable file watching when DISABLE_HMR is true to save CPU during agent edits.
-      watch: process.env.DISABLE_HMR === 'true' ? null : {},
+      watch: process.env.DISABLE_HMR === 'true' ? null : {
+        // 忽略运行时数据目录：/api/market-overview 每次请求都会写
+        // work/.runtime/market-temperature-history.json，若被监视会触发无限 page reload。
+        ignored: ['**/work/**', '**/.runtime/**', '**/node_modules/**'],
+      },
       allowedHosts: ['.monkeycode-ai.online'],
     },
   };

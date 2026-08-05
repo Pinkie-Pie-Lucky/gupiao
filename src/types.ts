@@ -142,27 +142,3 @@ export interface MarketStory extends MarketStoryDraft {
   professional: ProfessionalStoryContent;
   evidence: MarketSource[];
 }
-
-export interface SectorIntelligence {
-  sectorId: string;
-  sector: string;
-  category: 'industry' | 'concept';
-  change: string;
-  changePercent: number;
-  turnoverAmount: number | null;
-  turnoverChange: number | null;
-  volumeChange: number | null;
-  signalTags: string[];
-  signalTypes: string[];
-  isAnomaly: boolean;
-  anomalyReason: string | null;
-  analysisSource: string;
-  evidenceStatus: string;
-  importanceScore: number;
-  shouldHighlight: boolean;
-  beginnerExplanation: string;
-  professionalSummary: string;
-  relatedNews: Array<{ id: string; title: string; sourceName: string; url?: string }>;
-  relatedChain: string[];
-  dataNotes: string[];
-}

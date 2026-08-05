@@ -1,224 +1,40 @@
 /**
  * @license
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * 入口：Web 端（桌面）统一渲染 WebApp 外壳。
+ *  - /auth/callback：InfiniSynapse SSO 登录回调页
+ *  - 其余路径：渲染 WebApp 外壳
+ * 移动端 H5 组件仍保留在 src/components/ 下，供后续响应式切换或回退使用。
  */
 
-import { useState, useEffect } from 'react';
-import { HomeTab } from './components/HomeTab';
-import { MarketMapTab } from './components/MarketMapTab';
-import { WatchlistTab } from './components/WatchlistTab';
-import { AiTeacherTab } from './components/AiTeacherTab';
-import { MineTab } from './components/MineTab';
-import { Home, Compass, Star, MessageSquare, User } from 'lucide-react';
-import { motion, AnimatePresence } from 'motion/react';
-import { StockItem } from './types';
+import { useEffect, useState } from 'react';
+import { WebApp } from './web/WebApp';
+import { AuthCallback } from './web/AuthCallback';
 
-type TabId = 'home' | 'market-map' | 'watchlist' | 'ai-teacher' | 'mine';
+function useSsoCallbackPath(): boolean {
+  const [isCallback, setIsCallback] = useState(false);
 
-export default function App() {
-  const [activeTab, setActiveTab] = useState<TabId>('home');
-  const [selectedSectorId, setSelectedSectorId] = useState<string | null>(null);
-  const [prefilledStock, setPrefilledStock] = useState<{ name: string; code: string } | null>(null);
-  const [pendingPrompt, setPendingPrompt] = useState<string | null>(null);
-
-  // Centralized Watchlist state shared among tabs
-  const [followedStocks, setFollowedStocks] = useState<StockItem[]>([
-    {
-      name: '科大讯飞',
-      code: '002230.SZ',
-      price: 45.12,
-      changePercent: 2.85,
-      volume: '28.9万手',
-      turnover: '13.0亿元',
-      history: []
-    },
-    {
-      name: '中芯国际',
-      code: '688981.SH',
-      price: 53.42,
-      changePercent: 4.21,
-      volume: '38.4万手',
-      turnover: '20.3亿元',
-      history: []
-    }
-  ]);
-
-  // Listen to global events for adding stocks to followed watchlist
   useEffect(() => {
-    const handleAddStock = (e: Event) => {
-      const customEvent = e as CustomEvent<StockItem>;
-      if (customEvent.detail) {
-        const newStock = customEvent.detail;
-        setFollowedStocks((prev) => {
-          if (prev.some((s) => s.code === newStock.code)) return prev; // Avoid duplicates
-          return [newStock, ...prev];
-        });
-      }
+    const check = () => {
+      const { pathname } = window.location;
+      setIsCallback(pathname === '/auth/callback');
     };
-    window.addEventListener('add-stock-portfolio', handleAddStock);
-    return () => window.removeEventListener('add-stock-portfolio', handleAddStock);
+    check();
+    window.addEventListener('popstate', check);
+    return () => window.removeEventListener('popstate', check);
   }, []);
 
-  const handleSelectSectorId = (sectorId: string | null) => {
-    setSelectedSectorId(sectorId);
-  };
+  return isCallback;
+}
 
-  const handleAskTeacherAboutStock = (stockName: string, stockCode: string) => {
-    setPrefilledStock({ name: stockName, code: stockCode });
-  };
+export default function App() {
+  const isCallback = useSsoCallbackPath();
 
-  const handleAskTeacherAboutSector = (name: string, question: string) => {
-    setPrefilledStock(null);
-    setPendingPrompt(question || `${name}现在处于什么阶段？`);
-    setActiveTab('ai-teacher');
-  };
+  // InfiniSynapse 登录完成后带 code + state 跳回 /auth/callback
+  if (isCallback) {
+    return <AuthCallback />;
+  }
 
-  const handleClearPrefilledStock = () => {
-    setPrefilledStock(null);
-  };
-
-  const handleConsumePendingPrompt = () => {
-    setPendingPrompt(null);
-  };
-
-  return (
-    <div id="app-root-container" className="min-h-screen bg-[#F8FAFC] text-gray-900 font-sans flex justify-center">
-      {/* Centered Mobile Frame container to match design and prevent layout stretching on large screens */}
-      <div id="app-device-frame" className="w-full max-w-md bg-white min-h-screen shadow-2xl shadow-slate-200 border-x border-gray-100 flex flex-col justify-between relative overflow-hidden">
-        
-        {/* Main Viewport Content Scrollable Area */}
-        <div id="app-viewport" className="flex-grow overflow-y-auto no-scrollbar">
-          <AnimatePresence mode="wait">
-            <motion.div
-              key={activeTab}
-              initial={{ opacity: 0, x: 10 }}
-              animate={{ opacity: 1, x: 0 }}
-              exit={{ opacity: 0, x: -10 }}
-              transition={{ duration: 0.15 }}
-              className="p-1"
-            >
-              {activeTab === 'home' && (
-                <HomeTab
-                  onSelectSector={handleSelectSectorId}
-                  onNavigateToTab={(tabId) => setActiveTab(tabId as TabId)}
-                  onAskTeacherAboutStock={handleAskTeacherAboutStock}
-                  followedStocks={followedStocks}
-                />
-              )}
-              {activeTab === 'market-map' && (
-                <MarketMapTab
-                  selectedSectorId={selectedSectorId}
-                  onSelectSectorId={handleSelectSectorId}
-                  onNavigateToTab={(tabId) => setActiveTab(tabId as TabId)}
-                  onAskTeacherAboutSector={handleAskTeacherAboutSector}
-                />
-              )}
-              {activeTab === 'watchlist' && (
-                <WatchlistTab
-                  followedStocks={followedStocks}
-                  setFollowedStocks={setFollowedStocks}
-                  onAskTeacherAboutStock={handleAskTeacherAboutStock}
-                  onNavigateToTab={(tabId) => setActiveTab(tabId as TabId)}
-                />
-              )}
-              {activeTab === 'ai-teacher' && (
-                <AiTeacherTab
-                  prefilledStock={prefilledStock}
-                  onClearPrefilledStock={handleClearPrefilledStock}
-                  pendingPrompt={pendingPrompt}
-                  onConsumePendingPrompt={handleConsumePendingPrompt}
-                />
-              )}
-              {activeTab === 'mine' && (
-                <MineTab
-                  followedStocks={followedStocks}
-                  onAskTeacherAboutStock={handleAskTeacherAboutStock}
-                  onNavigateToTab={(tabId) => setActiveTab(tabId as TabId)}
-                />
-              )}
-            </motion.div>
-          </AnimatePresence>
-        </div>
-
-        {/* Global Bottom Navigation Bar - Clean 5-tab design */}
-        <nav id="bottom-tab-bar" className="fixed bottom-0 left-1/2 -translate-x-1/2 w-full max-w-md bg-white/95 backdrop-blur-md border-t border-slate-100 px-2 py-2 flex justify-between items-center z-40 h-16">
-          
-          {/* Tab: 首页 */}
-          <button
-            id="tab-btn-home"
-            onClick={() => setActiveTab('home')}
-            className={`flex flex-col items-center justify-center flex-1 py-1 transition-all relative ${
-              activeTab === 'home' ? 'text-indigo-600 scale-105 font-semibold' : 'text-slate-400 hover:text-slate-600'
-            }`}
-          >
-            <Home className="w-4.5 h-4.5 stroke-[2.2]" />
-            <span className="text-[9px] mt-1 tracking-tight">首页</span>
-            {activeTab === 'home' && (
-              <motion.div layoutId="activeTabDot" className="absolute -bottom-1 w-1 h-1 bg-indigo-600 rounded-full" />
-            )}
-          </button>
-
-          {/* Tab: 市场地图 */}
-          <button
-            id="tab-btn-market-map"
-            onClick={() => setActiveTab('market-map')}
-            className={`flex flex-col items-center justify-center flex-1 py-1 transition-all relative ${
-              activeTab === 'market-map' ? 'text-indigo-600 scale-105 font-semibold' : 'text-slate-400 hover:text-slate-600'
-            }`}
-          >
-            <Compass className="w-4.5 h-4.5 stroke-[2.2]" />
-            <span className="text-[9px] mt-1 tracking-tight">市场地图</span>
-            {activeTab === 'market-map' && (
-              <motion.div layoutId="activeTabDot" className="absolute -bottom-1 w-1 h-1 bg-indigo-600 rounded-full" />
-            )}
-          </button>
-
-          {/* Tab: 我的关注 */}
-          <button
-            id="tab-btn-watchlist"
-            onClick={() => setActiveTab('watchlist')}
-            className={`flex flex-col items-center justify-center flex-1 py-1 transition-all relative ${
-              activeTab === 'watchlist' ? 'text-indigo-600 scale-105 font-semibold' : 'text-slate-400 hover:text-slate-600'
-            }`}
-          >
-            <Star className="w-4.5 h-4.5 stroke-[2.2]" />
-            <span className="text-[9px] mt-1 tracking-tight">我的关注</span>
-            {activeTab === 'watchlist' && (
-              <motion.div layoutId="activeTabDot" className="absolute -bottom-1 w-1 h-1 bg-indigo-600 rounded-full" />
-            )}
-          </button>
-
-          {/* Tab: AI泡泡 */}
-          <button
-            id="tab-btn-ai-teacher"
-            onClick={() => setActiveTab('ai-teacher')}
-            className={`flex flex-col items-center justify-center flex-1 py-1 transition-all relative ${
-              activeTab === 'ai-teacher' ? 'text-indigo-600 scale-105 font-semibold' : 'text-slate-400 hover:text-slate-600'
-            }`}
-          >
-            <MessageSquare className="w-4.5 h-4.5 stroke-[2.2]" />
-            <span className="text-[9px] mt-1 tracking-tight">AI泡泡</span>
-            {activeTab === 'ai-teacher' && (
-              <motion.div layoutId="activeTabDot" className="absolute -bottom-1 w-1 h-1 bg-indigo-600 rounded-full" />
-            )}
-          </button>
-
-          {/* Tab: 个人中心 */}
-          <button
-            id="tab-btn-mine"
-            onClick={() => setActiveTab('mine')}
-            className={`flex flex-col items-center justify-center flex-1 py-1 transition-all relative ${
-              activeTab === 'mine' ? 'text-indigo-600 scale-105 font-semibold' : 'text-slate-400 hover:text-slate-600'
-            }`}
-          >
-            <User className="w-4.5 h-4.5 stroke-[2.2]" />
-            <span className="text-[9px] mt-1 tracking-tight">个人中心</span>
-            {activeTab === 'mine' && (
-              <motion.div layoutId="activeTabDot" className="absolute -bottom-1 w-1 h-1 bg-indigo-600 rounded-full" />
-            )}
-          </button>
-        </nav>
-      </div>
-    </div>
-  );
+  return <WebApp />;
 }
