@@ -871,6 +871,12 @@ export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStoc
 
               <div>
                 <h4 className="text-sm font-bold text-slate-950">{story.title}</h4>
+                {story.whySelected && (
+                  <p className="mt-1 text-[11px] leading-5 text-slate-600 flex items-start gap-1">
+                    <span className="text-indigo-600 font-bold shrink-0">为什么选中：</span>
+                    <span>{story.whySelected}</span>
+                  </p>
+                )}
                 {story.metrics.length > 0 && (
                   <div className="mt-2">
                     {storyMode === 'professional' && (

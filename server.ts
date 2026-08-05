@@ -27,8 +27,8 @@ function getAIClient(): OpenAI {
     aiClient = new OpenAI({
       baseURL: process.env.AI_BASE_URL || 'https://api.deepseek.com',
       apiKey,
-      timeout: 30_000,
-      maxRetries: 2,
+      timeout: 180_000,
+      maxRetries: 1,
     });
   }
   return aiClient;
@@ -93,6 +93,7 @@ async function startServer() {
         model: AI_MODEL,
         messages,
         temperature: 0.7,
+        max_tokens: 2000,
       });
 
       const replyText = completion.choices[0]?.message?.content
@@ -172,6 +173,7 @@ ${breadth}
         model: AI_MODEL,
         messages: [{ role: 'user', content: prompt }],
         temperature: 0.5,
+        max_tokens: 8000,
       });
 
       const report = completion.choices[0]?.message?.content || '';
@@ -194,29 +196,334 @@ ${breadth}
 
   // ─── Prompt Pipeline: Three-Prompt Architecture ───
 
-  const PROMPT_1_SYSTEM = `你是一名严谨的A股市场编辑。请从给定的MarketSnapshot中发现3个最值得投资小白理解、且彼此不重复的市场故事。
+  const PROMPT_1_SYSTEM = `PROMPT_1：市场故事发现与筛选（Market Story Discovery）
 
-规则：
-1. 只使用输入中的行情事实和sources，不得补充输入之外的实时事实。
-2. 故事可以来自板块异动、政策、宏观或地缘事件。数据足够时输出3条；只有确实找不到3个独立且有证据的主题时才允许少于3条。
-3. 同一主题只能出现一次；板块上涨本身不是完整故事，标题要说明市场正在关注什么。
-4. evidenceIds只能使用输入sources中存在的id；数字必须与输入一致。
-5. 不推导因果、不预测未来、不输出投资建议。
-6. marketSentiment只能是“乐观”“中性”“谨慎”。
+角色：
+你是一名严谨的A股市场编辑，负责从大量市场数据中筛选出今天最值得投资小白理解的3个市场故事。
+
+你的任务不是寻找涨幅最大的板块，而是：
+从MarketSnapshot中，发现今天市场中最重要、最具解释价值、最值得关注的3个市场变化。
+
+选择标准：
+一个优秀的市场故事应满足：
+1. 对投资者具有较高关注价值；
+2. 对市场具有一定影响范围；
+3. 相比普通行情具有信息增量；
+4. 有可靠事实和sources支持；
+5. 能帮助投资者理解市场变化。
+
+
+====================
+一、候选故事评分体系
+====================
+
+请先对所有候选市场故事进行100分制评分，并按照总分排序，选择Top3。
+
+总评分：
+
+storyScore =
+importance（30分）
++
+impactScope（25分）
++
+infoIncrement（25分）
++
+evidenceStrength（20分）
+
+
+1. importance（重要性，30分）
+
+判断：
+该事件是否受到市场广泛关注。
+
+重点参考输入中的客观指标：
+
+- 板块涨跌幅排名；
+- 成交额规模；
+- 成交额变化；
+- 涨跌停数量；
+- 指数权重；
+- 资金流变化（若输入提供）。
+
+不要根据主观判断“热门”。
+
+评分参考：
+
+high：
+影响大量投资者，市场关注度明显。
+
+medium：
+影响部分行业或投资群体。
+
+low：
+影响范围有限，仅局部异动。
+
+
+2. impactScope（影响范围，25分）
+
+判断：
+该事件影响多少市场范围。
+
+分类：
+
+- 单板块：
+仅影响一个行业或主题。
+
+- 多板块联动：
+影响产业链上下游或多个相关行业。
+
+- 全市场：
+影响主要指数或大部分行业。
+
+- 政策面：
+政策影响多个行业。
+
+- 宏观：
+影响市场整体风险偏好。
+
+
+影响范围越大，评分越高。
+
+
+3. infoIncrement（信息增量，25分）
+
+判断：
+相比普通每日行情，该事件是否提供新的认知价值。
+
+优先考虑：
+
+- 首次出现的重要异动；
+- 新政策/重大事件；
+- 市场风格切换；
+- 新资金主线形成；
+- 超预期数据变化；
+- 板块内部结构变化。
+
+
+以下情况信息增量低：
+
+- 单纯因为涨幅较高；
+- 普通日常上涨；
+- 没有新的市场变化。
+
+
+4. evidenceStrength（证据强度，20分）
+
+判断：
+是否有足够输入证据支持。
+
+strong：
+
+多个有效sources或多个数据指标支持。
+
+medium：
+
+有部分数据或单一可靠来源支持。
+
+weak：
+
+证据不足，仅存在行情变化。
+
+
+证据不足的故事应降低排名。
+
+
+====================
+二、事件选择优先级
+====================
+
+在评分接近时，按照以下优先级选择：
+
+1. 政策/宏观事件驱动；
+2. 行业重大变化；
+3. 市场资金主线变化；
+4. 板块异动；
+5. 单纯价格上涨。
+
+
+不要优先选择：
+仅因为涨幅最高，但没有额外信息价值的板块。
+
+
+====================
+三、去重规则
+====================
+
+1. 同一主题只能出现一次。
+
+例如：
+
+禁止同时选择：
+
+- AI芯片上涨；
+- AI应用上涨；
+- AI服务器上涨。
+
+如果属于同一产业链和同一驱动逻辑，必须合并。
+
+
+2. 板块上涨本身不是完整故事。
+
+标题必须体现：
+市场正在关注的变化。
+
+例如：
+
+错误：
+“电力板块上涨”
+
+正确：
+“电力板块成为资金关注方向”
+
+
+3. 不选择：
+
+- 无行业代表性的单只股票异动；
+- 仅短期脉冲但没有解释价值的行情；
+- 与其他故事高度重复的事件。
+
+
+====================
+四、事实约束规则
+====================
+
+1. 只允许使用MarketSnapshot输入中的行情事实和sources。
+
+2. 不得补充输入之外的实时新闻、政策或数据。
+
+3. 不推导因果关系。
+
+4. 不预测未来走势。
+
+5. 不输出投资建议。
+
+6. evidenceIds只能使用输入sources中存在的id。
+
+7. 所有数字必须与输入数据完全一致。
+
+
+====================
+五、故事质量判断
+====================
+
+除了市场重要性，还需要判断：
+
+该故事是否具有较高的信息解释价值，能够帮助用户理解市场运行逻辑
+
+storyQualityScore：
+
+0-100。
+
+
+评分依据：
+
+high：
+具有明确市场变化，并能帮助用户学习投资逻辑。
+
+medium：
+有一定价值，但解释空间有限。
+
+low：
+只有价格变化，没有学习价值。
+
+
+优先选择：
+市场价值高 + 学习价值高的故事。
+
+
+====================
+六、输出要求
+====================
 
 严格输出JSON：
+
 {
   "marketSentiment": "乐观|中性|谨慎",
-  "stories": [{
-    "storyId": "story-1",
-    "type": "sector_driver|geo_event|policy_driver|macro_event",
-    "title": "20字以内",
-    "what": "只陈述发生了什么，40字以内",
-    "metrics": [{ "label": "板块涨跌", "value": "+3.20%" }],
-    "evidenceIds": ["source-id"],
-    "relatedSectors": ["板块名称"]
-  }]
-}`;
+
+  "stories": [
+    {
+      "storyId": "story-1",
+
+      "type":
+      "sector_driver|geo_event|policy_driver|macro_event",
+
+      "title":
+      "20字以内，不制造输入之外的原因",
+
+      "what":
+      "只陈述发生了什么，40字以内",
+
+      "metrics": [
+        {
+          "label": "板块涨跌",
+          "value": "+3.20%"
+        }
+      ],
+
+      "evidenceIds":
+      [
+        "source-id"
+      ],
+
+      "relatedSectors":
+      [
+        "板块名称"
+      ],
+
+
+      "storyScore":
+      {
+        "total": 88,
+
+        "importance": 28,
+
+        "impactScope": 22,
+
+        "infoIncrement": 20,
+
+        "evidenceStrength": 18
+      },
+
+
+      "selectionBasis":
+      {
+        "importance":
+        "high|medium|low",
+
+        "importanceReason":
+        "说明支撑重要性的具体信号，例如：板块涨幅+6.35%，位居市场前列",
+
+        "impactScope":
+        "单板块|多板块联动|全市场|政策面|宏观",
+
+        "infoIncrement":
+        "说明相比普通行情的新增信息价值",
+
+        "evidenceStrength":
+        "strong|medium|weak"
+      },
+
+
+      "storyQualityScore":
+      85,
+
+
+      "whySelected":
+      "给投资小白的一句话选材说明，40字以内，不堆术语，不给投资建议"
+    }
+  ]
+}
+
+
+最终目标：
+
+输出3个最值得投资者理解的市场故事。
+
+不要输出最多上涨的3个板块。
+
+要输出：
+“今天市场最值得理解的3个变化”。
+`;
 
   const PROMPT_2_SYSTEM = `你是一名财经因果校验员。请仅根据输入的市场故事、证据和金融常识，为每个storyId建立“最短但完整”的因果链。
 
@@ -309,6 +616,7 @@ ${breadth}
         { role: 'user', content: userContent },
       ],
       temperature,
+      max_tokens: 8000,
     });
     return completion.choices[0]?.message?.content || '';
   }
@@ -361,6 +669,22 @@ ${breadth}
     metrics: Array<{ label: string; value: string }>;
     evidenceIds: string[];
     relatedSectors: string[];
+    storyScore?: {
+      total: number;
+      importance: number;
+      impactScope: number;
+      infoIncrement: number;
+      evidenceStrength: number;
+    };
+    selectionBasis?: {
+      importance: 'high' | 'medium' | 'low';
+      importanceReason: string;
+      impactScope: '单板块' | '多板块联动' | '全市场' | '政策面' | '宏观';
+      infoIncrement: string;
+      evidenceStrength: 'strong' | 'medium' | 'weak';
+    };
+    storyQualityScore?: number;
+    whySelected?: string;
   };
   type ReasoningStep = {
     id: string;
@@ -428,6 +752,15 @@ ${breadth}
     const seenStoryIds = new Set<string>();
     const stories: MarketStoryDraft[] = [];
 
+    const clampScore = (value: unknown, min = 0, max = 100) => {
+      const num = Number(value);
+      if (!Number.isFinite(num)) return min;
+      return Math.min(max, Math.max(min, Math.round(num)));
+    };
+    const validImportance = new Set(['high', 'medium', 'low']);
+    const validEvidenceStrength = new Set(['strong', 'medium', 'weak']);
+    const validImpactScope = new Set(['单板块', '多板块联动', '全市场', '政策面', '宏观']);
+
     for (const raw of rawStories as any[]) {
       const title = String(raw?.title || '').trim().slice(0, 40);
       if (!title || seenTitles.has(title)) continue;
@@ -435,6 +768,39 @@ ${breadth}
       const storyId = proposedId && !seenStoryIds.has(proposedId) ? proposedId : `story-${stories.length + 1}`;
       seenTitles.add(title);
       seenStoryIds.add(storyId);
+
+      const rawScore = raw?.storyScore;
+      const importance = clampScore(rawScore?.importance);
+      const impactScope = clampScore(rawScore?.impactScope, 0, 25);
+      const infoIncrement = clampScore(rawScore?.infoIncrement, 0, 25);
+      const evidenceStrength = clampScore(rawScore?.evidenceStrength, 0, 20);
+      const hasScore =
+        rawScore && (rawScore?.importance != null || rawScore?.impactScope != null
+          || rawScore?.infoIncrement != null || rawScore?.evidenceStrength != null);
+      // 不信任 AI 的 total 加总，服务端重算
+      const storyScore = hasScore
+        ? {
+            importance,
+            impactScope,
+            infoIncrement,
+            evidenceStrength,
+            total: importance + impactScope + infoIncrement + evidenceStrength,
+          }
+        : undefined;
+
+      const rawBasis = raw?.selectionBasis;
+      const selectionBasis = rawBasis
+        ? {
+            importance: validImportance.has(rawBasis?.importance) ? rawBasis.importance : 'medium',
+            importanceReason: String(rawBasis?.importanceReason || '').trim().slice(0, 100),
+            impactScope: validImpactScope.has(rawBasis?.impactScope) ? rawBasis.impactScope : '单板块',
+            infoIncrement: String(rawBasis?.infoIncrement || '').trim().slice(0, 120),
+            evidenceStrength: validEvidenceStrength.has(rawBasis?.evidenceStrength)
+              ? rawBasis.evidenceStrength
+              : 'medium',
+          }
+        : undefined;
+
       stories.push({
         storyId,
         type: validTypes.has(raw?.type) ? raw.type : 'sector_driver',
@@ -452,6 +818,10 @@ ${breadth}
         relatedSectors: Array.isArray(raw?.relatedSectors)
           ? [...new Set<string>(raw.relatedSectors.map(String))].slice(0, 8)
           : [],
+        storyScore,
+        selectionBasis,
+        storyQualityScore: raw?.storyQualityScore != null ? clampScore(raw?.storyQualityScore) : undefined,
+        whySelected: String(raw?.whySelected || '').trim().slice(0, 50) || undefined,
       });
       if (stories.length === 3) break;
     }
@@ -1412,6 +1782,7 @@ ${breadth}
         }, null, 2);
 
         let fallback = false;
+        let aiFailed = false;
         let sentiment = '中性';
         let storyDrafts: MarketStoryDraft[] = [];
         try {
@@ -1424,9 +1795,25 @@ ${breadth}
         } catch (error: any) {
           console.error('[morning-report] P1 failed:', error.message);
           fallback = true;
+          aiFailed = true;
         }
         console.log('[morning-report] step 1: market understanding done');
         if (storyDrafts.length === 0) {
+          // AI 调用失败时，不生成兜底假故事，直接标记失败让前端提示
+          if (aiFailed) {
+            const aiErrorResult = {
+              aiFailed: true,
+              sentiment,
+              summaryText: 'AI 服务暂时不可用，早报生成失败。',
+              reasonBrief: '',
+              stories: [] as MarketStoryDraft[],
+              top3Themes: [] as MarketStoryDraft[],
+              fallback: true,
+              timestamp: marketData.timestamp,
+            };
+            console.log('[morning-report] AI failed, short-circuit');
+            return aiErrorResult;
+          }
           storyDrafts = fallbackStories(snapshot);
           fallback = true;
         }

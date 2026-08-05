@@ -81,6 +81,22 @@ export interface MarketMetric {
   value: string;
 }
 
+export interface StoryScore {
+  total: number;
+  importance: number;
+  impactScope: number;
+  infoIncrement: number;
+  evidenceStrength: number;
+}
+
+export interface StorySelectionBasis {
+  importance: 'high' | 'medium' | 'low';
+  importanceReason: string;
+  impactScope: '单板块' | '多板块联动' | '全市场' | '政策面' | '宏观';
+  infoIncrement: string;
+  evidenceStrength: 'strong' | 'medium' | 'weak';
+}
+
 export interface MarketStoryDraft {
   storyId: string;
   type: MarketStoryType;
@@ -89,6 +105,10 @@ export interface MarketStoryDraft {
   metrics: MarketMetric[];
   evidenceIds: string[];
   relatedSectors: string[];
+  storyScore?: StoryScore;
+  selectionBasis?: StorySelectionBasis;
+  storyQualityScore?: number;
+  whySelected?: string;
 }
 
 export interface ReasoningStep {
