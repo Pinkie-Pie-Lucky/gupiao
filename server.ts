@@ -2593,7 +2593,7 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
   // GET /api/stock-financials — 标准化关键财务指标；CNINFO 公告用于对应报告期核验
   app.get('/api/stock-financials', async (req, res) => {
     try {
-      res.json(await fetchFinancialSummary(String(req.query.symbol || '')));
+      res.json(await fetchFinancialDataWithFallback(String(req.query.symbol || '')));
     } catch (error: any) {
       console.error('[financials] summary query failed:', error.message);
       res.status(503).json({ error: '结构化财务指标暂不可用', detail: error.message, dataUnavailable: true });
@@ -3471,6 +3471,105 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
     return value;
   }
 
+  function ratio(current: unknown, prior: unknown) {
+    const currentValue = Number(current);
+    const priorValue = Number(prior);
+    return Number.isFinite(currentValue) && Number.isFinite(priorValue) && priorValue !== 0 ? currentValue / priorValue - 1 : null;
+  }
+
+  function divide(numerator: unknown, denominator: unknown) {
+    const numeratorValue = Number(numerator);
+    const denominatorValue = Number(denominator);
+    return Number.isFinite(numeratorValue) && Number.isFinite(denominatorValue) && denominatorValue !== 0 ? numeratorValue / denominatorValue : null;
+  }
+
+  function previousYearReport(reports: any[], period?: string) {
+    if (!period) return null;
+    const matched = /^(\d{4})-(\d{2})-(\d{2})$/.exec(period);
+    if (!matched) return null;
+    const priorPeriod = `${Number(matched[1]) - 1}-${matched[2]}-${matched[3]}`;
+    return reports.find((report: any) => report.period === priorPeriod) || null;
+  }
+
+  function calculateFinancialMetrics(reports: any[], template: 'bank' | 'non_financial') {
+    const latest = reports[0] || null;
+    const prior = previousYearReport(reports, latest?.period);
+    if (!latest) return { template, period: null, metrics: {}, dataGaps: ['尚无可用于计算的结构化报告期'] };
+    const current = latest.metrics || {};
+    const previous = prior?.metrics || {};
+    const averageEquity = current.equity != null && previous.equity != null ? (Number(current.equity) + Number(previous.equity)) / 2 : null;
+    const common = {
+      revenueYoY: ratio(current.revenue, previous.revenue),
+      netProfitYoY: ratio(current.netProfit, previous.netProfit),
+      adjustedNetProfitYoY: ratio(current.adjustedNetProfit, previous.adjustedNetProfit),
+      equityYoY: ratio(current.equity, previous.equity),
+      roeApprox: divide(current.netProfit, averageEquity),
+    };
+    if (template === 'bank') {
+      return {
+        template, period: latest.period, comparisonPeriod: prior?.period || null,
+        metrics: {
+          ...common,
+          assetYoY: ratio(current.assets, previous.assets),
+          loanYoY: ratio(current.loans, previous.loans),
+          depositYoY: ratio(current.deposits, previous.deposits),
+          interestNetIncomeYoY: ratio(current.interestNetIncome, previous.interestNetIncome),
+          feeNetIncomeYoY: ratio(current.feeNetIncome, previous.feeNetIncome),
+          creditImpairmentToRevenue: divide(current.creditImpairment, current.revenue),
+        },
+        dataGaps: ['净息差、不良贷款率、拨备覆盖率和资本充足率需继续从 CNINFO 定期报告解析。'],
+      };
+    }
+    return {
+      template, period: latest.period, comparisonPeriod: prior?.period || null,
+      metrics: {
+        ...common,
+        netMargin: divide(current.netProfit, current.revenue),
+        adjustedNetMargin: divide(current.adjustedNetProfit, current.revenue),
+        cashConversion: divide(current.operatingCashFlow, current.netProfit),
+        assetLiabilityRatio: divide(current.liabilities, current.assets),
+        freeCashFlowProxy: current.operatingCashFlow != null && current.capex != null ? Number(current.operatingCashFlow) - Math.abs(Number(current.capex)) : null,
+      },
+      dataGaps: [],
+    };
+  }
+
+  async function fetchThsFinancialStatements(symbol: string) {
+    if (!/^\d{6}$/.test(symbol)) throw new Error('symbol 应为 6 位证券代码');
+    const python = process.env.AKSHARE_PYTHON || 'py';
+    const args = process.env.AKSHARE_PYTHON
+      ? [path.join(process.cwd(), 'scripts', 'ths_financial_statements.py'), symbol]
+      : ['-3.14', path.join(process.cwd(), 'scripts', 'ths_financial_statements.py'), symbol];
+    const { stdout } = await execFileAsync(python, args, { timeout: 90_000, windowsHide: true, maxBuffer: 4 * 1024 * 1024 });
+    const payload = JSON.parse(stdout);
+    const reports = Array.isArray(payload?.reports) ? payload.reports : [];
+    if (!reports.length) throw new Error('同花顺三大报表未返回有效报告期');
+    const template = payload?.template === 'bank' ? 'bank' : 'non_financial';
+    return {
+      reports, template, unit: payload?.unit || 'CNY', normalization: payload?.normalization,
+      calculations: calculateFinancialMetrics(reports, template),
+      sourceMeta: { source: 'ths_financial_statements', fetchedAt: new Date().toISOString(), freshness: 'delayed', confidence: 'market', fallbackLevel: 0, officialStatus: 'official_document_only' },
+    };
+  }
+
+  async function fetchFinancialDataWithFallback(symbol: string) {
+    try {
+      return await fetchThsFinancialStatements(symbol);
+    } catch (error: any) {
+      console.warn(`[financial-source] ths ${symbol} failed:`, error.message);
+      const fallback = await fetchFinancialSummary(symbol);
+      const reports = fallback.reports || [];
+      return {
+        ...fallback,
+        template: 'non_financial' as const,
+        unit: 'CNY',
+        normalization: '金额单位由摘要源提供；未覆盖的字段为空。',
+        calculations: calculateFinancialMetrics(reports, 'non_financial'),
+        sourceMeta: { ...fallback.sourceMeta, fallbackLevel: 1 },
+      };
+    }
+  }
+
   const stockFactSnapshotCache = new Map<string, { expiresAt: number; value: any }>();
 
   function makeEvidenceId(symbol: string, type: string, key: string, period = 'current') {
@@ -3487,7 +3586,7 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
     const startDate = `${today.slice(0, 4)}0101`;
     const [quoteResult, financialResult, announcementResult, profileResult, heatResult] = await Promise.allSettled([
       fetchAshareStockQuoteWithFallback(symbol),
-      fetchFinancialSummary(symbol),
+      fetchFinancialDataWithFallback(symbol),
       fetchCninfoAnnouncements(symbol, startDate, today),
       fetchXueqiuProfile(symbol),
       fetchXueqiuHeat(),
@@ -3518,6 +3617,10 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
         evidence.push({ evidenceId: makeEvidenceId(symbol, 'financial', key, report.period), type: 'financial', title: `${report.period} ${key}`, value, period: report.period, source: financialData.sourceMeta.source, fetchedAt: financialData.sourceMeta.fetchedAt, freshness: financialData.sourceMeta.freshness, verification: financialData.sourceMeta.officialStatus || 'third_party' });
       }
     }
+    for (const [key, value] of Object.entries(financialData?.calculations?.metrics || {})) {
+      if (value === null || value === undefined) continue;
+      evidence.push({ evidenceId: makeEvidenceId(symbol, 'financial_calculation', key, financialData.calculations.period || 'current'), type: 'financial', title: `${financialData.template || 'non_financial'} ${key}`, value, period: financialData.calculations.period, source: 'calculation', fetchedAt: financialData.sourceMeta.fetchedAt, freshness: financialData.sourceMeta.freshness, verification: 'third_party' });
+    }
     for (const item of (announcementData?.announcements || []).slice(0, 20)) {
       evidence.push({ evidenceId: makeEvidenceId(symbol, 'announcement', item.title, item.publishedAt), type: 'announcement', title: item.title, source: 'cninfo', sourceUrl: item.url, publishedAt: item.publishedAt, fetchedAt: announcementData.sourceMeta.fetchedAt, freshness: announcementData.sourceMeta.freshness, verification: 'official_verified' });
     }
@@ -3533,8 +3636,8 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
     }
     const value = {
       symbol,
-      company: { name: quoteData?.quote?.name || profileData?.profile?.org_short_name_cn || symbol, profile: profileData?.profile || {} },
-      facts: { quote: quoteData?.quote || null, financialReports: financialData?.reports || [], announcements: announcementData?.announcements?.slice(0, 20) || [], sentiment: heatItem || null },
+      company: { name: quoteData?.quote?.name || profileData?.profile?.org_short_name_cn || symbol, profile: profileData?.profile || {}, financialTemplate: financialData?.template || null },
+      facts: { quote: quoteData?.quote || null, financialReports: financialData?.reports || [], financialCalculations: financialData?.calculations || null, financialMeta: financialData ? { template: financialData.template, unit: financialData.unit, normalization: financialData.normalization, sourceMeta: financialData.sourceMeta } : null, announcements: announcementData?.announcements?.slice(0, 20) || [], sentiment: heatItem || null },
       evidence,
       dataGaps,
       snapshotMeta: { generatedAt: new Date().toISOString(), source: 'live', freshness: 'realtime', evidenceCount: evidence.length },
