@@ -2616,6 +2616,16 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
     }
   });
 
+  // GET /api/stock-technical — 个股复权日线和确定性技术指标
+  app.get('/api/stock-technical', async (req, res) => {
+    try {
+      res.json(await fetchStockTechnicalData(String(req.query.symbol || '')));
+    } catch (error: any) {
+      console.error('[stock-technical] query failed:', error.message);
+      res.status(503).json({ error: '个股技术指标暂不可用', detail: error.message, dataUnavailable: true });
+    }
+  });
+
   // GET /api/stock-facts — 所有个股 Agent 共用的事实快照与证据 ID
   app.get('/api/stock-facts', async (req, res) => {
     try {
@@ -3570,6 +3580,99 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
     }
   }
 
+  const stockTechnicalCache = new Map<string, { expiresAt: number; value: any }>();
+
+  function average(values: number[]) {
+    return values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : null;
+  }
+
+  function standardDeviation(values: number[]) {
+    const mean = average(values);
+    if (mean === null || values.length < 2) return null;
+    return Math.sqrt(values.reduce((sum, value) => sum + (value - mean) ** 2, 0) / (values.length - 1));
+  }
+
+  function exponentialMovingAverage(values: number[], period: number) {
+    if (values.length < period) return null;
+    const multiplier = 2 / (period + 1);
+    let result = average(values.slice(0, period))!;
+    for (const value of values.slice(period)) result = value * multiplier + result * (1 - multiplier);
+    return result;
+  }
+
+  function roundMetric(value: number | null, digits = 4) {
+    return value === null || !Number.isFinite(value) ? null : Math.round(value * 10 ** digits) / 10 ** digits;
+  }
+
+  function calculateTechnicalMetrics(bars: any[]) {
+    const cleanBars = bars.filter((bar: any) => [bar.close, bar.high, bar.low, bar.volume].every((value) => Number.isFinite(Number(value)))).sort((a: any, b: any) => String(a.date).localeCompare(String(b.date)));
+    if (cleanBars.length < 60) throw new Error('可用日线不足 60 个交易日，无法计算技术指标');
+    const closes = cleanBars.map((bar: any) => Number(bar.close));
+    const volumes = cleanBars.map((bar: any) => Number(bar.volume));
+    const latest = cleanBars.at(-1);
+    const sma = (period: number) => average(closes.slice(-period));
+    const change = (days: number) => closes.length > days ? closes.at(-1)! / closes.at(-days - 1)! - 1 : null;
+    const gains: number[] = [], losses: number[] = [];
+    for (let index = closes.length - 14; index < closes.length; index += 1) {
+      const difference = closes[index] - closes[index - 1];
+      gains.push(Math.max(0, difference)); losses.push(Math.max(0, -difference));
+    }
+    const avgGain = average(gains); const avgLoss = average(losses);
+    const rsi14 = avgGain === null || avgLoss === null ? null : avgLoss === 0 ? 100 : 100 - 100 / (1 + avgGain / avgLoss);
+    const trueRanges: number[] = [];
+    for (let index = Math.max(1, cleanBars.length - 14); index < cleanBars.length; index += 1) {
+      const bar = cleanBars[index]; const previousClose = closes[index - 1];
+      trueRanges.push(Math.max(Number(bar.high) - Number(bar.low), Math.abs(Number(bar.high) - previousClose), Math.abs(Number(bar.low) - previousClose)));
+    }
+    const ema12 = exponentialMovingAverage(closes, 12);
+    const ema26 = exponentialMovingAverage(closes, 26);
+    const macd = ema12 !== null && ema26 !== null ? ema12 - ema26 : null;
+    const macdSeries = closes.map((_value, index) => {
+      const short = exponentialMovingAverage(closes.slice(0, index + 1), 12);
+      const long = exponentialMovingAverage(closes.slice(0, index + 1), 26);
+      return short !== null && long !== null ? short - long : null;
+    }).filter((value): value is number => value !== null);
+    const macdSignal = exponentialMovingAverage(macdSeries, 9);
+    const return20 = closes.slice(-21).map((value, index, values) => index ? Math.log(value / values[index - 1]) : null).filter((value): value is number => value !== null);
+    const highest52w = Math.max(...cleanBars.slice(-252).map((bar: any) => Number(bar.high)));
+    const lowest52w = Math.min(...cleanBars.slice(-252).map((bar: any) => Number(bar.low)));
+    const ma20 = sma(20), ma50 = sma(50), ma200 = sma(200);
+    const trend = ma20 !== null && ma50 !== null && latest.close > ma20 && ma20 > ma50 ? 'bullish' : ma20 !== null && ma50 !== null && latest.close < ma20 && ma20 < ma50 ? 'bearish' : 'neutral';
+    return {
+      period: { start: cleanBars[0].date, end: latest.date, barCount: cleanBars.length, adjust: 'qfq' },
+      latestBar: latest,
+      metrics: {
+        change5d: roundMetric(change(5)), change20d: roundMetric(change(20)), change60d: roundMetric(change(60)),
+        ma20: roundMetric(ma20, 3), ma50: roundMetric(ma50, 3), ma200: roundMetric(ma200, 3),
+        rsi14: roundMetric(rsi14, 2), atr14: roundMetric(average(trueRanges), 3),
+        annualizedVolatility20d: roundMetric((standardDeviation(return20) || 0) * Math.sqrt(252)),
+        volumeRatio20d: roundMetric(divide(Number(latest.volume), average(volumes.slice(-21, -1)))),
+        macd: roundMetric(macd, 4), macdSignal: roundMetric(macdSignal, 4), macdHistogram: roundMetric(macd !== null && macdSignal !== null ? macd - macdSignal : null, 4),
+        support20d: roundMetric(Math.min(...cleanBars.slice(-21, -1).map((bar: any) => Number(bar.low))), 3),
+        resistance60d: roundMetric(Math.max(...cleanBars.slice(-61, -1).map((bar: any) => Number(bar.high))), 3),
+        high52w: roundMetric(highest52w, 3), low52w: roundMetric(lowest52w, 3),
+        distanceTo52wHigh: roundMetric(Number(latest.close) / highest52w - 1),
+        trend,
+      },
+    };
+  }
+
+  async function fetchStockTechnicalData(symbol: string) {
+    if (!/^\d{6}$/.test(symbol)) throw new Error('symbol 应为 6 位证券代码');
+    const cached = stockTechnicalCache.get(symbol);
+    if (cached && cached.expiresAt > Date.now()) return { ...cached.value, sourceMeta: { ...cached.value.sourceMeta, source: 'cache', freshness: 'stale', fallbackLevel: 1 } };
+    const python = process.env.AKSHARE_PYTHON || 'py';
+    const args = process.env.AKSHARE_PYTHON
+      ? [path.join(process.cwd(), 'scripts', 'stock_daily_kline.py'), symbol]
+      : ['-3.14', path.join(process.cwd(), 'scripts', 'stock_daily_kline.py'), symbol];
+    const { stdout } = await execFileAsync(python, args, { timeout: 60_000, windowsHide: true, maxBuffer: 5 * 1024 * 1024 });
+    const payload = JSON.parse(stdout);
+    const computed = calculateTechnicalMetrics(Array.isArray(payload?.bars) ? payload.bars : []);
+    const value = { ...computed, sourceMeta: { source: payload?.source || 'akshare_stock_zh_a_daily', fetchedAt: new Date().toISOString(), freshness: 'delayed', confidence: 'market', fallbackLevel: 0 } };
+    stockTechnicalCache.set(symbol, { expiresAt: Date.now() + 15 * 60_000, value });
+    return value;
+  }
+
   const stockFactSnapshotCache = new Map<string, { expiresAt: number; value: any }>();
 
   function makeEvidenceId(symbol: string, type: string, key: string, period = 'current') {
@@ -3584,9 +3687,10 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
     }
     const today = new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Shanghai' }).replaceAll('-', '');
     const startDate = `${today.slice(0, 4)}0101`;
-    const [quoteResult, financialResult, announcementResult, profileResult, heatResult] = await Promise.allSettled([
+    const [quoteResult, financialResult, technicalResult, announcementResult, profileResult, heatResult] = await Promise.allSettled([
       fetchAshareStockQuoteWithFallback(symbol),
       fetchFinancialDataWithFallback(symbol),
+      fetchStockTechnicalData(symbol),
       fetchCninfoAnnouncements(symbol, startDate, today),
       fetchXueqiuProfile(symbol),
       fetchXueqiuHeat(),
@@ -3600,6 +3704,7 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
     };
     const quoteData: any = fulfilled(quoteResult, 'market_quote');
     const financialData: any = fulfilled(financialResult, 'financial_summary');
+    const technicalData: any = fulfilled(technicalResult, 'stock_technical');
     const announcementData: any = fulfilled(announcementResult, 'cninfo');
     const profileData: any = fulfilled(profileResult, 'xueqiu_profile');
     const heatData: any = fulfilled(heatResult, 'xueqiu_heat');
@@ -3621,6 +3726,17 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
       if (value === null || value === undefined) continue;
       evidence.push({ evidenceId: makeEvidenceId(symbol, 'financial_calculation', key, financialData.calculations.period || 'current'), type: 'financial', title: `${financialData.template || 'non_financial'} ${key}`, value, period: financialData.calculations.period, source: 'calculation', fetchedAt: financialData.sourceMeta.fetchedAt, freshness: financialData.sourceMeta.freshness, verification: 'third_party' });
     }
+    if (technicalData?.latestBar) {
+      for (const key of ['open', 'high', 'low', 'close', 'volume', 'amount']) {
+        const value = technicalData.latestBar[key];
+        if (value === null || value === undefined) continue;
+        evidence.push({ evidenceId: makeEvidenceId(symbol, 'technical_input', key, technicalData.latestBar.date), type: 'market', title: `${technicalData.latestBar.date} ${key}`, value, period: technicalData.latestBar.date, source: technicalData.sourceMeta.source, fetchedAt: technicalData.sourceMeta.fetchedAt, freshness: technicalData.sourceMeta.freshness, verification: 'third_party' });
+      }
+      for (const [key, value] of Object.entries(technicalData.metrics || {})) {
+        if (value === null || value === undefined) continue;
+        evidence.push({ evidenceId: makeEvidenceId(symbol, 'technical_calculation', key, technicalData.period?.end || 'current'), type: 'market', title: `technical ${key}`, value: String(value), period: technicalData.period?.end, source: 'calculation', fetchedAt: technicalData.sourceMeta.fetchedAt, freshness: technicalData.sourceMeta.freshness, verification: 'third_party' });
+      }
+    }
     for (const item of (announcementData?.announcements || []).slice(0, 20)) {
       evidence.push({ evidenceId: makeEvidenceId(symbol, 'announcement', item.title, item.publishedAt), type: 'announcement', title: item.title, source: 'cninfo', sourceUrl: item.url, publishedAt: item.publishedAt, fetchedAt: announcementData.sourceMeta.fetchedAt, freshness: announcementData.sourceMeta.freshness, verification: 'official_verified' });
     }
@@ -3637,7 +3753,7 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
     const value = {
       symbol,
       company: { name: quoteData?.quote?.name || profileData?.profile?.org_short_name_cn || symbol, profile: profileData?.profile || {}, financialTemplate: financialData?.template || null },
-      facts: { quote: quoteData?.quote || null, financialReports: financialData?.reports || [], financialCalculations: financialData?.calculations || null, financialMeta: financialData ? { template: financialData.template, unit: financialData.unit, normalization: financialData.normalization, sourceMeta: financialData.sourceMeta } : null, announcements: announcementData?.announcements?.slice(0, 20) || [], sentiment: heatItem || null },
+      facts: { quote: quoteData?.quote || null, financialReports: financialData?.reports || [], financialCalculations: financialData?.calculations || null, financialMeta: financialData ? { template: financialData.template, unit: financialData.unit, normalization: financialData.normalization, sourceMeta: financialData.sourceMeta } : null, technical: technicalData || null, announcements: announcementData?.announcements?.slice(0, 20) || [], sentiment: heatItem || null },
       evidence,
       dataGaps,
       snapshotMeta: { generatedAt: new Date().toISOString(), source: 'live', freshness: 'realtime', evidenceCount: evidence.length },
