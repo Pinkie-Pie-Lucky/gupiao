@@ -2637,6 +2637,18 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
     }
   });
 
+  // GET /api/stock-agents/fundamental — 基本面 Agent：确定性信号 + AI 证据化解释
+  app.get('/api/stock-agents/fundamental', async (req, res) => {
+    try {
+      const symbol = String(req.query.symbol || '');
+      if (!symbol) return res.status(400).json({ error: 'symbol is required' });
+      res.json(await runFundamentalAgent(symbol, String(req.query.refresh || '') === '1'));
+    } catch (error: any) {
+      console.error('[fundamental-agent] query failed:', error.message);
+      res.status(503).json({ error: '基本面 Agent 暂不可用', detail: error.message, dataUnavailable: true });
+    }
+  });
+
   // GET /api/sectors — 东方财富真实板块数据，供 MarketMapTab 使用
   app.get('/api/sectors', async (_req, res) => {
     try {
@@ -3759,6 +3771,229 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
       snapshotMeta: { generatedAt: new Date().toISOString(), source: 'live', freshness: 'realtime', evidenceCount: evidence.length },
     };
     stockFactSnapshotCache.set(symbol, { expiresAt: Date.now() + 60_000, value });
+    return value;
+  }
+
+  type FundamentalSignalStatus = 'positive' | 'stable' | 'mixed' | 'deteriorating' | 'risk' | 'data_insufficient';
+  type FundamentalSignal = {
+    signalId: string;
+    dimension: 'business_model' | 'growth' | 'profit_quality' | 'cash_quality' | 'resilience' | 'risk_disclosure';
+    status: FundamentalSignalStatus;
+    severity: 'low' | 'medium' | 'high';
+    summary: string;
+    values: Record<string, number | string | boolean | null>;
+    evidenceIds: string[];
+  };
+
+  const fundamentalAgentCache = new Map<string, { expiresAt: number; value: any }>();
+
+  function finiteNumber(value: unknown) {
+    const numeric = Number(value);
+    return value !== null && value !== undefined && Number.isFinite(numeric) ? numeric : null;
+  }
+
+  function formatPercent(value: unknown) {
+    const numeric = finiteNumber(value);
+    return numeric === null ? '数据不足' : `${(numeric * 100).toFixed(1)}%`;
+  }
+
+  function fundamentalEvidenceIds(snapshot: any, keys: string[], period?: string) {
+    return (snapshot.evidence || [])
+      .filter((item: any) => {
+        const id = String(item.evidenceId || '');
+        const keyMatched = keys.some((key) => id.includes(`:${key}:`));
+        return keyMatched && (!period || item.period === period);
+      })
+      .map((item: any) => String(item.evidenceId));
+  }
+
+  function samePeriodYoYSeries(reports: any[], key: string) {
+    return reports.map((report: any) => {
+      const prior = previousYearReport(reports, report.period);
+      return { period: report.period, value: ratio(report.metrics?.[key], prior?.metrics?.[key]) };
+    }).filter((item: any) => item.value !== null).slice(0, 4);
+  }
+
+  function seriesDirection(series: Array<{ value: number }>) {
+    if (series.length < 2) return 'data_insufficient';
+    const changes = series.slice(0, -1).map((item, index) => item.value - series[index + 1].value);
+    if (changes.every((value) => value > 0)) return 'improving';
+    if (changes.every((value) => value < 0)) return 'deteriorating';
+    return 'mixed';
+  }
+
+  function buildFundamentalSignals(snapshot: any) {
+    const reports = snapshot.facts?.financialReports || [];
+    const calculations = snapshot.facts?.financialCalculations || {};
+    const metrics = calculations.metrics || {};
+    const template = snapshot.company?.financialTemplate === 'bank' ? 'bank' : 'non_financial';
+    const latest = reports[0] || null;
+    const prior = previousYearReport(reports, latest?.period);
+    const signals: FundamentalSignal[] = [];
+    const vetoes: Array<{ code: string; description: string; triggered: boolean; evidenceIds: string[] }> = [];
+    const dataGaps = [...(calculations.dataGaps || [])];
+    const addSignal = (signal: FundamentalSignal) => signals.push({ ...signal, evidenceIds: [...new Set(signal.evidenceIds)] });
+
+    if (!latest) {
+      vetoes.push({ code: 'financial_data_missing', description: '缺少结构化财务报告，无法形成基本面判断。', triggered: true, evidenceIds: [] });
+      dataGaps.push('缺少结构化财务报告。');
+      return { template, latest, prior, signals, vetoes, dataGaps };
+    }
+
+    const profileEvidence = (snapshot.evidence || []).filter((item: any) => String(item.evidenceId || '').startsWith(`profile:${snapshot.symbol}:`)).map((item: any) => item.evidenceId);
+    const businessSummary = snapshot.company?.profile?.main_operation_business || snapshot.company?.profile?.org_name_cn || '';
+    addSignal({
+      signalId: 'business_model_coverage', dimension: 'business_model', status: businessSummary ? 'stable' : 'data_insufficient', severity: businessSummary ? 'low' : 'medium',
+      summary: businessSummary ? '已取得主营业务或公司画像，可用于解释财务表现。' : '缺少可核验的主营业务描述。',
+      values: { businessSummary: String(businessSummary).slice(0, 300) || null }, evidenceIds: profileEvidence,
+    });
+    if (!businessSummary) dataGaps.push('缺少可核验的主营业务描述。');
+
+    const revenueYoY = finiteNumber(metrics.revenueYoY);
+    const adjustedYoY = finiteNumber(metrics.adjustedNetProfitYoY);
+    const revenueTrend = seriesDirection(samePeriodYoYSeries(reports, 'revenue') as Array<{ value: number }>);
+    const adjustedTrend = seriesDirection(samePeriodYoYSeries(reports, 'adjustedNetProfit') as Array<{ value: number }>);
+    const growthStatus: FundamentalSignalStatus = revenueYoY === null || adjustedYoY === null ? 'data_insufficient'
+      : revenueYoY >= 0 && adjustedYoY >= 0 ? (revenueTrend === 'deteriorating' || adjustedTrend === 'deteriorating' ? 'mixed' : 'positive')
+        : revenueYoY < 0 && adjustedYoY < 0 ? 'deteriorating' : 'mixed';
+    addSignal({
+      signalId: 'growth_alignment', dimension: 'growth', status: growthStatus, severity: growthStatus === 'deteriorating' ? 'high' : growthStatus === 'mixed' ? 'medium' : 'low',
+      summary: `最新营收同比${formatPercent(revenueYoY)}、扣非净利润同比${formatPercent(adjustedYoY)}；自身同报告期趋势分别为${revenueTrend}、${adjustedTrend}。`,
+      values: { revenueYoY, adjustedNetProfitYoY: adjustedYoY, revenueTrend, adjustedNetProfitTrend: adjustedTrend },
+      evidenceIds: fundamentalEvidenceIds(snapshot, ['revenueYoY', 'adjustedNetProfitYoY'], latest.period),
+    });
+
+    const netProfit = finiteNumber(latest.metrics?.netProfit);
+    const adjustedProfit = finiteNumber(latest.metrics?.adjustedNetProfit);
+    const adjustedShare = divide(adjustedProfit, netProfit);
+    const priorAdjustedShare = divide(prior?.metrics?.adjustedNetProfit, prior?.metrics?.netProfit);
+    const qualityChange = adjustedShare !== null && priorAdjustedShare !== null ? adjustedShare - priorAdjustedShare : null;
+    addSignal({
+      signalId: 'adjusted_profit_quality', dimension: 'profit_quality',
+      status: adjustedShare === null ? 'data_insufficient' : netProfit! > 0 && adjustedProfit! < 0 ? 'risk' : qualityChange !== null && qualityChange < 0 ? 'mixed' : 'stable',
+      severity: netProfit !== null && adjustedProfit !== null && netProfit > 0 && adjustedProfit < 0 ? 'high' : 'medium',
+      summary: `扣非净利润/归母净利润为${formatPercent(adjustedShare)}，较上年同期变化${formatPercent(qualityChange)}。`,
+      values: { adjustedProfitShare: adjustedShare, priorAdjustedProfitShare: priorAdjustedShare, change: qualityChange },
+      evidenceIds: fundamentalEvidenceIds(snapshot, ['netProfit', 'adjustedNetProfit'], latest.period).concat(fundamentalEvidenceIds(snapshot, ['netProfit', 'adjustedNetProfit'], prior?.period)),
+    });
+
+    const equity = finiteNumber(latest.metrics?.equity);
+    vetoes.push({ code: 'negative_equity', description: '归母权益为负，触发财务持续性否决项。', triggered: equity !== null && equity < 0, evidenceIds: fundamentalEvidenceIds(snapshot, ['equity'], latest.period) });
+
+    if (template === 'non_financial') {
+      const cashConversion = finiteNumber(metrics.cashConversion);
+      const priorCashConversion = divide(prior?.metrics?.operatingCashFlow, prior?.metrics?.netProfit);
+      const latestCashNegative = netProfit !== null && netProfit > 0 && finiteNumber(latest.metrics?.operatingCashFlow) !== null && Number(latest.metrics.operatingCashFlow) < 0;
+      const priorCashNegative = finiteNumber(prior?.metrics?.netProfit) !== null && Number(prior.metrics.netProfit) > 0 && finiteNumber(prior?.metrics?.operatingCashFlow) !== null && Number(prior.metrics.operatingCashFlow) < 0;
+      addSignal({
+        signalId: 'cash_profit_alignment', dimension: 'cash_quality',
+        status: latestCashNegative && priorCashNegative ? 'risk' : latestCashNegative ? 'deteriorating' : cashConversion === null ? 'data_insufficient' : 'stable',
+        severity: latestCashNegative && priorCashNegative ? 'high' : latestCashNegative ? 'medium' : 'low',
+        summary: `经营现金流/归母净利润为${formatPercent(cashConversion)}，上年同期为${formatPercent(priorCashConversion)}。${latestCashNegative ? '本期利润为正但经营现金流为负。' : ''}`,
+        values: { cashConversion, priorCashConversion, latestPositiveProfitNegativeCashFlow: latestCashNegative, priorPositiveProfitNegativeCashFlow: priorCashNegative },
+        evidenceIds: fundamentalEvidenceIds(snapshot, ['cashConversion'], latest.period).concat(fundamentalEvidenceIds(snapshot, ['operatingCashFlow', 'netProfit'], latest.period), fundamentalEvidenceIds(snapshot, ['operatingCashFlow', 'netProfit'], prior?.period)),
+      });
+      addSignal({
+        signalId: 'balance_sheet_resilience', dimension: 'resilience', status: metrics.assetLiabilityRatio == null ? 'data_insufficient' : 'stable', severity: 'low',
+        summary: `资产负债率${formatPercent(metrics.assetLiabilityRatio)}、上年同期${formatPercent(divide(prior?.metrics?.liabilities, prior?.metrics?.assets))}，权益同比${formatPercent(metrics.equityYoY)}；仅比较自身变化，不用固定阈值直接判定优劣。`,
+        values: { assetLiabilityRatio: finiteNumber(metrics.assetLiabilityRatio), priorAssetLiabilityRatio: divide(prior?.metrics?.liabilities, prior?.metrics?.assets), equityYoY: finiteNumber(metrics.equityYoY), roeApprox: finiteNumber(metrics.roeApprox), freeCashFlowProxy: finiteNumber(metrics.freeCashFlowProxy) },
+        evidenceIds: fundamentalEvidenceIds(snapshot, ['assetLiabilityRatio', 'equityYoY', 'roeApprox', 'freeCashFlowProxy'], latest.period),
+      });
+    } else {
+      const loanYoY = finiteNumber(metrics.loanYoY); const depositYoY = finiteNumber(metrics.depositYoY);
+      const expansionGap = loanYoY !== null && depositYoY !== null ? loanYoY - depositYoY : null;
+      const priorImpairmentRatio = divide(prior?.metrics?.creditImpairment, prior?.metrics?.revenue);
+      const currentImpairmentRatio = finiteNumber(metrics.creditImpairmentToRevenue);
+      addSignal({
+        signalId: 'bank_funding_alignment', dimension: 'resilience', status: expansionGap === null ? 'data_insufficient' : expansionGap > 0 ? 'mixed' : 'stable', severity: expansionGap !== null && expansionGap > 0 ? 'medium' : 'low',
+        summary: `贷款同比${formatPercent(loanYoY)}、存款同比${formatPercent(depositYoY)}，贷款与存款增速差${formatPercent(expansionGap)}。`,
+        values: { loanYoY, depositYoY, loanDepositGrowthGap: expansionGap, assetYoY: finiteNumber(metrics.assetYoY) },
+        evidenceIds: fundamentalEvidenceIds(snapshot, ['loanYoY', 'depositYoY', 'assetYoY'], latest.period),
+      });
+      addSignal({
+        signalId: 'bank_income_and_impairment', dimension: 'profit_quality',
+        status: finiteNumber(metrics.interestNetIncomeYoY) !== null && Number(metrics.interestNetIncomeYoY) < 0 || currentImpairmentRatio !== null && priorImpairmentRatio !== null && currentImpairmentRatio > priorImpairmentRatio ? 'mixed' : 'stable', severity: 'medium',
+        summary: `净利息收入同比${formatPercent(metrics.interestNetIncomeYoY)}、手续费收入同比${formatPercent(metrics.feeNetIncomeYoY)}；信用减值占营收${formatPercent(currentImpairmentRatio)}，上年同期${formatPercent(priorImpairmentRatio)}。`,
+        values: { interestNetIncomeYoY: finiteNumber(metrics.interestNetIncomeYoY), feeNetIncomeYoY: finiteNumber(metrics.feeNetIncomeYoY), creditImpairmentToRevenue: currentImpairmentRatio, priorCreditImpairmentToRevenue: priorImpairmentRatio },
+        evidenceIds: fundamentalEvidenceIds(snapshot, ['interestNetIncomeYoY', 'feeNetIncomeYoY', 'creditImpairmentToRevenue'], latest.period),
+      });
+    }
+
+    const riskAnnouncements = (snapshot.facts?.announcements || []).filter((item: any) => /(退市风险警示|终止上市)/.test(String(item.title || ''))).slice(0, 3);
+    const riskEvidence = riskAnnouncements.flatMap((item: any) => (snapshot.evidence || []).filter((evidence: any) => evidence.type === 'announcement' && evidence.title === item.title).map((evidence: any) => evidence.evidenceId));
+    vetoes.push({ code: 'official_listing_risk', description: 'CNINFO 出现退市风险警示或终止上市正式公告。', triggered: riskAnnouncements.length > 0, evidenceIds: riskEvidence });
+    if (riskAnnouncements.length) addSignal({ signalId: 'official_listing_risk', dimension: 'risk_disclosure', status: 'risk', severity: 'high', summary: `发现${riskAnnouncements.length}条上市风险正式披露。`, values: { count: riskAnnouncements.length }, evidenceIds: riskEvidence });
+    return { template, latest, prior, signals, vetoes, dataGaps: [...new Set(dataGaps)] };
+  }
+
+  function normalizeFundamentalItems(items: unknown, evidenceSet: Set<string>, maxItems = 5) {
+    if (!Array.isArray(items)) return [];
+    return items.slice(0, maxItems).map((item: any) => ({
+      text: sanitizeTeacherText(item?.text, 180),
+      evidenceIds: Array.isArray(item?.evidenceIds) ? [...new Set<string>(item.evidenceIds.map(String).filter((id: string) => evidenceSet.has(id)))].slice(0, 6) : [],
+    })).filter((item: any) => item.text && item.evidenceIds.length);
+  }
+
+  function fallbackFundamentalOpinion(snapshot: any, input: any, reason: string) {
+    const positive = input.signals.filter((signal: FundamentalSignal) => ['positive', 'stable'].includes(signal.status));
+    const negative = input.signals.filter((signal: FundamentalSignal) => ['deteriorating', 'risk'].includes(signal.status));
+    const triggeredVetoes = input.vetoes.filter((veto: any) => veto.triggered);
+    const conclusion = triggeredVetoes.length ? '基本面存在已触发的硬性风险项，需优先核验。' : negative.length ? '基本面存在需要持续核验的恶化信号。' : '当前结构化指标整体未出现明确硬性风险，但仍需结合数据缺口持续验证。';
+    const toItem = (signal: FundamentalSignal) => ({ text: signal.summary, evidenceIds: signal.evidenceIds });
+    return {
+      agent: 'fundamental', status: 'limited', conclusion,
+      confidence: { score: Math.min(65, 30 + new Set(input.signals.flatMap((signal: FundamentalSignal) => signal.evidenceIds)).size), level: 'limited', reason: `AI 解释层不可用，当前为确定性信号回退：${reason}` },
+      businessModel: { summary: String(snapshot.company?.profile?.main_operation_business || '主营业务描述不足。').slice(0, 300), evidenceIds: input.signals.find((signal: FundamentalSignal) => signal.dimension === 'business_model')?.evidenceIds || [], dataGaps: input.dataGaps },
+      dimensions: input.signals.map((signal: FundamentalSignal) => ({ name: signal.dimension, assessment: signal.summary, status: signal.status, evidenceIds: signal.evidenceIds })),
+      positives: positive.slice(0, 5).map(toItem), negatives: negative.slice(0, 5).map(toItem), uncertainties: input.dataGaps.map((text: string) => ({ text, evidenceIds: [] })),
+      deteriorationSignals: negative.map((signal: FundamentalSignal) => ({ signal: signal.summary, severity: signal.severity, evidenceIds: signal.evidenceIds })),
+      vetoes: input.vetoes, evidenceIds: [...new Set(input.signals.flatMap((signal: FundamentalSignal) => signal.evidenceIds))], dataGaps: input.dataGaps,
+    };
+  }
+
+  async function runFundamentalAgent(inputSymbol: string, refresh = false) {
+    const symbol = normalizeAshareSymbol(inputSymbol).code;
+    const cached = fundamentalAgentCache.get(symbol);
+    if (!refresh && cached && cached.expiresAt > Date.now()) return { ...cached.value, agentMeta: { ...cached.value.agentMeta, source: 'cache' } };
+    const snapshot = await buildStockFactSnapshot(symbol);
+    const input = buildFundamentalSignals(snapshot);
+    const evidenceSet = new Set<string>((snapshot.evidence || []).map((item: any) => String(item.evidenceId)));
+    const evidenceCatalog = (snapshot.evidence || []).filter((item: any) => input.signals.some((signal: FundamentalSignal) => signal.evidenceIds.includes(item.evidenceId))).map((item: any) => ({ evidenceId: item.evidenceId, title: item.title, value: item.value, period: item.period, source: item.source, verification: item.verification }));
+    let opinion: any;
+    let aiStatus: 'completed' | 'fallback' = 'completed';
+    try {
+      const raw = await callAI(`你是个股基本面研究 Agent。只解释输入中的结构化事实与确定性信号，不搜索新事实、不做估值、不预测股价、不提供买卖建议。\n必须区分普通非金融企业与银行；银行不得使用经营现金流/利润或普通企业资产负债率评价经营质量。\n结论应同时说明支持证据、反证和数据缺口。所有事实判断必须引用 evidenceCatalog 中存在的 evidenceId；没有证据只能放入 uncertainties。\n不要把单期波动直接写成持续趋势，不要把第三方结构化数据写成已由官方原文核验。只有输入明确提供历史或行业比较时才能使用“较高、较低、偏高、偏低、压力较大、稳健”等比较性评价；只有单期占比时必须只陈述数值及待验证项。\n严格输出 JSON：{"conclusion":"","confidence":{"score":0,"level":"high|medium|limited","reason":""},"businessModel":{"summary":"","evidenceIds":[],"dataGaps":[]},"dimensions":[{"name":"growth|profit_quality|cash_quality|resilience|business_model","assessment":"","status":"improving|stable|mixed|deteriorating|risk|data_insufficient","evidenceIds":[]}],"positives":[{"text":"","evidenceIds":[]}],"negatives":[{"text":"","evidenceIds":[]}],"uncertainties":[{"text":"","evidenceIds":[]}],"deteriorationSignals":[{"signal":"","severity":"low|medium|high","evidenceIds":[]}]}`,
+        JSON.stringify({ symbol, company: snapshot.company, template: input.template, latestPeriod: input.latest?.period, comparisonPeriod: input.prior?.period, deterministicSignals: input.signals, vetoes: input.vetoes, dataGaps: input.dataGaps, evidenceCatalog }), 0.1, 3_500);
+      const parsed = parseAIJson(raw);
+      const confidenceScore = Math.max(0, Math.min(100, Number(parsed?.confidence?.score) || 0));
+      const dimensions = Array.isArray(parsed?.dimensions) ? parsed.dimensions.slice(0, 6).map((item: any) => ({ name: sanitizeTeacherText(item?.name, 40), assessment: sanitizeTeacherText(item?.assessment, 220), status: String(item?.status || 'data_insufficient'), evidenceIds: Array.isArray(item?.evidenceIds) ? [...new Set<string>(item.evidenceIds.map(String).filter((id: string) => evidenceSet.has(id)))].slice(0, 8) : [] })).filter((item: any) => item.name && item.assessment) : [];
+      const positives = normalizeFundamentalItems(parsed?.positives, evidenceSet);
+      const negatives = normalizeFundamentalItems(parsed?.negatives, evidenceSet);
+      const uncertainties = Array.isArray(parsed?.uncertainties) ? parsed.uncertainties.slice(0, 5).map((item: any) => ({ text: sanitizeTeacherText(item?.text, 180), evidenceIds: Array.isArray(item?.evidenceIds) ? item.evidenceIds.map(String).filter((id: string) => evidenceSet.has(id)) : [] })).filter((item: any) => item.text) : [];
+      const deteriorationSignals = Array.isArray(parsed?.deteriorationSignals) ? parsed.deteriorationSignals.slice(0, 5).map((item: any) => ({ signal: sanitizeTeacherText(item?.signal, 180), severity: ['low', 'medium', 'high'].includes(item?.severity) ? item.severity : 'medium', evidenceIds: Array.isArray(item?.evidenceIds) ? item.evidenceIds.map(String).filter((id: string) => evidenceSet.has(id)) : [] })).filter((item: any) => item.signal && item.evidenceIds.length) : [];
+      const citedIds = [...new Set<string>([...dimensions, ...positives, ...negatives, ...deteriorationSignals].flatMap((item: any) => item.evidenceIds))];
+      const businessIds = Array.isArray(parsed?.businessModel?.evidenceIds) ? parsed.businessModel.evidenceIds.map(String).filter((id: string) => evidenceSet.has(id)) : [];
+      const hasTriggeredVeto = input.vetoes.some((veto: any) => veto.triggered);
+      const citedFinancialEvidence = (snapshot.evidence || []).filter((item: any) => citedIds.includes(item.evidenceId) && item.type === 'financial');
+      const financialVerificationLimited = citedFinancialEvidence.length > 0 && !citedFinancialEvidence.some((item: any) => item.verification === 'official_verified');
+      const requestedLevel = ['high', 'medium', 'limited'].includes(parsed?.confidence?.level) ? parsed.confidence.level : 'limited';
+      const confidenceLevel = financialVerificationLimited && requestedLevel === 'high' ? 'medium' : requestedLevel;
+      const confidenceReason = `${sanitizeTeacherText(parsed?.confidence?.reason, 180)}${financialVerificationLimited ? ' 财务数据尚未与 CNINFO 原文逐项核验。' : ''}`.trim();
+      opinion = {
+        agent: 'fundamental', status: input.dataGaps.length || citedIds.length === 0 || financialVerificationLimited ? 'limited' : 'completed',
+        conclusion: sanitizeTeacherText(parsed?.conclusion, 260) || '基本面结论暂不可用。',
+        confidence: { score: hasTriggeredVeto ? Math.min(confidenceScore, 60) : financialVerificationLimited ? Math.min(confidenceScore, 74) : confidenceScore, level: confidenceLevel, reason: confidenceReason },
+        businessModel: { summary: sanitizeTeacherText(parsed?.businessModel?.summary, 300), evidenceIds: businessIds, dataGaps: Array.isArray(parsed?.businessModel?.dataGaps) ? parsed.businessModel.dataGaps.map((item: any) => sanitizeTeacherText(item, 120)).filter(Boolean).slice(0, 5) : [] },
+        dimensions, positives, negatives, uncertainties, deteriorationSignals,
+        vetoes: input.vetoes, evidenceIds: [...new Set([...citedIds, ...businessIds])], dataGaps: input.dataGaps,
+      };
+    } catch (error: any) {
+      aiStatus = 'fallback';
+      console.warn(`[fundamental-agent] AI fallback for ${symbol}:`, error.message);
+      opinion = fallbackFundamentalOpinion(snapshot, input, error.message);
+    }
+    const value = { symbol, company: snapshot.company, deterministicSignals: input.signals, opinion, agentMeta: { generatedAt: new Date().toISOString(), source: 'live', aiStatus, promptVersion: 'fundamental-v1', snapshotGeneratedAt: snapshot.snapshotMeta.generatedAt } };
+    fundamentalAgentCache.set(symbol, { expiresAt: Date.now() + 15 * 60_000, value });
     return value;
   }
 
