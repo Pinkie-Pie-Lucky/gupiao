@@ -945,6 +945,14 @@ export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStoc
                   </button>
                   {expanded && (
                     <div className="mt-2 rounded-2xl bg-slate-50 border border-slate-100 p-3 space-y-3">
+                      {(storyMode === 'beginner' ? story.reasoning.beginnerSummary : story.reasoning.professionalSummary) && (
+                        <p className="text-[11px] leading-5 text-slate-700 bg-white rounded-xl px-3 py-2.5 border border-slate-100">
+                          <span className="text-[9px] font-bold text-indigo-500 mb-0.5 block">
+                            {storyMode === 'beginner' ? '一句话看懂' : '逻辑总结'}
+                          </span>
+                          {storyMode === 'beginner' ? story.reasoning.beginnerSummary : story.reasoning.professionalSummary}
+                        </p>
+                      )}
                       {storyMode === 'professional' && (
                         <p className="text-[9px] font-bold text-slate-400">完整因果链</p>
                       )}
@@ -959,8 +967,21 @@ export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStoc
                           <div className="min-w-0 flex-1 pb-2">
                             <p className="text-[11px] leading-5 text-slate-700">{step.text}</p>
                             {storyMode === 'professional' && (
-                              <span className="text-[9px] text-slate-400">
-                                {step.kind === 'fact' ? '已确认事实' : step.kind === 'knowledge' ? '金融常识' : '合理推断'}
+                              <span className="flex flex-wrap items-center gap-1 mt-1">
+                                <span className="text-[9px] text-slate-400">
+                                  {step.kind === 'fact' ? '已确认事实' : step.kind === 'knowledge' ? '金融常识' : '合理推断'}
+                                </span>
+                                {step.stepType && (
+                                  <span className="text-[9px] text-indigo-400">
+                                    {step.stepType === 'event' ? '· 事件层' : step.stepType === 'market' ? '· 市场表现' : '· 传导机制'}
+                                  </span>
+                                )}
+                                {step.relationshipConfidence && (
+                                  <span className="text-[9px] text-slate-400">
+                                    · 关系可信度
+                                    {step.relationshipConfidence === 'strong' ? '强' : step.relationshipConfidence === 'medium' ? '中' : '弱'}
+                                  </span>
+                                )}
                               </span>
                             )}
                           </div>
@@ -977,9 +998,14 @@ export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStoc
                             <div>
                               <p className="text-[9px] font-bold text-emerald-700">支持证据</p>
                               <ul className="mt-1 space-y-1">
-                                {professional.supportingEvidence.length > 0
-                                  ? professional.supportingEvidence.map((item) => <li key={item} className="text-[10px] leading-4 text-slate-600">• {item}</li>)
-                                  : <li className="text-[10px] text-slate-500">当前仅有行情事实，暂无额外支持证据。</li>}
+                                {(() => {
+                                  const p2 = story.reasoning.supportingEvidence || [];
+                                  const p3 = professional.supportingEvidence || [];
+                                  const merged = [...new Set([...p2, ...p3])];
+                                  return merged.length > 0
+                                    ? merged.map((item) => <li key={item} className="text-[10px] leading-4 text-slate-600">• {item}</li>)
+                                    : <li className="text-[10px] text-slate-500">当前仅有行情事实，暂无额外支持证据。</li>;
+                                })()}
                               </ul>
                             </div>
                             <div>
@@ -1009,12 +1035,17 @@ export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStoc
                               {professional.alternativeExplanations.map((item) => <p key={item} className="text-[10px] leading-4 text-slate-600 mt-1">• {item}</p>)}
                             </div>
                           )}
-                          {professional.counterLogic.length > 0 && (
-                            <div>
-                              <p className="text-[9px] font-bold text-rose-700">反向逻辑</p>
-                              {professional.counterLogic.map((item) => <p key={item} className="text-[10px] leading-4 text-slate-600 mt-1">• {item}</p>)}
-                            </div>
-                          )}
+                          {(() => {
+                            const p2 = story.reasoning.counterEvidence || [];
+                            const p3 = professional.counterLogic || [];
+                            const merged = [...new Set([...p2, ...p3])];
+                            return merged.length > 0 && (
+                              <div>
+                                <p className="text-[9px] font-bold text-rose-700">反向逻辑</p>
+                                {merged.map((item) => <p key={item} className="text-[10px] leading-4 text-slate-600 mt-1">• {item}</p>)}
+                              </div>
+                            );
+                          })()}
                           {professional.observationIndicators.length > 0 && (
                             <div>
                               <p className="text-[9px] font-bold text-indigo-700">后续观察</p>

@@ -173,7 +173,6 @@ ${breadth}
         model: AI_MODEL,
         messages: [{ role: 'user', content: prompt }],
         temperature: 0.5,
-        max_tokens: 8000,
       });
 
       const report = completion.choices[0]?.message?.content || '';
@@ -525,24 +524,446 @@ low：
 “今天市场最值得理解的3个变化”。
 `;
 
-  const PROMPT_2_SYSTEM = `你是一名财经因果校验员。请仅根据输入的市场故事、证据和金融常识，为每个storyId建立“最短但完整”的因果链。
+  const PROMPT_2_SYSTEM = `PROMPT_2：Causal Reasoning Engine（市场因果推理）
 
-规则：
-1. 简单事件可用2至3步，一般事件4至5步，复杂事件最多6步；不要机械凑步数。
-2. 每一步必须标记kind：fact=输入中的事实；knowledge=稳定金融常识；inference=有依据但尚未确认的推断。
-3. fact步骤必须引用有效evidenceIds。不得编造来源、政策、资金流或官方结论。
-4. 证据不足时明确写入uncertainty，并降低confidenceLevel；宁可给出有限解释，也不要补全一个虚假的故事。
-5. confidenceLevel只能是high、medium、limited；不输出投资建议或未来预测。
-6. 必须原样返回输入中的storyId，不能依赖数组顺序关联。
+角色：
 
-严格输出JSON：
+你是一名严谨的财经因果分析师。
+
+你的任务：
+
+根据输入的市场故事（storyId）、行情事实、sources证据以及稳定金融知识，
+为每个市场故事建立“最短但完整、可验证”的因果链。
+
+你的目标不是解释所有可能原因，
+而是生成：
+
+1. 当前最可信的市场解释；
+2. 支撑该解释的证据；
+3. 仍存在的不确定因素；
+4. 支持小白模式和专业模式后续表达的结构化因果信息。
+
+
+====================
+一、因果链生成原则
+====================
+
+
+1. 因果链长度：
+
+根据事件复杂程度决定：
+
+简单事件：
+2-3步。
+
+一般事件：
+4-5步。
+
+复杂事件：
+最多6步。
+
+禁止机械补齐步骤。
+
+如果无法确认完整逻辑：
+宁可输出较短链条，并增加uncertainty。
+
+
+---
+
+2. 因果链必须包含：
+
+起点：
+
+市场事件或输入事实。
+
+中间：
+
+影响机制。
+
+终点：
+
+输入中已经发生的市场结果。
+
+
+例如：
+
+正确：
+
+政策变化
+↓
+市场预期改变
+↓
+资金关注相关行业
+↓
+板块上涨5%
+
+
+错误：
+
+政策变化
+↓
+行业一定盈利提升
+↓
+股票上涨
+
+（如果没有输入证据支持）
+
+
+---
+
+3. 如果没有明确原因：
+
+允许输出：
+
+“当前仅观察到市场变化，暂无充分证据确认具体驱动因素。”
+
+不要为了形成完整故事而创造原因。
+
+
+====================
+二、步骤类型 stepType
+====================
+
+
+每一步必须标记stepType：
+
+只能选择：
+
+1. event
+
+事件层：
+
+表示外部发生的事情。
+
+例如：
+
+政策发布、行业事件、国际事件。
+
+
+2. market
+
+市场表现层：
+
+表示市场观察到的结果。
+
+例如：
+
+板块上涨、成交增加、资金集中。
+
+
+3. mechanism
+
+传导机制层：
+
+表示事件如何影响市场。
+
+例如：
+
+需求预期变化、风险偏好变化、估值调整。
+
+
+====================
+三、步骤类型 kind
+====================
+
+
+每一步必须标记kind：
+
+只能选择：
+
+
+1. fact
+
+输入中明确存在的事实。
+
+
+硬性要求：
+
+- 必须有有效evidenceIds；
+- evidenceIds长度>=1；
+- evidenceIds必须来自输入sources。
+
+
+例如：
+
+“半导体板块今日上涨6.35%”
+
+kind：
+
+fact
+
+
+---
+
+2. knowledge
+
+稳定金融知识。
+
+无需证据。
+
+
+只能使用：
+
+广泛认可的基础金融逻辑。
+
+
+例如：
+
+“成交量增加通常代表市场参与度提升。”
+
+
+禁止：
+
+将行业推断、资金方向、盈利变化包装成knowledge。
+
+
+---
+
+3. inference
+
+基于事实和金融知识产生的推断。
+
+特点：
+
+合理但未被输入直接确认。
+
+
+例如：
+
+“市场可能交易AI需求增长预期。”
+
+如果没有直接证据：
+
+必须标记inference。
+
+
+强制规则：
+
+如果某一步没有有效evidenceIds，
+不得标记为fact。
+
+
+====================
+四、关系可信度
+====================
+
+
+每个步骤之间需要判断relationshipConfidence：
+
+
+strong：
+
+事实之间存在明确联系，有充分证据支持。
+
+
+medium：
+
+符合金融逻辑，但仍存在其他解释。
+
+
+weak：
+
+存在可能关系，但证据不足。
+
+
+====================
+五、证据与反向因素
+====================
+
+
+每个故事必须输出：
+
+1. supportingEvidence：
+
+支持当前因果解释的因素。
+
+
+2. counterEvidence：
+
+可能削弱该解释的因素。
+
+
+例如：
+
+支持：
+
+“成交额明显放大。”
+
+反向：
+
+“缺少行业数据验证。”
+
+
+不要只输出利好因素。
+
+
+====================
+六、可信度判断
+====================
+
+
+confidenceLevel只能：
+
+high
+
+medium
+
+limited
+
+
+判断标准：
+
+high：
+
+事实证据充分，主要因果关系明确。
+
+
+medium：
+
+部分依赖金融常识或合理推断。
+
+
+limited：
+
+存在明显未知因素，只能提供有限解释。
+
+
+====================
+七、模式支持要求
+====================
+
+
+因果链输出需要支持两个下游模式：
+
+1. 小白模式：
+
+需要帮助生成：
+
+- 发生了什么；
+- 为什么简单理解；
+- 生活化解释。
+
+
+2. 专业模式：
+
+需要帮助生成：
+
+- 数据依据；
+- 资金逻辑；
+- 行业机制；
+- 风险因素；
+- 不确定性。
+
+
+因此需要额外输出：
+
+
+beginnerSummary：
+
+用一句话总结这个故事的简单逻辑。
+
+
+professionalSummary：
+
+用专业投资研究语言总结当前逻辑。
+
+
+====================
+八、限制规则
+====================
+
+
+1. 只使用输入中的市场故事、sources和MarketSnapshot。
+
+2. 不得编造：
+
+- 新闻；
+- 政策；
+- 资金流；
+- 公司行为；
+- 官方结论。
+
+
+3. 所有数字必须与输入完全一致。
+
+4. 不预测未来。
+
+5. 不输出投资建议。
+
+6. 必须原样返回输入中的storyId。
+
+7. 不依赖数组顺序关联。
+
+
+====================
+九、严格输出JSON
+====================
+
+
 {
-  "chains": [{
-    "storyId": "story-1",
-    "steps": [{ "id": "step-1", "text": "因果步骤", "evidenceIds": ["source-id"], "kind": "fact" }],
-    "uncertainty": "仍待确认的部分；没有则为空字符串",
-    "confidenceLevel": "high|medium|limited"
-  }]
+  "chains": [
+
+    {
+      "storyId": "story-1",
+
+
+      "beginnerSummary":
+      "给小白看的简单逻辑总结",
+
+
+      "professionalSummary":
+      "给专业用户看的逻辑总结",
+
+
+      "steps":
+
+      [
+        {
+          "id":"step-1",
+
+          "text":"因果步骤",
+
+          "stepType":
+          "event|market|mechanism",
+
+          "kind":
+          "fact|knowledge|inference",
+
+          "evidenceIds":
+          [
+            "source-id"
+          ],
+
+          "relationshipConfidence":
+          "strong|medium|weak"
+        }
+      ],
+
+
+      "supportingEvidence":
+
+      [
+        "支持当前解释的因素"
+      ],
+
+
+      "counterEvidence":
+
+      [
+        "可能削弱当前解释的因素"
+      ],
+
+
+      "uncertainty":
+      "仍待确认的问题，没有则为空字符串",
+
+
+      "confidenceLevel":
+      "high|medium|limited"
+
+    }
+
+  ]
 }`;
 
   const PROMPT_3_BEGINNER_SYSTEM = `你是“泡泡老师”，一位温暖、耐心、克制、讲人话的 AI 财经老师。请仅依据输入的市场数据、市场故事和因果链，为刚开始理解 A 股的用户写每日早报。
@@ -616,7 +1037,6 @@ low：
         { role: 'user', content: userContent },
       ],
       temperature,
-      max_tokens: 8000,
     });
     return completion.choices[0]?.message?.content || '';
   }
@@ -691,6 +1111,8 @@ low：
     text: string;
     evidenceIds: string[];
     kind: 'fact' | 'knowledge' | 'inference';
+    stepType?: 'event' | 'market' | 'mechanism';
+    relationshipConfidence?: 'strong' | 'medium' | 'weak';
   };
   type ReasoningChain = {
     storyId: string;
@@ -698,6 +1120,10 @@ low：
     uncertainty: string;
     confidenceLevel: ConfidenceLevel;
     validationStatus: 'passed' | 'limited' | 'rejected';
+    beginnerSummary?: string;
+    professionalSummary?: string;
+    supportingEvidence?: string[];
+    counterEvidence?: string[];
   };
   type TeacherStoryContent = {
     storyId: string;
@@ -742,6 +1168,30 @@ low：
 
   function parseAIJson(raw: string): any {
     return JSON.parse(raw.replace(/```json\s*/gi, '').replace(/```/g, '').trim());
+  }
+
+  async function callAIWithParseRetry(
+    systemInstruction: string,
+    userContent: string,
+    temperature: number,
+    maxAttempts = 3,
+  ): Promise<any> {
+    let lastError: Error | null = null;
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      try {
+        const raw = await callAI(systemInstruction, userContent, temperature);
+        if (!raw || !raw.trim()) {
+          throw new Error('empty AI content');
+        }
+        return parseAIJson(raw);
+      } catch (error: any) {
+        lastError = error;
+        if (attempt < maxAttempts) {
+          console.error(`[callAI] attempt ${attempt}/${maxAttempts} failed (${error.message}), retrying...`);
+        }
+      }
+    }
+    throw lastError || new Error('callAI failed after retries');
   }
 
   function normalizeStories(rawStories: unknown, snapshot: MarketSnapshot): MarketStoryDraft[] {
@@ -834,6 +1284,8 @@ low：
     const sourceIds = new Set(snapshot.sources.map((source) => source.id));
     const validConfidence = new Set<ConfidenceLevel>(['high', 'medium', 'limited']);
     const validKinds = new Set(['fact', 'knowledge', 'inference']);
+    const validStepTypes = new Set(['event', 'market', 'mechanism']);
+    const validRelationshipConfidence = new Set(['strong', 'medium', 'weak']);
 
     return (rawChains as any[])
       .filter((chain) => storyIds.has(String(chain?.storyId)))
@@ -846,6 +1298,10 @@ low：
                 ? [...new Set<string>(step.evidenceIds.map(String).filter((id: string) => sourceIds.has(id)))]
                 : [],
               kind: (validKinds.has(step?.kind) ? step.kind : 'inference') as ReasoningStep['kind'],
+              stepType: (validStepTypes.has(step?.stepType) ? step.stepType : undefined) as ReasoningStep['stepType'],
+              relationshipConfidence: (validRelationshipConfidence.has(step?.relationshipConfidence)
+                ? step.relationshipConfidence
+                : undefined) as ReasoningStep['relationshipConfidence'],
             })).filter((step: ReasoningStep) => step.text)
           : [];
         const requestedConfidence: ConfidenceLevel = validConfidence.has(chain?.confidenceLevel)
@@ -859,6 +1315,14 @@ low：
           uncertainty: String(chain?.uncertainty || '').trim().slice(0, 180),
           confidenceLevel,
           validationStatus: hasUnverifiedFact || confidenceLevel === 'limited' ? 'limited' : 'passed',
+          beginnerSummary: String(chain?.beginnerSummary || '').trim().slice(0, 120) || undefined,
+          professionalSummary: String(chain?.professionalSummary || '').trim().slice(0, 160) || undefined,
+          supportingEvidence: Array.isArray(chain?.supportingEvidence)
+            ? [...new Set((chain.supportingEvidence as any[]).map((item: unknown) => String(item).trim().slice(0, 80)))].filter(Boolean).slice(0, 3)
+            : [],
+          counterEvidence: Array.isArray(chain?.counterEvidence)
+            ? [...new Set((chain.counterEvidence as any[]).map((item: unknown) => String(item).trim().slice(0, 80)))].filter(Boolean).slice(0, 3)
+            : [],
         };
       });
   }
@@ -1786,8 +2250,7 @@ low：
         let sentiment = '中性';
         let storyDrafts: MarketStoryDraft[] = [];
         try {
-          const p1Raw = await callAI(PROMPT_1_SYSTEM, p1Input, 0.1);
-          const p1Result = parseAIJson(p1Raw);
+          const p1Result = await callAIWithParseRetry(PROMPT_1_SYSTEM, p1Input, 0.1);
           if (['乐观', '中性', '谨慎'].includes(p1Result?.marketSentiment)) {
             sentiment = p1Result.marketSentiment;
           }
@@ -1820,12 +2283,12 @@ low：
 
         let chains: ReasoningChain[] = [];
         try {
-          const p2Raw = await callAI(
+          const p2Result = await callAIWithParseRetry(
             PROMPT_2_SYSTEM,
             JSON.stringify({ stories: storyDrafts, sources: snapshot.sources }, null, 2),
             0.05,
           );
-          chains = normalizeChains(parseAIJson(p2Raw)?.chains, storyDrafts, snapshot);
+          chains = normalizeChains(p2Result?.chains, storyDrafts, snapshot);
         } catch (error: any) {
           console.error('[morning-report] P2 failed:', error.message);
           fallback = true;
@@ -1869,29 +2332,19 @@ low：
         }, null, 2);
 
         const [beginnerResponse, professionalResponse] = await Promise.allSettled([
-          callAI(PROMPT_3_BEGINNER_SYSTEM, p3BeginnerInput, 0.35),
-          callAI(PROMPT_3_PROFESSIONAL_SYSTEM, p3ProfessionalInput, 0.2),
+          callAIWithParseRetry(PROMPT_3_BEGINNER_SYSTEM, p3BeginnerInput, 0.35),
+          callAIWithParseRetry(PROMPT_3_PROFESSIONAL_SYSTEM, p3ProfessionalInput, 0.2),
         ]);
         let p3BeginnerResult: any = {};
         let p3ProfessionalResult: any = {};
         if (beginnerResponse.status === 'fulfilled') {
-          try {
-            p3BeginnerResult = parseAIJson(beginnerResponse.value);
-          } catch (error: any) {
-            console.error('[morning-report] P3 beginner parse failed:', error.message);
-            fallback = true;
-          }
+          p3BeginnerResult = beginnerResponse.value;
         } else {
           console.error('[morning-report] P3 beginner failed:', beginnerResponse.reason?.message);
           fallback = true;
         }
         if (professionalResponse.status === 'fulfilled') {
-          try {
-            p3ProfessionalResult = parseAIJson(professionalResponse.value);
-          } catch (error: any) {
-            console.error('[morning-report] P3 professional parse failed:', error.message);
-            fallback = true;
-          }
+          p3ProfessionalResult = professionalResponse.value;
         } else {
           console.error('[morning-report] P3 professional failed:', professionalResponse.reason?.message);
           fallback = true;
