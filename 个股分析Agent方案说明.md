@@ -138,6 +138,10 @@ interface AgentOpinion {
 
 统一接口 `GET /api/market-daily-kline?kind=stock&symbol=600519`（或 `kind=index&symbol=000001`）按 AKShare → TickFlow 免费日线 → Baostock → Pytdx 的顺序回退。每次返回均标记来源、回退层级、复权方式、日线频率、最后交易日和抓取时间；Pytdx 仅能提供未复权日线，因此其返回会明确标记为 `adjust: none`，不得与前复权序列混用。
 
+## 技术与市场 Agent：第三步市场环境快照
+
+`GET /api/market-environment` 以上证指数日线为基准，复用统一日线适配层计算指数趋势、动量、波动和回撤；同时接入既有市场脉冲的板块上涨广度、两市成交额、涨停/跌停家数。状态仅在“指数趋势 + 20日表现 + MACD + 板块广度”同向时标记为 `risk_on` 或 `risk_off`，否则为 `neutral`。每个输入和计算结果均带市场证据 ID；广度、成交额或涨跌停脉冲缺失时必须记录数据缺口并降低置信度。
+
 ## 当前数据缺口
 
 - 个股日线的第二、第三数据源回退链，以及除权除息和停牌等异常交易日的专门标记；

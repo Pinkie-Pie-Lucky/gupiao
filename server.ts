@@ -2637,6 +2637,16 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
     }
   });
 
+  // GET /api/market-environment — 指数趋势 + 市场广度/成交额/涨跌停脉冲的可审计快照
+  app.get('/api/market-environment', async (_req, res) => {
+    try {
+      res.json(await buildMarketEnvironmentSnapshot());
+    } catch (error: any) {
+      console.error('[market-environment] query failed:', error.message);
+      res.status(503).json({ error: '市场环境快照暂不可用', detail: error.message, dataUnavailable: true });
+    }
+  });
+
   // GET /api/stock-facts — 所有个股 Agent 共用的事实快照与证据 ID
   app.get('/api/stock-facts', async (req, res) => {
     try {
@@ -3775,6 +3785,81 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
     const bars = Array.isArray(payload?.bars) ? payload.bars : [];
     if (bars.length < 60) throw new Error('统一日线适配未返回足够数据');
     return { kind, symbol, bars, sourceMeta: { ...payload?.sourceMeta, fetchedAt: payload?.sourceMeta?.fetchedAt || new Date().toISOString() } };
+  }
+
+  let marketEnvironmentCache: { expiresAt: number; value: any } | null = null;
+
+  function makeMarketEvidenceId(key: string, period = 'current') {
+    return `market_environment:${key}:${period}`.replace(/[^a-zA-Z0-9:_-]/g, '_');
+  }
+
+  async function buildMarketEnvironmentSnapshot() {
+    if (marketEnvironmentCache && marketEnvironmentCache.expiresAt > Date.now()) {
+      return { ...marketEnvironmentCache.value, snapshotMeta: { ...marketEnvironmentCache.value.snapshotMeta, source: 'cache', freshness: 'stale' } };
+    }
+    const [indexResult, marketDataResult] = await Promise.allSettled([
+      fetchMarketDailyKline('index', '000001'),
+      fetchMarketData(),
+    ]);
+    if (indexResult.status !== 'fulfilled') throw indexResult.reason;
+    const indexData = indexResult.value;
+    const indexTechnical = calculateTechnicalMetrics(indexData.bars, String(indexData.sourceMeta?.adjust || 'none'));
+    const evidence: any[] = [];
+    const dataGaps: string[] = [];
+    const marketData: any = marketDataResult.status === 'fulfilled' ? marketDataResult.value : null;
+    if (!marketData) dataGaps.push(`市场广度和成交额暂不可用：${marketDataResult.status === 'rejected' ? marketDataResult.reason?.message || '数据源失败' : '未知原因'}`);
+
+    const indexPeriod = indexTechnical.period.end;
+    for (const key of ['change5d', 'change20d', 'change60d', 'ma20', 'ma50', 'ma200', 'macdHistogram', 'annualizedVolatility20d', 'maxDrawdown20d', 'trend']) {
+      const value = indexTechnical.metrics[key];
+      if (value === null || value === undefined) continue;
+      evidence.push({ evidenceId: makeMarketEvidenceId(`index_${key}`, indexPeriod), type: 'market', title: `上证指数 ${key}`, value: String(value), period: indexPeriod, source: indexData.sourceMeta.source, fetchedAt: indexData.sourceMeta.fetchedAt, freshness: 'delayed', verification: 'third_party' });
+    }
+    evidence.push({ evidenceId: makeMarketEvidenceId('index_close', indexPeriod), type: 'market', title: '上证指数收盘价', value: indexTechnical.latestBar.close, period: indexPeriod, source: indexData.sourceMeta.source, fetchedAt: indexData.sourceMeta.fetchedAt, freshness: 'delayed', verification: 'third_party' });
+
+    let breadth: any = null;
+    let turnover: any = null;
+    let marketPulse: any = null;
+    let temperature: any = null;
+    if (marketData) {
+      const breadthItems = marketData.marketPulse?.sectors?.length ? marketData.marketPulse.sectors : marketData.sectors || [];
+      const up = breadthItems.filter((item: any) => Number(item.changePercent) > 0).length;
+      const down = breadthItems.filter((item: any) => Number(item.changePercent) < 0).length;
+      const flat = Math.max(0, breadthItems.length - up - down);
+      breadth = breadthItems.length ? { scope: 'sector', up, down, flat, total: breadthItems.length, upRatio: up / breadthItems.length } : null;
+      turnover = Number(marketData.marketPulse?.turnoverAmount || marketData.volume || 0) || null;
+      marketPulse = marketData.marketPulse?.available ? { limitUp: Number(marketData.marketPulse.limitUp || 0), limitDown: Number(marketData.marketPulse.limitDown || 0), stockCount: Number(marketData.marketPulse.stockCount || 0) || null } : null;
+      temperature = calculateMarketTemperature(marketData);
+      if (!breadth) dataGaps.push('未取得板块广度，不能确认市场参与度。');
+      if (!turnover) dataGaps.push('未取得两市成交额。');
+      if (!marketPulse) dataGaps.push('未取得涨跌停脉冲。');
+    }
+    if (breadth) evidence.push({ evidenceId: makeMarketEvidenceId('sector_breadth', indexPeriod), type: 'market', title: '板块上涨广度', value: breadth.upRatio, period: indexPeriod, source: 'market_pulse', fetchedAt: new Date().toISOString(), freshness: 'realtime', verification: 'third_party' });
+    if (turnover) evidence.push({ evidenceId: makeMarketEvidenceId('turnover_amount', indexPeriod), type: 'market', title: '两市成交额', value: turnover, unit: 'CNY', period: indexPeriod, source: 'market_pulse', fetchedAt: new Date().toISOString(), freshness: 'realtime', verification: 'third_party' });
+    if (marketPulse) {
+      evidence.push({ evidenceId: makeMarketEvidenceId('limit_up', indexPeriod), type: 'market', title: '涨停家数', value: marketPulse.limitUp, period: indexPeriod, source: 'market_pulse', fetchedAt: new Date().toISOString(), freshness: 'realtime', verification: 'third_party' });
+      evidence.push({ evidenceId: makeMarketEvidenceId('limit_down', indexPeriod), type: 'market', title: '跌停家数', value: marketPulse.limitDown, period: indexPeriod, source: 'market_pulse', fetchedAt: new Date().toISOString(), freshness: 'realtime', verification: 'third_party' });
+    }
+
+    const trend = indexTechnical.metrics.trend;
+    const change20d = finiteNumber(indexTechnical.metrics.change20d);
+    const histogram = finiteNumber(indexTechnical.metrics.macdHistogram);
+    let state: 'risk_on' | 'neutral' | 'risk_off' = 'neutral';
+    let stateReason = '指数趋势或市场参与度未形成同向确认。';
+    if (breadth && trend === 'bullish' && (change20d || 0) > 0 && (histogram || 0) >= 0 && breadth.upRatio > 0.5) {
+      state = 'risk_on'; stateReason = '指数趋势、20日表现、MACD动量与板块广度同向偏强。';
+    } else if (breadth && trend === 'bearish' && (change20d || 0) < 0 && (histogram || 0) <= 0 && breadth.upRatio < 0.5) {
+      state = 'risk_off'; stateReason = '指数趋势、20日表现、MACD动量与板块广度同向偏弱。';
+    }
+    const confidence = !breadth ? { level: 'limited', reason: '缺少市场广度，环境状态仅由指数结构支持。' } : dataGaps.length ? { level: 'medium', reason: '指数与广度可用，但部分市场脉冲字段缺失。' } : { level: 'medium', reason: '状态由指数结构与板块广度确定，尚未引入行业相对强弱。' };
+    const value = {
+      benchmark: { symbol: '000001', name: '上证指数', technical: indexTechnical, sourceMeta: indexData.sourceMeta },
+      breadth, turnover: turnover ? { amount: turnover, temperature: temperature?.components?.turnover || null } : null,
+      marketPulse, marketRegime: { state, reason: stateReason, confidence }, evidence, dataGaps: [...new Set(dataGaps)],
+      snapshotMeta: { generatedAt: new Date().toISOString(), source: 'live', freshness: breadth ? 'realtime' : 'delayed', evidenceCount: evidence.length, marketStatus: getMarketStatus() },
+    };
+    marketEnvironmentCache = { expiresAt: Date.now() + 5 * 60_000, value };
+    return value;
   }
 
   const stockFactSnapshotCache = new Map<string, { expiresAt: number; value: any }>();
