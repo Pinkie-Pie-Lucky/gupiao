@@ -8,6 +8,8 @@ import path from 'path';
 import fs from 'node:fs';
 import https from 'node:https';
 import http from 'node:http';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { createServer as createViteServer } from 'vite';
 import OpenAI from 'openai';
 import dotenv from 'dotenv';
@@ -15,6 +17,7 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 const AI_MODEL = process.env.AI_MODEL || 'deepseek-v4-flash';
+const execFileAsync = promisify(execFile);
 
 let aiClient: OpenAI | null = null;
 
@@ -2572,6 +2575,21 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
     }
   });
 
+  // GET /api/cninfo/announcements — 官方公告检索，为财报与风险证据链提供原始来源
+  app.get('/api/cninfo/announcements', async (req, res) => {
+    try {
+      const symbol = String(req.query.symbol || '');
+      const today = new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Shanghai' }).replaceAll('-', '');
+      const startDate = String(req.query.startDate || `${today.slice(0, 4)}0101`);
+      const endDate = String(req.query.endDate || today);
+      const category = String(req.query.category || '');
+      res.json(await fetchCninfoAnnouncements(symbol, startDate, endDate, category));
+    } catch (error: any) {
+      console.error('[cninfo] announcement query failed:', error.message);
+      res.status(503).json({ error: 'CNINFO 公告暂不可用', detail: error.message, dataUnavailable: true });
+    }
+  });
+
   // GET /api/sectors — 东方财富真实板块数据，供 MarketMapTab 使用
   app.get('/api/sectors', async (_req, res) => {
     try {
@@ -3353,6 +3371,23 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
     const stale = stockQuoteSnapshotCache.get(symbol.code);
     if (stale) return { quote: stale.quote, sourceMeta: { ...stale.sourceMeta, source: 'cache', fetchedAt: new Date().toISOString(), freshness: 'stale', confidence: 'limited', fallbackLevel: 3, asOf: stale.sourceMeta.fetchedAt } };
     throw new Error(`暂无 ${symbol.code} 的可用行情`);
+  }
+
+  async function fetchCninfoAnnouncements(symbol: string, startDate: string, endDate: string, category = '') {
+    if (!/^\d{6}$/.test(symbol)) throw new Error('symbol 应为 6 位证券代码');
+    if (!/^\d{8}$/.test(startDate) || !/^\d{8}$/.test(endDate)) throw new Error('日期应为 YYYYMMDD');
+    const python = process.env.AKSHARE_PYTHON || 'py';
+    const pythonArgs = process.env.AKSHARE_PYTHON
+      ? [path.join(process.cwd(), 'scripts', 'cninfo_announcements.py'), symbol, startDate, endDate, category]
+      : ['-3.14', path.join(process.cwd(), 'scripts', 'cninfo_announcements.py'), symbol, startDate, endDate, category];
+    const { stdout } = await execFileAsync(python, pythonArgs, { timeout: 45_000, windowsHide: true, maxBuffer: 2 * 1024 * 1024 });
+    const payload = JSON.parse(stdout);
+    return {
+      announcements: Array.isArray(payload?.announcements) ? payload.announcements : [],
+      sourceMeta: {
+        source: 'cninfo', fetchedAt: new Date().toISOString(), freshness: 'delayed', confidence: 'official', fallbackLevel: 0,
+      },
+    };
   }
 
   function findSectorInsight(sectorName: string, fallback: string, watchPoints: string[]) {
