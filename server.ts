@@ -2616,6 +2616,17 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
     }
   });
 
+  // GET /api/stock-facts — 所有个股 Agent 共用的事实快照与证据 ID
+  app.get('/api/stock-facts', async (req, res) => {
+    try {
+      const symbol = String(req.query.symbol || '');
+      if (!symbol) return res.status(400).json({ error: 'symbol is required' });
+      res.json(await buildStockFactSnapshot(symbol));
+    } catch (error: any) {
+      res.status(503).json({ error: error.message || '个股事实快照暂不可用', dataUnavailable: true });
+    }
+  });
+
   // GET /api/sectors — 东方财富真实板块数据，供 MarketMapTab 使用
   app.get('/api/sectors', async (_req, res) => {
     try {
@@ -3457,6 +3468,78 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
     const payload = await runXueqiuAdapter(['heat']);
     const value = { items: Array.isArray(payload?.items) ? payload.items : [], sourceMeta: { source: 'xueqiu', fetchedAt: new Date().toISOString(), freshness: 'delayed', confidence: 'sentiment', fallbackLevel: 0 } };
     xueqiuHeatCache = { expiresAt: Date.now() + 15 * 60 * 1000, value };
+    return value;
+  }
+
+  const stockFactSnapshotCache = new Map<string, { expiresAt: number; value: any }>();
+
+  function makeEvidenceId(symbol: string, type: string, key: string, period = 'current') {
+    return `${type}:${symbol}:${key}:${period}`.replace(/[^a-zA-Z0-9:_-]/g, '_');
+  }
+
+  async function buildStockFactSnapshot(input: string) {
+    const symbol = normalizeAshareSymbol(input).code;
+    const cached = stockFactSnapshotCache.get(symbol);
+    if (cached && cached.expiresAt > Date.now()) {
+      return { ...cached.value, snapshotMeta: { ...cached.value.snapshotMeta, source: 'cache', freshness: 'stale' } };
+    }
+    const today = new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Shanghai' }).replaceAll('-', '');
+    const startDate = `${today.slice(0, 4)}0101`;
+    const [quoteResult, financialResult, announcementResult, profileResult, heatResult] = await Promise.allSettled([
+      fetchAshareStockQuoteWithFallback(symbol),
+      fetchFinancialSummary(symbol),
+      fetchCninfoAnnouncements(symbol, startDate, today),
+      fetchXueqiuProfile(symbol),
+      fetchXueqiuHeat(),
+    ]);
+    const evidence: any[] = [];
+    const dataGaps: Array<{ source: string; reason: string }> = [];
+    const fulfilled = <T>(result: PromiseSettledResult<T>, source: string): T | null => {
+      if (result.status === 'fulfilled') return result.value;
+      dataGaps.push({ source, reason: result.reason?.message || '数据源暂不可用' });
+      return null;
+    };
+    const quoteData: any = fulfilled(quoteResult, 'market_quote');
+    const financialData: any = fulfilled(financialResult, 'financial_summary');
+    const announcementData: any = fulfilled(announcementResult, 'cninfo');
+    const profileData: any = fulfilled(profileResult, 'xueqiu_profile');
+    const heatData: any = fulfilled(heatResult, 'xueqiu_heat');
+
+    if (quoteData?.quote) {
+      const quote = quoteData.quote;
+      for (const key of ['price', 'change', 'changePercent', 'volume', 'amount', 'previousClose', 'open', 'high', 'low']) {
+        if (quote[key] === null || quote[key] === undefined) continue;
+        evidence.push({ evidenceId: makeEvidenceId(symbol, 'market', key, String(quote.asOf || quoteData.sourceMeta.fetchedAt)), type: 'market', title: `${quote.name} ${key}`, value: quote[key], source: quoteData.sourceMeta.source, fetchedAt: quoteData.sourceMeta.fetchedAt, freshness: quoteData.sourceMeta.freshness, verification: 'third_party' });
+      }
+    }
+    for (const report of financialData?.reports || []) {
+      for (const [key, value] of Object.entries(report.metrics || {})) {
+        if (value === null || value === undefined) continue;
+        evidence.push({ evidenceId: makeEvidenceId(symbol, 'financial', key, report.period), type: 'financial', title: `${report.period} ${key}`, value, period: report.period, source: financialData.sourceMeta.source, fetchedAt: financialData.sourceMeta.fetchedAt, freshness: financialData.sourceMeta.freshness, verification: financialData.sourceMeta.officialStatus || 'third_party' });
+      }
+    }
+    for (const item of (announcementData?.announcements || []).slice(0, 20)) {
+      evidence.push({ evidenceId: makeEvidenceId(symbol, 'announcement', item.title, item.publishedAt), type: 'announcement', title: item.title, source: 'cninfo', sourceUrl: item.url, publishedAt: item.publishedAt, fetchedAt: announcementData.sourceMeta.fetchedAt, freshness: announcementData.sourceMeta.freshness, verification: 'official_verified' });
+    }
+    for (const [key, value] of Object.entries(profileData?.profile || {})) {
+      if (!value) continue;
+      evidence.push({ evidenceId: makeEvidenceId(symbol, 'profile', key), type: 'industry', title: key, value: String(value), source: profileData.sourceMeta.source, fetchedAt: profileData.sourceMeta.fetchedAt, freshness: profileData.sourceMeta.freshness, verification: 'third_party' });
+    }
+    const heatItem = (heatData?.items || []).find((item: any) => String(item['股票代码'] || '').endsWith(symbol));
+    if (heatItem) {
+      evidence.push({ evidenceId: makeEvidenceId(symbol, 'sentiment', 'hot_tweet'), type: 'sentiment', title: '雪球热门讨论榜', value: heatItem['关注'], source: heatData.sourceMeta.source, fetchedAt: heatData.sourceMeta.fetchedAt, freshness: heatData.sourceMeta.freshness, verification: 'third_party' });
+    } else {
+      dataGaps.push({ source: 'xueqiu_heat', reason: '该股票未进入当前热门讨论榜' });
+    }
+    const value = {
+      symbol,
+      company: { name: quoteData?.quote?.name || profileData?.profile?.org_short_name_cn || symbol, profile: profileData?.profile || {} },
+      facts: { quote: quoteData?.quote || null, financialReports: financialData?.reports || [], announcements: announcementData?.announcements?.slice(0, 20) || [], sentiment: heatItem || null },
+      evidence,
+      dataGaps,
+      snapshotMeta: { generatedAt: new Date().toISOString(), source: 'live', freshness: 'realtime', evidenceCount: evidence.length },
+    };
+    stockFactSnapshotCache.set(symbol, { expiresAt: Date.now() + 60_000, value });
     return value;
   }
 
