@@ -2590,6 +2590,32 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
     }
   });
 
+  // GET /api/stock-financials — 标准化关键财务指标；CNINFO 公告用于对应报告期核验
+  app.get('/api/stock-financials', async (req, res) => {
+    try {
+      res.json(await fetchFinancialSummary(String(req.query.symbol || '')));
+    } catch (error: any) {
+      console.error('[financials] summary query failed:', error.message);
+      res.status(503).json({ error: '结构化财务指标暂不可用', detail: error.message, dataUnavailable: true });
+    }
+  });
+
+  app.get('/api/xueqiu/profile', async (req, res) => {
+    try {
+      res.json(await fetchXueqiuProfile(String(req.query.symbol || '')));
+    } catch (error: any) {
+      res.status(503).json({ error: '雪球公司画像暂不可用', detail: error.message, dataUnavailable: true });
+    }
+  });
+
+  app.get('/api/xueqiu/heat', async (_req, res) => {
+    try {
+      res.json(await fetchXueqiuHeat());
+    } catch (error: any) {
+      res.status(503).json({ error: '雪球热度暂不可用', detail: error.message, dataUnavailable: true });
+    }
+  });
+
   // GET /api/sectors — 东方财富真实板块数据，供 MarketMapTab 使用
   app.get('/api/sectors', async (_req, res) => {
     try {
@@ -3388,6 +3414,50 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
         source: 'cninfo', fetchedAt: new Date().toISOString(), freshness: 'delayed', confidence: 'official', fallbackLevel: 0,
       },
     };
+  }
+
+  async function fetchFinancialSummary(symbol: string) {
+    if (!/^\d{6}$/.test(symbol)) throw new Error('symbol 应为 6 位证券代码');
+    const python = process.env.AKSHARE_PYTHON || 'py';
+    const args = process.env.AKSHARE_PYTHON
+      ? [path.join(process.cwd(), 'scripts', 'financial_summary.py'), symbol]
+      : ['-3.14', path.join(process.cwd(), 'scripts', 'financial_summary.py'), symbol];
+    const { stdout } = await execFileAsync(python, args, { timeout: 45_000, windowsHide: true, maxBuffer: 2 * 1024 * 1024 });
+    const payload = JSON.parse(stdout);
+    return {
+      reports: Array.isArray(payload?.reports) ? payload.reports : [],
+      sourceMeta: { source: 'sina_financial_summary', fetchedAt: new Date().toISOString(), freshness: 'delayed', confidence: 'market', fallbackLevel: 0, officialStatus: 'official_document_only' },
+    };
+  }
+
+  const xueqiuProfileCache = new Map<string, { expiresAt: number; value: any }>();
+  let xueqiuHeatCache: { expiresAt: number; value: any } | null = null;
+
+  async function runXueqiuAdapter(args: string[]) {
+    const python = process.env.AKSHARE_PYTHON || 'py';
+    const commandArgs = process.env.AKSHARE_PYTHON
+      ? [path.join(process.cwd(), 'scripts', 'xueqiu_insights.py'), ...args]
+      : ['-3.14', path.join(process.cwd(), 'scripts', 'xueqiu_insights.py'), ...args];
+    const { stdout } = await execFileAsync(python, commandArgs, { timeout: 60_000, windowsHide: true, maxBuffer: 3 * 1024 * 1024 });
+    return JSON.parse(stdout);
+  }
+
+  async function fetchXueqiuProfile(symbol: string) {
+    if (!/^\d{6}$/.test(symbol)) throw new Error('symbol 应为 6 位证券代码');
+    const cached = xueqiuProfileCache.get(symbol);
+    if (cached && cached.expiresAt > Date.now()) return { ...cached.value, sourceMeta: { ...cached.value.sourceMeta, source: 'cache', freshness: 'stale', fallbackLevel: 1 } };
+    const payload = await runXueqiuAdapter(['profile', symbol]);
+    const value = { profile: payload?.profile || {}, sourceMeta: { source: 'xueqiu', fetchedAt: new Date().toISOString(), freshness: 'delayed', confidence: 'market', fallbackLevel: 0 } };
+    xueqiuProfileCache.set(symbol, { expiresAt: Date.now() + 7 * 24 * 60 * 60 * 1000, value });
+    return value;
+  }
+
+  async function fetchXueqiuHeat() {
+    if (xueqiuHeatCache && xueqiuHeatCache.expiresAt > Date.now()) return { ...xueqiuHeatCache.value, sourceMeta: { ...xueqiuHeatCache.value.sourceMeta, source: 'cache', freshness: 'stale', fallbackLevel: 1 } };
+    const payload = await runXueqiuAdapter(['heat']);
+    const value = { items: Array.isArray(payload?.items) ? payload.items : [], sourceMeta: { source: 'xueqiu', fetchedAt: new Date().toISOString(), freshness: 'delayed', confidence: 'sentiment', fallbackLevel: 0 } };
+    xueqiuHeatCache = { expiresAt: Date.now() + 15 * 60 * 1000, value };
+    return value;
   }
 
   function findSectorInsight(sectorName: string, fallback: string, watchPoints: string[]) {
