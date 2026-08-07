@@ -116,6 +116,8 @@ export interface ReasoningStep {
   text: string;
   evidenceIds: string[];
   kind: ReasoningStepKind;
+  stepType?: 'event' | 'market' | 'mechanism';
+  relationshipConfidence?: 'strong' | 'medium' | 'weak';
 }
 
 export interface ReasoningChain {
@@ -124,6 +126,10 @@ export interface ReasoningChain {
   uncertainty: string;
   confidenceLevel: ConfidenceLevel;
   validationStatus: 'passed' | 'limited' | 'rejected';
+  beginnerSummary?: string;
+  professionalSummary?: string;
+  supportingEvidence?: string[];
+  counterEvidence?: string[];
 }
 
 export interface TeacherStoryContent {
