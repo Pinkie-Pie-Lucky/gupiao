@@ -1546,34 +1546,7 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
       { secid: '0.399006', name: '创业板指', code: '399006' },
     ];
 
-    const indexPromises = indexDefs.map(async ({ secid, name, code }) => {
-      try {
-        // 注意：东方财富HTTPS在此环境下会ECONNRESET，必须使用HTTP
-        const data = await httpGetJSON(`http://push2.eastmoney.com/api/qt/stock/get?secid=${secid}&fields=f43,f44,f45,f46,f47,f48,f60,f170,f100`);
-        const d = data?.data;
-        if (!d || d.f43 === undefined) throw new Error('Empty East Money response');
-        // 东方财富返回的价格是整数（如376415代表3764.15），需要除以100
-        const price = d.f43 / 100;
-        const changePercent = d.f170 / 100;
-        return {
-          name,
-          code,
-          price: Math.round(price * 100) / 100,
-          changePercent: Math.round(changePercent * 100) / 100,
-          high: Number.isFinite(Number(d.f44)) ? d.f44 / 100 : null,
-          low: Number.isFinite(Number(d.f45)) ? d.f45 / 100 : null,
-          previousClose: Number.isFinite(Number(d.f60)) ? d.f60 / 100 : null,
-          volume: d.f47 || 0,
-          amount: d.f48 || 0,
-        };
-      } catch (e: any) {
-        console.error(`[fetchMarketData] East Money ${name} failed:`, e.message);
-        return null;
-      }
-    });
-
-    // 东财在部分网络环境会出现 socket hang up。腾讯行情仅作为指数回退：
-    // 它补齐三大指数，不伪造板块、资金或新闻数据。
+    // 指数与板块的数据语义不同：指数走多源回退，板块全量数据暂保持独立来源。
     async function fetchTencentIndices() {
       const definitions = [
         { symbol: 's_sh000001', name: '上证指数', code: '000001' },
@@ -1602,6 +1575,97 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
           previousClose: null,
         };
       }).filter(Boolean);
+    }
+
+    async function fetchSinaIndices() {
+      const definitions = [
+        { symbol: 's_sh000001', name: '上证指数', code: '000001' },
+        { symbol: 's_sz399001', name: '深证成指', code: '399001' },
+        { symbol: 's_sz399006', name: '创业板指', code: '399006' },
+      ];
+      const text = await httpGetText(
+        `https://hq.sinajs.cn/list=${definitions.map((item) => item.symbol).join(',')}`,
+        'https://finance.sina.com.cn/',
+      );
+      return definitions.map((definition) => {
+        const matched = text.match(new RegExp(`hq_str_${definition.symbol}="([^"]*)"`));
+        const fields = matched?.[1]?.split(',') || [];
+        const price = Number(fields[1]);
+        const changePercent = Number(fields[3]);
+        if (!Number.isFinite(price) || !Number.isFinite(changePercent)) return null;
+        return {
+          name: definition.name,
+          code: definition.code,
+          price: Math.round(price * 100) / 100,
+          changePercent: Math.round(changePercent * 100) / 100,
+          volume: Number(fields[4]) || 0,
+          amount: Number(fields[5]) || 0,
+          high: null,
+          low: null,
+          previousClose: null,
+        };
+      }).filter(Boolean);
+    }
+
+    async function fetchXueqiuIndices() {
+      const definitions = [
+        { symbol: 'SH000001', name: '上证指数', code: '000001' },
+        { symbol: 'SZ399001', name: '深证成指', code: '399001' },
+        { symbol: 'SZ399006', name: '创业板指', code: '399006' },
+      ];
+      const data = await httpGetJSON(`https://stock.xueqiu.com/v5/stock/realtime/quotec.json?symbol=${definitions.map((item) => item.symbol).join(',')}`);
+      const quotes = Array.isArray(data?.data) ? data.data : [];
+      return definitions.map((definition) => {
+        const quote = quotes.find((item: any) => item.symbol === definition.symbol);
+        const price = Number(quote?.current);
+        const changePercent = Number(quote?.percent);
+        if (!Number.isFinite(price) || !Number.isFinite(changePercent)) return null;
+        return {
+          name: definition.name,
+          code: definition.code,
+          price: Math.round(price * 100) / 100,
+          changePercent: Math.round(changePercent * 100) / 100,
+          volume: Number(quote?.volume) || 0,
+          amount: Number(quote?.amount) || 0,
+          high: Number.isFinite(Number(quote?.high)) ? Number(quote.high) : null,
+          low: Number.isFinite(Number(quote?.low)) ? Number(quote.low) : null,
+          previousClose: Number.isFinite(Number(quote?.last_close)) ? Number(quote.last_close) : null,
+        };
+      }).filter(Boolean);
+    }
+
+    async function fetchAshareIndicesWithFallback() {
+      const sharedState = fetchMarketData as any;
+      const providers = [
+        { source: 'tencent', fetcher: fetchTencentIndices },
+        { source: 'sina', fetcher: fetchSinaIndices },
+        { source: 'xueqiu', fetcher: fetchXueqiuIndices },
+      ];
+      for (let index = 0; index < providers.length; index += 1) {
+        const provider = providers[index];
+        try {
+          const indices = await provider.fetcher();
+          if (indices.length === indexDefs.length) {
+            const result = {
+              indices,
+              sourceMeta: { source: provider.source, fetchedAt: new Date().toISOString(), freshness: 'realtime', confidence: 'market', fallbackLevel: index },
+            };
+            sharedState._indexSnapshot = result;
+            return result;
+          }
+          throw new Error(`incomplete indices: ${indices.length}/${indexDefs.length}`);
+        } catch (error: any) {
+          console.warn(`[market-source] ${provider.source} indices failed:`, error.message);
+        }
+      }
+      const stale = sharedState._indexSnapshot;
+      if (stale?.indices?.length) {
+        return {
+          indices: stale.indices,
+          sourceMeta: { ...stale.sourceMeta, source: 'cache', fetchedAt: new Date().toISOString(), freshness: 'stale', confidence: 'limited', fallbackLevel: 3, asOf: stale.sourceMeta.fetchedAt },
+        };
+      }
+      return { indices: [], sourceMeta: { source: 'cache', fetchedAt: new Date().toISOString(), freshness: 'stale', confidence: 'limited', fallbackLevel: 3 } };
     }
 
     async function fetchSectors(): Promise<any[]> {
@@ -1806,32 +1870,16 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
       }
     }
 
-    const [sectors, marketPulse, newsResult, rawIndices] = await Promise.all([
+    const [sectors, marketPulse, newsResult, indexResult] = await Promise.all([
       fetchSectors(),
       fetchMarketPulse(),
       httpGetJSON(WSCN_NEWS).catch((e: any) => {
         console.error('[fetchMarketData] WallStreetCN news failed:', e.message);
         return null;
       }),
-      Promise.all(indexPromises),
+      fetchAshareIndicesWithFallback(),
     ]);
-
-    let indices = rawIndices.filter(Boolean);
-    if (indices.length < indexDefs.length) {
-      try {
-        const tencentIndices = await fetchTencentIndices();
-        const indexByCode = new Map(indices.map((item: any) => [item.code, item]));
-        tencentIndices.forEach((item: any) => {
-          if (!indexByCode.has(item.code)) indexByCode.set(item.code, item);
-        });
-        indices = indexDefs
-          .map((definition) => indexByCode.get(definition.code))
-          .filter(Boolean);
-        console.info('[fetchMarketData] Tencent quote fallback filled missing indices');
-      } catch (error: any) {
-        console.error('[fetchMarketData] Tencent index fallback failed:', error.message);
-      }
-    }
+    const indices = indexResult.indices;
 
     const newsItems = (newsResult?.data?.items || [])
       .map((item: any, index: number) => {
@@ -1865,6 +1913,7 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
       newsItems,
       volume,
       marketPulse,
+      sourceMeta: { indices: indexResult.sourceMeta },
       timestamp: new Date(),
     };
   }
@@ -2599,6 +2648,7 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
         totalVolume: marketData.marketPulse.turnoverAmount || marketData.volume,
         marketTemperature,
         timestamp: marketData.timestamp,
+        sourceMeta: marketData.sourceMeta || null,
         marketStatus: getMarketStatus(),
       });
     } catch (error: any) {
