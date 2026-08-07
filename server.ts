@@ -3627,55 +3627,128 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
     return value === null || !Number.isFinite(value) ? null : Math.round(value * 10 ** digits) / 10 ** digits;
   }
 
-  function calculateTechnicalMetrics(bars: any[]) {
+  function rollingAverage(values: number[], period: number) {
+    return values.map((_value, index) => index + 1 < period ? null : average(values.slice(index - period + 1, index + 1)));
+  }
+
+  function emaSeries(values: number[], period: number) {
+    const result: Array<number | null> = Array(values.length).fill(null);
+    if (values.length < period) return result;
+    const multiplier = 2 / (period + 1);
+    let current = average(values.slice(0, period))!;
+    result[period - 1] = current;
+    for (let index = period; index < values.length; index += 1) {
+      current = values[index] * multiplier + current * (1 - multiplier);
+      result[index] = current;
+    }
+    return result;
+  }
+
+  function rollingRsi(values: number[], period: number) {
+    return values.map((_value, index) => {
+      if (index < period) return null;
+      const moves = values.slice(index - period, index + 1).map((value, moveIndex, list) => moveIndex ? value - list[moveIndex - 1] : null).filter((value): value is number => value !== null);
+      const gains = average(moves.map((value) => Math.max(0, value)));
+      const losses = average(moves.map((value) => Math.max(0, -value)));
+      return gains === null || losses === null ? null : losses === 0 ? 100 : 100 - 100 / (1 + gains / losses);
+    });
+  }
+
+  function latestSeriesChange(values: Array<number | null>, days: number) {
+    const latestIndex = values.length - 1;
+    const current = values[latestIndex];
+    const prior = values[latestIndex - days];
+    return current === null || current === undefined || prior === null || prior === undefined ? null : current - prior;
+  }
+
+  function percentileRank(current: number | null, history: Array<number | null>) {
+    const values = history.filter((value): value is number => value !== null && Number.isFinite(value));
+    if (current === null || !values.length) return null;
+    return values.filter((value) => value <= current).length / values.length;
+  }
+
+  function maxDrawdown(values: number[]) {
+    if (!values.length) return null;
+    let peak = values[0]; let drawdown = 0;
+    for (const value of values) {
+      peak = Math.max(peak, value);
+      drawdown = Math.min(drawdown, value / peak - 1);
+    }
+    return drawdown;
+  }
+
+  function latestCross(left: Array<number | null>, right: Array<number | null>, dates: string[]) {
+    for (let index = left.length - 1; index > 0; index -= 1) {
+      const previousLeft = left[index - 1], previousRight = right[index - 1], currentLeft = left[index], currentRight = right[index];
+      if ([previousLeft, previousRight, currentLeft, currentRight].some((value) => value === null)) continue;
+      if (previousLeft! <= previousRight! && currentLeft! > currentRight!) return { type: 'golden_cross', date: dates[index] };
+      if (previousLeft! >= previousRight! && currentLeft! < currentRight!) return { type: 'death_cross', date: dates[index] };
+    }
+    return null;
+  }
+
+  function calculateTechnicalMetrics(bars: any[], adjust = 'qfq') {
     const cleanBars = bars.filter((bar: any) => [bar.close, bar.high, bar.low, bar.volume].every((value) => Number.isFinite(Number(value)))).sort((a: any, b: any) => String(a.date).localeCompare(String(b.date)));
     if (cleanBars.length < 60) throw new Error('可用日线不足 60 个交易日，无法计算技术指标');
     const closes = cleanBars.map((bar: any) => Number(bar.close));
     const volumes = cleanBars.map((bar: any) => Number(bar.volume));
+    const dates = cleanBars.map((bar: any) => String(bar.date));
     const latest = cleanBars.at(-1);
-    const sma = (period: number) => average(closes.slice(-period));
+    const ma20Series = rollingAverage(closes, 20);
+    const ma50Series = rollingAverage(closes, 50);
+    const ma200Series = rollingAverage(closes, 200);
+    const ma20 = ma20Series.at(-1), ma50 = ma50Series.at(-1), ma200 = ma200Series.at(-1);
     const change = (days: number) => closes.length > days ? closes.at(-1)! / closes.at(-days - 1)! - 1 : null;
-    const gains: number[] = [], losses: number[] = [];
-    for (let index = closes.length - 14; index < closes.length; index += 1) {
-      const difference = closes[index] - closes[index - 1];
-      gains.push(Math.max(0, difference)); losses.push(Math.max(0, -difference));
-    }
-    const avgGain = average(gains); const avgLoss = average(losses);
-    const rsi14 = avgGain === null || avgLoss === null ? null : avgLoss === 0 ? 100 : 100 - 100 / (1 + avgGain / avgLoss);
-    const trueRanges: number[] = [];
-    for (let index = Math.max(1, cleanBars.length - 14); index < cleanBars.length; index += 1) {
-      const bar = cleanBars[index]; const previousClose = closes[index - 1];
-      trueRanges.push(Math.max(Number(bar.high) - Number(bar.low), Math.abs(Number(bar.high) - previousClose), Math.abs(Number(bar.low) - previousClose)));
-    }
-    const ema12 = exponentialMovingAverage(closes, 12);
-    const ema26 = exponentialMovingAverage(closes, 26);
-    const macd = ema12 !== null && ema26 !== null ? ema12 - ema26 : null;
-    const macdSeries = closes.map((_value, index) => {
-      const short = exponentialMovingAverage(closes.slice(0, index + 1), 12);
-      const long = exponentialMovingAverage(closes.slice(0, index + 1), 26);
-      return short !== null && long !== null ? short - long : null;
-    }).filter((value): value is number => value !== null);
-    const macdSignal = exponentialMovingAverage(macdSeries, 9);
-    const return20 = closes.slice(-21).map((value, index, values) => index ? Math.log(value / values[index - 1]) : null).filter((value): value is number => value !== null);
+    const rsiSeries = rollingRsi(closes, 14);
+    const rsi14 = rsiSeries.at(-1) ?? null;
+    const trueRanges = cleanBars.map((bar: any, index: number) => index === 0 ? null : Math.max(Number(bar.high) - Number(bar.low), Math.abs(Number(bar.high) - closes[index - 1]), Math.abs(Number(bar.low) - closes[index - 1])));
+    const atrSeries = trueRanges.map((_value, index) => index < 14 ? null : average(trueRanges.slice(index - 13, index + 1).filter((value): value is number => value !== null)));
+    const atr14 = atrSeries.at(-1) ?? null;
+    const ema12Series = emaSeries(closes, 12), ema26Series = emaSeries(closes, 26);
+    const macdSeries = closes.map((_value, index) => ema12Series[index] !== null && ema26Series[index] !== null ? ema12Series[index]! - ema26Series[index]! : null);
+    const validMacdIndexes = macdSeries.map((value, index) => value === null ? null : index).filter((value): value is number => value !== null);
+    const compactSignal = emaSeries(validMacdIndexes.map((index) => macdSeries[index]!), 9);
+    const macdSignalSeries: Array<number | null> = Array(closes.length).fill(null);
+    validMacdIndexes.forEach((index, compactIndex) => { macdSignalSeries[index] = compactSignal[compactIndex]; });
+    const macdHistogramSeries = macdSeries.map((value, index) => value !== null && macdSignalSeries[index] !== null ? value - macdSignalSeries[index]! : null);
+    const macd = macdSeries.at(-1) ?? null, macdSignal = macdSignalSeries.at(-1) ?? null, macdHistogram = macdHistogramSeries.at(-1) ?? null;
+    const logReturns = closes.map((value, index) => index ? Math.log(value / closes[index - 1]) : null);
+    const volatilitySeries = logReturns.map((_value, index) => index < 20 ? null : (standardDeviation(logReturns.slice(index - 19, index + 1).filter((value): value is number => value !== null)) || 0) * Math.sqrt(252));
+    const annualizedVolatility20d = volatilitySeries.at(-1) ?? null;
     const highest52w = Math.max(...cleanBars.slice(-252).map((bar: any) => Number(bar.high)));
     const lowest52w = Math.min(...cleanBars.slice(-252).map((bar: any) => Number(bar.low)));
-    const ma20 = sma(20), ma50 = sma(50), ma200 = sma(200);
-    const trend = ma20 !== null && ma50 !== null && latest.close > ma20 && ma20 > ma50 ? 'bullish' : ma20 !== null && ma50 !== null && latest.close < ma20 && ma20 < ma50 ? 'bearish' : 'neutral';
+    const trendAt = (index: number) => ma20Series[index] !== null && ma50Series[index] !== null && closes[index] > ma20Series[index]! && ma20Series[index]! > ma50Series[index]! ? 'bullish' : ma20Series[index] !== null && ma50Series[index] !== null && closes[index] < ma20Series[index]! && ma20Series[index]! < ma50Series[index]! ? 'bearish' : 'neutral';
+    const trend = trendAt(cleanBars.length - 1);
+    let trendDuration = 0;
+    for (let index = cleanBars.length - 1; index >= 0 && trendAt(index) === trend; index -= 1) trendDuration += 1;
+    const recentVolumes = volumes.slice(-21, -1);
+    const volumeRatio20d = divide(Number(latest.volume), average(recentVolumes));
+    const priceDirections = cleanBars.slice(-20).map((bar: any, index: number, selected: any[]) => index === 0 ? null : Number(bar.close) - Number(selected[index - 1].close));
+    const upVolume = cleanBars.slice(-20).reduce((sum: number, bar: any, index: number, selected: any[]) => index && Number(bar.close) > Number(selected[index - 1].close) ? sum + Number(bar.volume) : sum, 0);
+    const downVolume = cleanBars.slice(-20).reduce((sum: number, bar: any, index: number, selected: any[]) => index && Number(bar.close) < Number(selected[index - 1].close) ? sum + Number(bar.volume) : sum, 0);
+    const turnoverSeries = cleanBars.map((bar: any) => Number.isFinite(Number(bar.turnover)) ? Number(bar.turnover) : null);
+    const turnover = turnoverSeries.at(-1) ?? null;
+    const turnoverAvg20d = average(turnoverSeries.slice(-21, -1).filter((value): value is number => value !== null));
+    const lastDailyMove = priceDirections.at(-1) ?? null;
+    const priceVolumeState = lastDailyMove === null || volumeRatio20d === null ? 'data_insufficient' : lastDailyMove > 0 && volumeRatio20d >= 1 ? 'up_volume_confirmed' : lastDailyMove > 0 ? 'up_volume_unconfirmed' : lastDailyMove < 0 && volumeRatio20d >= 1 ? 'down_volume_expanded' : lastDailyMove < 0 ? 'down_volume_contracting' : 'flat';
     return {
-      period: { start: cleanBars[0].date, end: latest.date, barCount: cleanBars.length, adjust: 'qfq' },
+      period: { start: cleanBars[0].date, end: latest.date, barCount: cleanBars.length, adjust },
       latestBar: latest,
       metrics: {
         change5d: roundMetric(change(5)), change20d: roundMetric(change(20)), change60d: roundMetric(change(60)),
         ma20: roundMetric(ma20, 3), ma50: roundMetric(ma50, 3), ma200: roundMetric(ma200, 3),
-        rsi14: roundMetric(rsi14, 2), atr14: roundMetric(average(trueRanges), 3),
-        annualizedVolatility20d: roundMetric((standardDeviation(return20) || 0) * Math.sqrt(252)),
-        volumeRatio20d: roundMetric(divide(Number(latest.volume), average(volumes.slice(-21, -1)))),
-        macd: roundMetric(macd, 4), macdSignal: roundMetric(macdSignal, 4), macdHistogram: roundMetric(macd !== null && macdSignal !== null ? macd - macdSignal : null, 4),
+        ma20Slope5d: roundMetric(divide(latestSeriesChange(ma20Series, 5), ma20Series.at(-6) ?? null)), ma50Slope5d: roundMetric(divide(latestSeriesChange(ma50Series, 5), ma50Series.at(-6) ?? null)), ma200Slope5d: roundMetric(divide(latestSeriesChange(ma200Series, 5), ma200Series.at(-6) ?? null)),
+        trendDurationDays: trendDuration, ma20Ma50LastCross: latestCross(ma20Series, ma50Series, dates), ma50Ma200LastCross: latestCross(ma50Series, ma200Series, dates),
+        rsi14: roundMetric(rsi14, 2), rsi14Change5d: roundMetric(latestSeriesChange(rsiSeries, 5), 2), atr14: roundMetric(atr14, 3), atrPercentOfPrice: roundMetric(divide(atr14, Number(latest.close))),
+        annualizedVolatility20d: roundMetric(annualizedVolatility20d), volatilityPercentile1y: roundMetric(percentileRank(annualizedVolatility20d, volatilitySeries.slice(-252))), maxDrawdown20d: roundMetric(maxDrawdown(closes.slice(-20))), maxDrawdown60d: roundMetric(maxDrawdown(closes.slice(-60))),
+        volumeRatio20d: roundMetric(volumeRatio20d), volumePercentile1y: roundMetric(percentileRank(Number(latest.volume), volumes.slice(-252))), upDownVolumeRatio20d: roundMetric(divide(upVolume, downVolume)), priceVolumeState,
+        turnover: roundMetric(turnover), turnoverAvg20d: roundMetric(turnoverAvg20d), turnoverRatio20d: roundMetric(divide(turnover, turnoverAvg20d)), turnoverPercentile1y: roundMetric(percentileRank(turnover, turnoverSeries.slice(-252))),
+        macd: roundMetric(macd, 4), macdSignal: roundMetric(macdSignal, 4), macdHistogram: roundMetric(macdHistogram, 4), macdHistogramChange5d: roundMetric(latestSeriesChange(macdHistogramSeries, 5), 4),
         support20d: roundMetric(Math.min(...cleanBars.slice(-21, -1).map((bar: any) => Number(bar.low))), 3),
         resistance60d: roundMetric(Math.max(...cleanBars.slice(-61, -1).map((bar: any) => Number(bar.high))), 3),
         high52w: roundMetric(highest52w, 3), low52w: roundMetric(lowest52w, 3),
         distanceTo52wHigh: roundMetric(Number(latest.close) / highest52w - 1),
-        trend,
+        trend, turnoverAvailable: turnover !== null,
       },
     };
   }
@@ -3685,7 +3758,7 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
     const cached = stockTechnicalCache.get(symbol);
     if (cached && cached.expiresAt > Date.now()) return { ...cached.value, sourceMeta: { ...cached.value.sourceMeta, source: 'cache', freshness: 'stale', fallbackLevel: 1 } };
     const payload = await fetchMarketDailyKline('stock', symbol);
-    const computed = calculateTechnicalMetrics(Array.isArray(payload?.bars) ? payload.bars : []);
+    const computed = calculateTechnicalMetrics(Array.isArray(payload?.bars) ? payload.bars : [], String(payload?.sourceMeta?.adjust || 'none'));
     const value = { ...computed, sourceMeta: { ...payload.sourceMeta, freshness: 'delayed', confidence: 'market' } };
     stockTechnicalCache.set(symbol, { expiresAt: Date.now() + 15 * 60_000, value });
     return value;

@@ -132,6 +132,8 @@ interface AgentOpinion {
 
 `GET /api/stock-technical?symbol=600000` 通过 AKShare 获取前复权日线（最长保留 320 根），并写入 `GET /api/stock-facts`。当前代码确定性计算 5/20/60 日涨跌幅、MA20/50/200、RSI14、ATR14、20 日年化波动率、量比、MACD、20 日支撑位、60 日阻力位、52 周高低点及距高点幅度，并给出趋势状态。最新日线输入和每项计算都会生成稳定的 `evidenceId`。
 
+技术计算已扩展为：MA20/50/200 的 5 日斜率、趋势状态持续天数、MA20/50 与 MA50/200 最近交叉、RSI 与 MACD 柱近 5 日变化、ATR 占股价比例、20 日波动率自身一年分位数、20/60 日最大回撤、上涨/下跌日成交量比、量价状态、当日与 20 日平均换手率、换手率自身一年分位数。上述均为代码计算值，并非模型推断。
+
 ## 技术与市场 Agent：第一步已实施的日线适配层
 
 统一接口 `GET /api/market-daily-kline?kind=stock&symbol=600519`（或 `kind=index&symbol=000001`）按 AKShare → TickFlow 免费日线 → Baostock → Pytdx 的顺序回退。每次返回均标记来源、回退层级、复权方式、日线频率、最后交易日和抓取时间；Pytdx 仅能提供未复权日线，因此其返回会明确标记为 `adjust: none`，不得与前复权序列混用。
