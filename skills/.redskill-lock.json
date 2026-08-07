@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "skills": {
+    "capitalise-finnews": {
+      "name": "capitalise-finnews",
+      "version": "1.0.0",
+      "source": "redskill",
+      "install_dir": "/workspace/skills/capitalise-finnews",
+      "installed_at": "1784206493478",
+      "sha256": "2f03f173bcc8db8a9ac32c062c1d5106a329ed0038e8077c361cdad3c152e9dd"
+    }
+  }
+}
