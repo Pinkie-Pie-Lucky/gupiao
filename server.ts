@@ -2647,6 +2647,18 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
     }
   });
 
+  // GET /api/stock-industry-benchmark — 股票所属同花顺行业及其直接行业指数基准
+  app.get('/api/stock-industry-benchmark', async (req, res) => {
+    try {
+      const symbol = String(req.query.symbol || '');
+      if (!symbol) return res.status(400).json({ error: 'symbol is required' });
+      res.json(await fetchStockIndustryBenchmark(symbol));
+    } catch (error: any) {
+      console.error('[industry-benchmark] query failed:', error.message);
+      res.status(503).json({ error: '行业归属与基准暂不可用', detail: error.message, dataUnavailable: true });
+    }
+  });
+
   // GET /api/stock-facts — 所有个股 Agent 共用的事实快照与证据 ID
   app.get('/api/stock-facts', async (req, res) => {
     try {
@@ -3788,6 +3800,7 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
   }
 
   let marketEnvironmentCache: { expiresAt: number; value: any } | null = null;
+  const stockIndustryBenchmarkCache = new Map<string, { expiresAt: number; value: any }>();
 
   function makeMarketEvidenceId(key: string, period = 'current') {
     return `market_environment:${key}:${period}`.replace(/[^a-zA-Z0-9:_-]/g, '_');
@@ -3859,6 +3872,33 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
       snapshotMeta: { generatedAt: new Date().toISOString(), source: 'live', freshness: breadth ? 'realtime' : 'delayed', evidenceCount: evidence.length, marketStatus: getMarketStatus() },
     };
     marketEnvironmentCache = { expiresAt: Date.now() + 5 * 60_000, value };
+    return value;
+  }
+
+  async function fetchStockIndustryBenchmark(input: string) {
+    const symbol = normalizeAshareSymbol(input).code;
+    const cached = stockIndustryBenchmarkCache.get(symbol);
+    if (cached && cached.expiresAt > Date.now()) return { ...cached.value, snapshotMeta: { ...cached.value.snapshotMeta, source: 'cache', freshness: 'stale' } };
+    const python = process.env.AKSHARE_PYTHON || 'py';
+    const args = process.env.AKSHARE_PYTHON
+      ? [path.join(process.cwd(), 'scripts', 'industry_benchmark.py'), symbol]
+      : ['-3.14', path.join(process.cwd(), 'scripts', 'industry_benchmark.py'), symbol];
+    const { stdout } = await execFileAsync(python, args, { timeout: 180_000, windowsHide: true, maxBuffer: 5 * 1024 * 1024 });
+    const payload = JSON.parse(stdout);
+    const bars = Array.isArray(payload?.bars) ? payload.bars : [];
+    if (!payload?.industry?.name) throw new Error('行业归属未返回');
+    const technical = bars.length >= 60 ? calculateTechnicalMetrics(bars, String(payload?.sourceMeta?.adjust || 'none')) : null;
+    const period = technical?.period.end || new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Shanghai' });
+    const evidence: any[] = [
+      { evidenceId: makeEvidenceId(symbol, 'industry_mapping', String(payload.sourceMeta.mappingSource || 'unknown'), period), type: 'industry', title: '行业归属', value: payload.industry.name, period, source: payload.sourceMeta.mappingSource, fetchedAt: payload.sourceMeta.fetchedAt, freshness: 'delayed', verification: 'third_party' },
+    ];
+    if (technical) evidence.push(...['change5d', 'change20d', 'change60d', 'trend', 'macdHistogram', 'annualizedVolatility20d', 'maxDrawdown20d'].map((key) => ({ evidenceId: makeEvidenceId(symbol, 'industry_benchmark', key, period), type: 'industry', title: `${payload.industry.name} ${key}`, value: String(technical.metrics[key]), period, source: payload.sourceMeta.benchmarkSource, fetchedAt: payload.sourceMeta.fetchedAt, freshness: 'delayed', verification: 'third_party' })));
+    const value = {
+      symbol, industry: payload.industry, benchmark: technical ? { technical, sourceMeta: payload.sourceMeta } : null, evidence,
+      dataGaps: [...new Set([...(payload.dataGaps || []), technical ? '行业归属和基准采用同花顺行业口径；后续相对强弱计算需与个股日线同交易日对齐。' : '当前无法取得同花顺行业指数，因此不得输出相对行业强弱。'])],
+      snapshotMeta: { generatedAt: new Date().toISOString(), source: 'live', freshness: 'delayed', evidenceCount: evidence.length },
+    };
+    stockIndustryBenchmarkCache.set(symbol, { expiresAt: Date.now() + 24 * 60 * 60_000, value });
     return value;
   }
 
