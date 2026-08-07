@@ -2659,6 +2659,18 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
     }
   });
 
+  // GET /api/stock-relative-strength — 个股相对上证指数与所属行业的同期超额收益
+  app.get('/api/stock-relative-strength', async (req, res) => {
+    try {
+      const symbol = String(req.query.symbol || '');
+      if (!symbol) return res.status(400).json({ error: 'symbol is required' });
+      res.json(await buildStockRelativeStrength(symbol));
+    } catch (error: any) {
+      console.error('[relative-strength] query failed:', error.message);
+      res.status(503).json({ error: '相对强弱计算暂不可用', detail: error.message, dataUnavailable: true });
+    }
+  });
+
   // GET /api/stock-facts — 所有个股 Agent 共用的事实快照与证据 ID
   app.get('/api/stock-facts', async (req, res) => {
     try {
@@ -3801,6 +3813,7 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
 
   let marketEnvironmentCache: { expiresAt: number; value: any } | null = null;
   const stockIndustryBenchmarkCache = new Map<string, { expiresAt: number; value: any }>();
+  const stockRelativeStrengthCache = new Map<string, { expiresAt: number; value: any }>();
 
   function makeMarketEvidenceId(key: string, period = 'current') {
     return `market_environment:${key}:${period}`.replace(/[^a-zA-Z0-9:_-]/g, '_');
@@ -3899,6 +3912,83 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
       snapshotMeta: { generatedAt: new Date().toISOString(), source: 'live', freshness: 'delayed', evidenceCount: evidence.length },
     };
     stockIndustryBenchmarkCache.set(symbol, { expiresAt: Date.now() + 24 * 60 * 60_000, value });
+    return value;
+  }
+
+  function classifyRelativeStrength(excessReturns: Record<string, number | null>) {
+    const values = Object.values(excessReturns).filter((value): value is number => value !== null && Number.isFinite(value));
+    if (!values.length) return 'data_insufficient';
+    if (values.every((value) => value > 0)) return 'strong';
+    if (values.every((value) => value < 0)) return 'weak';
+    return 'mixed';
+  }
+
+  function relativeStrengthEvidence(symbol: string, benchmark: 'market' | 'industry', excessReturns: Record<string, number | null>, period: string, sourceEvidenceIds: string[]) {
+    return Object.entries(excessReturns).filter(([, value]) => value !== null).map(([window, value]) => ({
+      evidenceId: makeEvidenceId(symbol, 'relative_strength', `${benchmark}_${window}`, period), type: 'market', title: `${benchmark === 'market' ? '相对上证指数' : '相对行业'} ${window} 超额收益`, value, period, source: 'calculation', fetchedAt: new Date().toISOString(), freshness: 'delayed', verification: 'third_party', sourceEvidenceIds,
+    }));
+  }
+
+  async function buildStockRelativeStrength(input: string) {
+    const symbol = normalizeAshareSymbol(input).code;
+    const cached = stockRelativeStrengthCache.get(symbol);
+    if (cached && cached.expiresAt > Date.now()) return { ...cached.value, snapshotMeta: { ...cached.value.snapshotMeta, source: 'cache', freshness: 'stale' } };
+    const [stockResult, marketResult, industryResult] = await Promise.allSettled([
+      fetchStockTechnicalData(symbol),
+      buildMarketEnvironmentSnapshot(),
+      fetchStockIndustryBenchmark(symbol),
+    ]);
+    if (stockResult.status !== 'fulfilled') throw stockResult.reason;
+    const stock = stockResult.value;
+    const dataGaps: string[] = [];
+    const windows = ['change5d', 'change20d', 'change60d'];
+    const stockDate = stock.period.end;
+    const stockReturns = Object.fromEntries(windows.map((key) => [key, finiteNumber(stock.metrics[key])])) as Record<string, number | null>;
+    const stockEvidenceIds = windows.map((key) => makeEvidenceId(symbol, 'technical_calculation', key, stockDate));
+    let market: any = null;
+    let industry: any = null;
+    const evidence: any[] = [];
+
+    if (marketResult.status === 'fulfilled') {
+      const environment = marketResult.value;
+      const benchmarkTechnical = environment.benchmark?.technical;
+      const benchmarkDate = benchmarkTechnical?.period?.end;
+      if (benchmarkTechnical && benchmarkDate === stockDate) {
+        const benchmarkReturns = Object.fromEntries(windows.map((key) => [key, finiteNumber(benchmarkTechnical.metrics[key])])) as Record<string, number | null>;
+        const excessReturns = Object.fromEntries(windows.map((key) => [key, stockReturns[key] !== null && benchmarkReturns[key] !== null ? stockReturns[key] - benchmarkReturns[key] : null])) as Record<string, number | null>;
+        const sourceEvidenceIds = [...stockEvidenceIds, ...windows.map((key) => makeMarketEvidenceId(`index_${key}`, benchmarkDate))];
+        market = { benchmark: { symbol: '000001', name: '上证指数', period: benchmarkDate }, stockReturns, benchmarkReturns, excessReturns, state: classifyRelativeStrength(excessReturns), marketRegime: environment.marketRegime, evidenceIds: sourceEvidenceIds };
+        evidence.push(...relativeStrengthEvidence(symbol, 'market', excessReturns, stockDate, sourceEvidenceIds));
+      } else {
+        dataGaps.push('个股与上证指数最后交易日未对齐，不能计算相对大盘强弱。');
+      }
+    } else {
+      dataGaps.push(`市场环境快照不可用：${marketResult.reason?.message || '未知原因'}`);
+    }
+
+    if (industryResult.status === 'fulfilled') {
+      const industrySnapshot = industryResult.value;
+      const benchmarkTechnical = industrySnapshot.benchmark?.technical;
+      const benchmarkDate = benchmarkTechnical?.period?.end;
+      if (benchmarkTechnical && benchmarkDate === stockDate) {
+        const benchmarkReturns = Object.fromEntries(windows.map((key) => [key, finiteNumber(benchmarkTechnical.metrics[key])])) as Record<string, number | null>;
+        const excessReturns = Object.fromEntries(windows.map((key) => [key, stockReturns[key] !== null && benchmarkReturns[key] !== null ? stockReturns[key] - benchmarkReturns[key] : null])) as Record<string, number | null>;
+        const industryEvidenceIds = (industrySnapshot.evidence || []).map((item: any) => String(item.evidenceId));
+        const sourceEvidenceIds = [...stockEvidenceIds, ...industryEvidenceIds];
+        industry = { industry: industrySnapshot.industry, period: benchmarkDate, stockReturns, benchmarkReturns, excessReturns, state: classifyRelativeStrength(excessReturns), evidenceIds: sourceEvidenceIds };
+        evidence.push(...relativeStrengthEvidence(symbol, 'industry', excessReturns, stockDate, sourceEvidenceIds));
+      } else {
+        dataGaps.push('行业基准缺失或与个股最后交易日未对齐，不能计算相对行业强弱。');
+      }
+    } else {
+      dataGaps.push(`行业基准不可用：${industryResult.reason?.message || '未知原因'}`);
+    }
+    const value = {
+      symbol, period: stockDate, market, industry, evidence,
+      dataGaps: [...new Set(dataGaps)],
+      snapshotMeta: { generatedAt: new Date().toISOString(), source: 'live', freshness: market && industry ? 'delayed' : 'stale', evidenceCount: evidence.length },
+    };
+    stockRelativeStrengthCache.set(symbol, { expiresAt: Date.now() + 5 * 60_000, value });
     return value;
   }
 
