@@ -2708,12 +2708,15 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
       sampleSize: 0,
       limitUpCount: null as number | null,
       leaderContribution: null as number | null,
+      dispersion: null as number | null,
+      sampleCoverage: null as number | null,
       sampleComplete: false,
+      stocks: [] as Array<{ code: string; name: string; changePercent: number; turnoverAmount: number | null; turnoverRate: number | null; volumeRatio: number | null; totalMarketCap: number | null }>,
     };
     if (!bkCode) return empty;
     const buildUrl = (page: number) =>
       `http://push2.eastmoney.com/api/qt/clist/get?pn=${page}&pz=${BREADTH_PAGE_SIZE}`
-      + `&po=1&np=1&fltt=2&invt=2&fid=f3&fs=b:${bkCode}%2Bf:!50&fields=f3,f12`;
+      + `&po=1&np=1&fltt=2&invt=2&fid=f3&fs=b:${bkCode}%2Bf:!50&fields=f3,f6,f8,f10,f12,f14,f20`;
     try {
       const first = await httpGetJSON(buildUrl(1));
       const total = Number(first?.data?.total || 0);
@@ -2729,8 +2732,14 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
       }
       const stocks = [...new Map(
         rows.filter((r) => r?.f12 && Number.isFinite(Number(r?.f3)))
-          .map((r) => [String(r.f12), Number(r.f3)]),
-      )].map(([code, changePercent]) => ({ code, changePercent }));
+          .map((r) => [String(r.f12), {
+            code: String(r.f12), name: String(r.f14 || ''), changePercent: Number(r.f3),
+            turnoverAmount: Number.isFinite(Number(r.f6)) ? Number(r.f6) : null,
+            turnoverRate: Number.isFinite(Number(r.f8)) ? Number(r.f8) : null,
+            volumeRatio: Number.isFinite(Number(r.f10)) ? Number(r.f10) : null,
+            totalMarketCap: Number.isFinite(Number(r.f20)) ? Number(r.f20) : null,
+          }]),
+      )].map(([, stock]) => stock);
       if (!stocks.length) return empty;
 
       // 取回比例不足九成时不给出 upStockRatio，避免用涨幅榜头部冒充板块整体
@@ -2741,12 +2750,17 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
         .sort((a, b) => Math.abs(b.changePercent) - Math.abs(a.changePercent))
         .slice(0, 3)
         .reduce((sum, s) => sum + Math.abs(s.changePercent), 0);
+      const orderedChanges = stocks.map((s) => s.changePercent).sort((a, b) => a - b);
+      const percentile = (ratio: number) => orderedChanges[Math.min(orderedChanges.length - 1, Math.max(0, Math.round((orderedChanges.length - 1) * ratio)))];
       return {
         upStockRatio: sampleComplete ? Math.round((up / stocks.length) * 100) : null,
         sampleSize: stocks.length,
         limitUpCount: stocks.filter((s) => s.changePercent >= 9.8).length,
         leaderContribution: totalAbs > 0 ? Math.round((top3Abs / totalAbs) * 100) : null,
+        dispersion: orderedChanges.length >= 5 ? round2(percentile(0.9) - percentile(0.1)) : null,
+        sampleCoverage: total > 0 ? round2((stocks.length / total) * 100) : null,
         sampleComplete,
+        stocks,
       };
     } catch {
       return empty;
@@ -3189,6 +3203,45 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
     }
   });
 
+  function normalizeSectorKey(value: string) {
+    return String(value || '').replace(/(概念|板块|行业|指数|Ⅱ|Ⅲ|IV)/g, '').replace(/\s+/g, '').trim();
+  }
+
+  function findSectorInsight(sectorName: string, fallback: string, watchPoints: string[]) {
+    const report = morningReportCache?.data;
+    const stories = Array.isArray(report?.stories) ? report.stories : [];
+    const target = normalizeSectorKey(sectorName);
+    let matched: any = null;
+    let matchQuality: 'exact' | 'related' | 'weak' | 'none' = 'none';
+    for (const story of stories) {
+      const related = Array.isArray(story?.relatedSectors) ? story.relatedSectors : [];
+      if (related.some((name: string) => normalizeSectorKey(name) === target)) { matched = story; matchQuality = 'exact'; break; }
+      if (related.some((name: string) => normalizeSectorKey(name).includes(target) || target.includes(normalizeSectorKey(name)))) { matched = story; matchQuality = 'related'; }
+    }
+    if (!matched) return {
+      whatHappened: fallback,
+      matchQuality,
+      evidenceStatus: 'market_only',
+      supportingEvidence: [], counterEvidence: [],
+      confidence: { level: 'limited', explanation: '当前仅观察到行情变化，尚未匹配到充分驱动证据。' },
+      observationIndicators: watchPoints,
+      generatedAt: report?.timestamp || null,
+    };
+    const reasoning = matched.reasoning || {};
+    const professional = matched.professional || {};
+    const supportingEvidence = [...new Set([...(reasoning.supportingEvidence || []), ...(professional.supportingEvidence || [])])].slice(0, 3);
+    const counterEvidence = [...new Set([...(reasoning.counterEvidence || []), ...(professional.counterLogic || [])])].slice(0, 3);
+    const confidence = professional.confidence || { level: reasoning.confidenceLevel || 'limited', explanation: reasoning.uncertainty || '' };
+    return {
+      whatHappened: String(matched.what || fallback), matchQuality,
+      evidenceStatus: supportingEvidence.length ? 'confirmed' : 'insufficient',
+      supportingEvidence, counterEvidence,
+      confidence: { level: confidence.level || 'limited', explanation: String(confidence.explanation || reasoning.uncertainty || '') },
+      observationIndicators: (professional.observationIndicators || watchPoints).slice(0, 3),
+      generatedAt: report?.timestamp || null,
+    };
+  }
+
   app.get('/api/sector-detail', async (req, res) => {
     try {
       const sn = String(req.query.sectorName || ''); if(!sn) return res.status(400).json({error:'sectorName is required'});
@@ -3197,41 +3250,31 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
       
       // Get real stock data
       const bkCode = (sec && sec.code) ? String(sec.code) : (req.query.sectorId ? String(req.query.sectorId).replace(/^(industry|concept)-/, '') : '');
-      var allStocks = [];
-      if (bkCode) allStocks = await fetchSectorStocks(bkCode);
-      
-      // Top 5 leaders
-      var leading = allStocks.slice(0, 5).map(function(s, i) {
-        var reasons = ['板块上涨时弹性更强', '成交额明显放大，资金关注度提升', '受益于行业政策预期', '板块龙头，带动效应明显', '跟随板块整体走强'];
-        s.reason = reasons[i] || reasons[reasons.length - 1];
-        s.isLeader = i === 0;
-        return s;
-      });
-      
-      // Bottom 3 laggards
-      var lagging = allStocks.slice(-3).reverse().map(function(s) {
-        s.reason = '板块内部表现较弱';
-        return s;
-      });
-      
-      // News with classification
-      var rawNews = (md.newsItems||[]);
-      var catalystKeywords = ['政策','利好','扶持','补贴','规划','推动','支持','印发','发布'];
-      var riskKeywords = ['风险','警告','监管','处罚','降温','收紧','利空','下跌','回调'];
-      var industryKeywords = [sn.slice(0,2),'板块','行业','市场','景气','需求'];      
-      var newsItems = rawNews.slice(0,6).map(function(n) {
-        var t = n.title || '';
-        var isCatalyst = catalystKeywords.some(function(k) { return t.includes(k); });
-        var isRisk = riskKeywords.some(function(k) { return t.includes(k); });
-        var isIndustry = industryKeywords.some(function(k) { return t.includes(k); });
-        var category = isCatalyst ? '直接催化' : isRisk ? '风险信息' : isIndustry ? '行业背景' : '市场动态';
-        var summary = t.length > 30 ? t.substring(0, 30) + '...' : t;
-        return {id:n.id, title:t, sourceName:n.sourceName, category: category, summary: summary};
-      });
-      
-      // Fetch kline data for multi-period changes + heat
-      var klineData = null;
-      if (bkCode) klineData = await fetchSectorKline(bkCode);
+      const [breadth, klineData, sectorNews] = await Promise.all([
+        bkCode ? fetchSectorBreadth(bkCode) : Promise.resolve(null),
+        bkCode ? fetchSectorKline(bkCode) : Promise.resolve(null),
+        fetchEastMoneySectorNews(sn),
+      ]);
+      var allStocks = breadth?.stocks || [];
+      const rankPercentile = (value: number | null, field: 'changePercent' | 'turnoverAmount' | 'turnoverRate' | 'totalMarketCap') => {
+        if (value === null) return 0;
+        const available = allStocks.map((stock) => stock[field]).filter((v): v is number => typeof v === 'number' && Number.isFinite(v));
+        if (!available.length) return 0;
+        return available.filter((v) => v <= value).length / available.length;
+      };
+      const strength = [...allStocks].map((stock) => ({
+        ...stock,
+        score: rankPercentile(stock.changePercent, 'changePercent') * 0.4
+          + rankPercentile(stock.turnoverAmount, 'turnoverAmount') * 0.3
+          + rankPercentile(stock.turnoverRate, 'turnoverRate') * 0.2
+          + rankPercentile(stock.totalMarketCap, 'totalMarketCap') * 0.1,
+        reason: '涨幅、成交、换手与市值在板块内综合靠前',
+      })).sort((a, b) => b.score - a.score).slice(0, 3);
+      const leaders = [...allStocks].sort((a, b) => (Number(b.totalMarketCap || 0) + Number(b.turnoverAmount || 0)) - (Number(a.totalMarketCap || 0) + Number(a.turnoverAmount || 0))).slice(0, 3).map((stock) => ({ ...stock, reason: '市值与成交规模位于板块前列', isLeader: true }));
+      const unusual = allStocks.filter((stock) => Number(stock.volumeRatio || 0) > 3 && stock.changePercent > 0).sort((a, b) => Number(b.volumeRatio || 0) - Number(a.volumeRatio || 0)).slice(0, 3).map((stock) => ({ ...stock, reason: '量比显著放大且当日上涨' }));
+      const leading = strength;
+      const lagging = [...allStocks].sort((a, b) => a.changePercent - b.changePercent).slice(0, 3).map((stock) => ({ ...stock, reason: '板块内当日表现较弱' }));
+      const newsItems = sectorNews.map((news) => ({ ...news, category: '行业背景', summary: news.title.slice(0, 42) }));
       var c5 = klineData ? klineData.change5d : null;
       var c20 = klineData ? klineData.change20d : null;
       var c3m = klineData ? klineData.change3m : null;
@@ -3239,8 +3282,8 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
         todayTurnover: klineData ? klineData.todayAmount : null,
         turnoverChangePercent: (klineData && klineData.avg20dAmount && klineData.todayAmount) ? ((klineData.todayAmount / klineData.avg20dAmount) - 1) * 100 : null,
         turnoverVs20dAvg: (klineData && klineData.avg20dAmount) ? klineData.avg20dAmount : null,
-        turnoverRate: null,
-        upRatio: allStocks.length ? Math.round(allStocks.filter(function(s){return s.changePercent>0;}).length/allStocks.length*100) : null
+        turnoverRate: allStocks.length ? Math.round((allStocks.reduce((sum, stock) => sum + Number(stock.turnoverRate || 0), 0) / allStocks.length) * 100) / 100 : null,
+        upRatio: breadth?.upStockRatio ?? null
       };
       
       // Better stage rules (use multi-period data if available)
@@ -3253,17 +3296,40 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
       else if (pct > -4) { stage = 'cooling_down'; stageLabel = '逐步降温'; }
       else { stage = 'no_clear_trend'; stageLabel = '暂无明确趋势'; }
       
+      const defaultWatchPoints = ['成交额是否继续放大', '上涨是否扩散', '龙头股能否保持强势'];
+      const fallbackConclusion = sn + '今日' + (pct >= 0 ? '上涨' : '下跌') + Math.abs(pct).toFixed(2) + '%';
+      const insight = findSectorInsight(sn, fallbackConclusion, defaultWatchPoints);
+      const leaderHeavy = (breadth?.leaderContribution ?? 0) >= 55;
+      const healthPresentation = pct < 0 && (breadth?.upStockRatio ?? 50) < 40
+        ? 'broad_fall'
+        : (breadth?.upStockRatio ?? 0) >= 70 && !leaderHeavy
+          ? 'broad_rise'
+          : leaderHeavy || (breadth?.upStockRatio ?? 100) < 40
+            ? 'leader_driven'
+            : 'divergence';
       res.json({
         sector: sn,sectorId:req.query.sectorId||'',todayChange:(pct>=0?'+':'')+pct.toFixed(2)+'%',todayChangePercent:pct,
         change5d:c5,change20d:c20,change3m:c3m,
         stage:stage,stageLabel:stageLabel,signalTags:[],signalTypes:[],
-        bubbleConclusion:sn+'今日'+(pct>=0?'上涨':'下跌')+Math.abs(pct).toFixed(2)+'%',
+        bubbleConclusion: fallbackConclusion,
+        insight,
+        health: {
+          status: healthPresentation === 'broad_fall' ? 'divergence' : healthPresentation,
+          presentation: healthPresentation,
+          upRatio: breadth?.upStockRatio ?? null,
+          sampleCoverage: breadth?.sampleCoverage ?? null,
+          leaderContribution: breadth?.leaderContribution ?? null,
+          dispersion: breadth?.dispersion ?? null,
+          limitUpCount: breadth?.limitUpCount ?? null,
+          dataAsOf: md.timestamp,
+        },
         subdivisions:subs.map(function(s){return{name:s.name,changePercent:Number(s.changePercent)||0,status:'weak'};}),
         leadingStocks: leading, laggingStocks: lagging,
-        healthMetrics:{ upCount: allStocks.filter(function(s){return s.changePercent>0;}).length, totalCount: allStocks.length, medianChange:'--', leaderContribution: leading[0]&&leading.length>1?((leading[0].changePercent/(leading.reduce(function(a,b){return a+Math.abs(b.changePercent)},0)))*100).toFixed(0)+'%':'--', divergence:  'moderate' },
+        representativeStocks: { strength, leaders, unusual },
+        healthMetrics:{ upCount: allStocks.filter(function(s){return s.changePercent>0;}).length, totalCount: allStocks.length, medianChange:'--', leaderContribution: breadth?.leaderContribution ?? null, divergence: breadth?.dispersion ?? null, sampleComplete: breadth?.sampleComplete ?? false },
         news:newsItems,
         heatMetrics:heatMetrics,
-        watchPoints:['成交额是否继续放大','上涨是否扩散','龙头股能否保持强势'],
+        watchPoints: insight.observationIndicators,
         exploreQuestions:['为什么'+sn+'今天表现突出？',sn+'现在处于什么阶段？']
       });
     } catch(e) { res.status(503).json({error:'生成失败'}); }
