@@ -208,7 +208,8 @@ export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStoc
 
     // 首次加载 + 早报
     async function initLoad() {
-      await loadMarketOverview({ cancelled });
+      // 行情源偶发超时不能阻塞 AI 早报；两类数据独立加载。
+      void loadMarketOverview({ cancelled });
       if (!cancelled) {
         try {
           const reportRes = await fetch('/api/morning-report').then(r => r.json());

@@ -1029,16 +1029,44 @@ professionalSummary：
 }`;
 
   async function callAI(systemInstruction: string, userContent: string, temperature: number): Promise<string> {
-    const client = getAIClient();
-    const completion = await client.chat.completions.create({
-      model: AI_MODEL,
-      messages: [
-        { role: 'system', content: systemInstruction },
-        { role: 'user', content: userContent },
-      ],
-      temperature,
+    const apiKey = process.env.DEEPSEEK_API_KEY;
+    if (!apiKey) {
+      throw new Error('DEEPSEEK_API_KEY is not defined');
+    }
+
+    // 早报的 P1/P2/P3 都要求结构化 JSON。deepseek-v4 默认开启思考模式，
+    // 在复杂提示词下可能只返回 reasoning_content、正文为空，导致解析重试后降级。
+    // 直接使用兼容接口的 thinking 开关，并要求 JSON 正文，保证每一步都有可解析输出。
+    const baseUrl = (process.env.AI_BASE_URL || 'https://api.deepseek.com').replace(/\/$/, '');
+    const response = await fetch(`${baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: AI_MODEL,
+        messages: [
+          { role: 'system', content: systemInstruction },
+          { role: 'user', content: userContent },
+        ],
+        temperature,
+        max_tokens: 6000,
+        thinking: { type: 'disabled' },
+        response_format: { type: 'json_object' },
+      }),
     });
-    return completion.choices[0]?.message?.content || '';
+    const payload = await response.json().catch(() => null) as any;
+    if (!response.ok) {
+      const detail = String(payload?.error?.message || payload?.message || response.statusText).slice(0, 240);
+      throw new Error(`AI API ${response.status}: ${detail}`);
+    }
+    const content = payload?.choices?.[0]?.message?.content;
+    if (!content || !String(content).trim()) {
+      const finishReason = payload?.choices?.[0]?.finish_reason || 'unknown';
+      throw new Error(`empty AI content (finish_reason=${finishReason})`);
+    }
+    return String(content);
   }
 
   function sanitizeTeacherText(value: unknown, maxLength: number): string {
