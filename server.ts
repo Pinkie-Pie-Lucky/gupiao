@@ -2626,6 +2626,17 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
     }
   });
 
+  // GET /api/market-daily-kline — 统一个股/指数日线来源与回退元数据
+  app.get('/api/market-daily-kline', async (req, res) => {
+    try {
+      const kind = String(req.query.kind || 'stock');
+      if (kind !== 'stock' && kind !== 'index') return res.status(400).json({ error: 'kind 应为 stock 或 index' });
+      res.json(await fetchMarketDailyKline(kind, String(req.query.symbol || '')));
+    } catch (error: any) {
+      res.status(503).json({ error: '市场日线暂不可用', detail: error.message, dataUnavailable: true });
+    }
+  });
+
   // GET /api/stock-facts — 所有个股 Agent 共用的事实快照与证据 ID
   app.get('/api/stock-facts', async (req, res) => {
     try {
@@ -3673,16 +3684,24 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
     if (!/^\d{6}$/.test(symbol)) throw new Error('symbol 应为 6 位证券代码');
     const cached = stockTechnicalCache.get(symbol);
     if (cached && cached.expiresAt > Date.now()) return { ...cached.value, sourceMeta: { ...cached.value.sourceMeta, source: 'cache', freshness: 'stale', fallbackLevel: 1 } };
-    const python = process.env.AKSHARE_PYTHON || 'py';
-    const args = process.env.AKSHARE_PYTHON
-      ? [path.join(process.cwd(), 'scripts', 'stock_daily_kline.py'), symbol]
-      : ['-3.14', path.join(process.cwd(), 'scripts', 'stock_daily_kline.py'), symbol];
-    const { stdout } = await execFileAsync(python, args, { timeout: 60_000, windowsHide: true, maxBuffer: 5 * 1024 * 1024 });
-    const payload = JSON.parse(stdout);
+    const payload = await fetchMarketDailyKline('stock', symbol);
     const computed = calculateTechnicalMetrics(Array.isArray(payload?.bars) ? payload.bars : []);
-    const value = { ...computed, sourceMeta: { source: payload?.source || 'akshare_stock_zh_a_daily', fetchedAt: new Date().toISOString(), freshness: 'delayed', confidence: 'market', fallbackLevel: 0 } };
+    const value = { ...computed, sourceMeta: { ...payload.sourceMeta, freshness: 'delayed', confidence: 'market' } };
     stockTechnicalCache.set(symbol, { expiresAt: Date.now() + 15 * 60_000, value });
     return value;
+  }
+
+  async function fetchMarketDailyKline(kind: 'stock' | 'index', symbol: string) {
+    if (!/^\d{6}$/.test(symbol)) throw new Error('symbol 应为 6 位证券代码');
+    const python = process.env.AKSHARE_PYTHON || 'py';
+    const args = process.env.AKSHARE_PYTHON
+      ? [path.join(process.cwd(), 'scripts', 'market_daily_kline.py'), kind, symbol]
+      : ['-3.14', path.join(process.cwd(), 'scripts', 'market_daily_kline.py'), kind, symbol];
+    const { stdout } = await execFileAsync(python, args, { timeout: 90_000, windowsHide: true, maxBuffer: 5 * 1024 * 1024 });
+    const payload = JSON.parse(stdout);
+    const bars = Array.isArray(payload?.bars) ? payload.bars : [];
+    if (bars.length < 60) throw new Error('统一日线适配未返回足够数据');
+    return { kind, symbol, bars, sourceMeta: { ...payload?.sourceMeta, fetchedAt: payload?.sourceMeta?.fetchedAt || new Date().toISOString() } };
   }
 
   const stockFactSnapshotCache = new Map<string, { expiresAt: number; value: any }>();
@@ -3739,7 +3758,7 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
       evidence.push({ evidenceId: makeEvidenceId(symbol, 'financial_calculation', key, financialData.calculations.period || 'current'), type: 'financial', title: `${financialData.template || 'non_financial'} ${key}`, value, period: financialData.calculations.period, source: 'calculation', fetchedAt: financialData.sourceMeta.fetchedAt, freshness: financialData.sourceMeta.freshness, verification: 'third_party' });
     }
     if (technicalData?.latestBar) {
-      for (const key of ['open', 'high', 'low', 'close', 'volume', 'amount']) {
+      for (const key of ['open', 'high', 'low', 'close', 'volume', 'amount', 'turnover']) {
         const value = technicalData.latestBar[key];
         if (value === null || value === undefined) continue;
         evidence.push({ evidenceId: makeEvidenceId(symbol, 'technical_input', key, technicalData.latestBar.date), type: 'market', title: `${technicalData.latestBar.date} ${key}`, value, period: technicalData.latestBar.date, source: technicalData.sourceMeta.source, fetchedAt: technicalData.sourceMeta.fetchedAt, freshness: technicalData.sourceMeta.freshness, verification: 'third_party' });
