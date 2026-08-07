@@ -1502,7 +1502,7 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
     });
   }
 
-  function httpGetText(urlStr: string, referer = 'https://gu.qq.com/'): Promise<string> {
+  function httpGetText(urlStr: string, referer = 'https://gu.qq.com/', encoding = 'utf-8'): Promise<string> {
     return new Promise((resolve, reject) => {
       const u = new URL(urlStr);
       const mod = u.protocol === 'http:' ? http : https;
@@ -1516,15 +1516,14 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
           },
         },
         (res: any) => {
-          let data = '';
-          res.setEncoding('utf8');
-          res.on('data', (chunk: string) => (data += chunk));
+          const chunks: Buffer[] = [];
+          res.on('data', (chunk: Buffer) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
           res.on('end', () => {
             if (res.statusCode && res.statusCode >= 400) {
               reject(new Error(`HTTP ${res.statusCode}`));
               return;
             }
-            resolve(data);
+            resolve(new TextDecoder(encoding).decode(Buffer.concat(chunks)));
           });
         },
       );
@@ -1555,6 +1554,8 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
       ];
       const text = await httpGetText(
         `https://qt.gtimg.cn/q=${definitions.map((item) => item.symbol).join(',')}`,
+        'https://gu.qq.com/',
+        'gb18030',
       );
 
       return definitions.map((definition) => {
@@ -1586,6 +1587,7 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
       const text = await httpGetText(
         `https://hq.sinajs.cn/list=${definitions.map((item) => item.symbol).join(',')}`,
         'https://finance.sina.com.cn/',
+        'gb18030',
       );
       return definitions.map((definition) => {
         const matched = text.match(new RegExp(`hq_str_${definition.symbol}="([^"]*)"`));
@@ -2559,6 +2561,17 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
     }
   });
 
+  // GET /api/stock-quote — A 股个股实时行情，多源回退并显式返回来源元数据
+  app.get('/api/stock-quote', async (req, res) => {
+    try {
+      const symbol = String(req.query.symbol || '');
+      if (!symbol) return res.status(400).json({ error: 'symbol is required' });
+      res.json(await fetchAshareStockQuoteWithFallback(symbol));
+    } catch (error: any) {
+      res.status(503).json({ error: error.message || '个股行情暂不可用', dataUnavailable: true });
+    }
+  });
+
   // GET /api/sectors — 东方财富真实板块数据，供 MarketMapTab 使用
   app.get('/api/sectors', async (_req, res) => {
     try {
@@ -3255,6 +3268,91 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
 
   function normalizeSectorKey(value: string) {
     return String(value || '').replace(/(概念|板块|行业|指数|Ⅱ|Ⅲ|IV)/g, '').replace(/\s+/g, '').trim();
+  }
+
+  const stockQuoteSnapshotCache = new Map<string, any>();
+
+  function normalizeAshareSymbol(input: string) {
+    const code = String(input || '').trim().toUpperCase().replace(/^(SH|SZ)/, '');
+    if (!/^\d{6}$/.test(code)) throw new Error('股票代码应为 6 位数字，例如 600000');
+    const exchange = /^(5|6|9)/.test(code) ? 'SH' : 'SZ';
+    return { code, exchange, tencent: `${exchange.toLowerCase()}${code}`, sina: `${exchange.toLowerCase()}${code}`, xueqiu: `${exchange}${code}` };
+  }
+
+  async function fetchTencentStockQuote(symbol: ReturnType<typeof normalizeAshareSymbol>) {
+    const text = await httpGetText(`https://qt.gtimg.cn/q=${symbol.tencent}`, 'https://gu.qq.com/', 'gb18030');
+    const matched = text.match(new RegExp(`v_${symbol.tencent}="([^"]*)"`));
+    const fields = matched?.[1]?.split('~') || [];
+    const price = Number(fields[3]);
+    const previousClose = Number(fields[4]);
+    if (!Number.isFinite(price) || !Number.isFinite(previousClose)) throw new Error('腾讯行情字段不完整');
+    const change = Number(fields[31]);
+    const changePercent = Number(fields[32]);
+    return {
+      code: symbol.code, name: fields[1] || symbol.code, price, previousClose,
+      open: Number(fields[5]) || null, high: Number(fields[33]) || null, low: Number(fields[34]) || null,
+      change: Number.isFinite(change) ? change : Math.round((price - previousClose) * 100) / 100,
+      changePercent: Number.isFinite(changePercent) ? changePercent : Math.round(((price / previousClose) - 1) * 10_000) / 100,
+      volume: Number(fields[6]) || null, amount: Number(fields[37]) || null,
+      asOf: fields[30] || null,
+    };
+  }
+
+  async function fetchSinaStockQuote(symbol: ReturnType<typeof normalizeAshareSymbol>) {
+    const text = await httpGetText(`https://hq.sinajs.cn/list=${symbol.sina}`, 'https://finance.sina.com.cn/', 'gb18030');
+    const matched = text.match(new RegExp(`hq_str_${symbol.sina}="([^"]*)"`));
+    const fields = matched?.[1]?.split(',') || [];
+    const price = Number(fields[3]);
+    const previousClose = Number(fields[2]);
+    if (!Number.isFinite(price) || !Number.isFinite(previousClose)) throw new Error('新浪行情字段不完整');
+    return {
+      code: symbol.code, name: fields[0] || symbol.code, price, previousClose,
+      open: Number(fields[1]) || null, high: Number(fields[4]) || null, low: Number(fields[5]) || null,
+      change: Math.round((price - previousClose) * 100) / 100,
+      changePercent: Math.round(((price / previousClose) - 1) * 10_000) / 100,
+      volume: Number(fields[8]) || null, amount: Number(fields[9]) || null,
+      asOf: fields[30] && fields[31] ? `${fields[30]} ${fields[31]}` : null,
+    };
+  }
+
+  async function fetchXueqiuStockQuote(symbol: ReturnType<typeof normalizeAshareSymbol>) {
+    const data = await httpGetJSON(`https://stock.xueqiu.com/v5/stock/realtime/quotec.json?symbol=${symbol.xueqiu}`);
+    const quote = Array.isArray(data?.data) ? data.data[0] : null;
+    const price = Number(quote?.current);
+    const previousClose = Number(quote?.last_close);
+    if (!Number.isFinite(price) || !Number.isFinite(previousClose)) throw new Error('雪球行情字段不完整');
+    return {
+      code: symbol.code, name: quote.name || symbol.code, price, previousClose,
+      open: Number(quote.open) || null, high: Number(quote.high) || null, low: Number(quote.low) || null,
+      change: Number(quote.chg) || Math.round((price - previousClose) * 100) / 100,
+      changePercent: Number(quote.percent) || Math.round(((price / previousClose) - 1) * 10_000) / 100,
+      volume: Number(quote.volume) || null, amount: Number(quote.amount) || null,
+      asOf: quote.timestamp ? new Date(Number(quote.timestamp)).toISOString() : null,
+    };
+  }
+
+  async function fetchAshareStockQuoteWithFallback(input: string) {
+    const symbol = normalizeAshareSymbol(input);
+    const providers = [
+      { source: 'tencent', fetcher: fetchTencentStockQuote },
+      { source: 'sina', fetcher: fetchSinaStockQuote },
+      { source: 'xueqiu', fetcher: fetchXueqiuStockQuote },
+    ];
+    for (let index = 0; index < providers.length; index += 1) {
+      const provider = providers[index];
+      try {
+        const quote = await provider.fetcher(symbol);
+        const sourceMeta = { source: provider.source, fetchedAt: new Date().toISOString(), asOf: quote.asOf || undefined, freshness: 'realtime', confidence: 'market', fallbackLevel: index };
+        const result = { quote, sourceMeta };
+        stockQuoteSnapshotCache.set(symbol.code, result);
+        return result;
+      } catch (error: any) {
+        console.warn(`[stock-source] ${provider.source} ${symbol.code} failed:`, error.message);
+      }
+    }
+    const stale = stockQuoteSnapshotCache.get(symbol.code);
+    if (stale) return { quote: stale.quote, sourceMeta: { ...stale.sourceMeta, source: 'cache', fetchedAt: new Date().toISOString(), freshness: 'stale', confidence: 'limited', fallbackLevel: 3, asOf: stale.sourceMeta.fetchedAt } };
+    throw new Error(`暂无 ${symbol.code} 的可用行情`);
   }
 
   function findSectorInsight(sectorName: string, fallback: string, watchPoints: string[]) {
