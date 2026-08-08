@@ -2671,6 +2671,18 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
     }
   });
 
+  // GET /api/stock-technical-market-signals — 技术与市场 Agent 使用的纯确定性信号，不调用 AI
+  app.get('/api/stock-technical-market-signals', async (req, res) => {
+    try {
+      const symbol = String(req.query.symbol || '');
+      if (!symbol) return res.status(400).json({ error: 'symbol is required' });
+      res.json(await buildTechnicalMarketSignals(symbol));
+    } catch (error: any) {
+      console.error('[technical-market-signals] query failed:', error.message);
+      res.status(503).json({ error: '技术与市场确定性信号暂不可用', detail: error.message, dataUnavailable: true });
+    }
+  });
+
   // GET /api/stock-facts — 所有个股 Agent 共用的事实快照与证据 ID
   app.get('/api/stock-facts', async (req, res) => {
     try {
@@ -3814,6 +3826,7 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
   let marketEnvironmentCache: { expiresAt: number; value: any } | null = null;
   const stockIndustryBenchmarkCache = new Map<string, { expiresAt: number; value: any }>();
   const stockRelativeStrengthCache = new Map<string, { expiresAt: number; value: any }>();
+  const technicalMarketSignalCache = new Map<string, { expiresAt: number; value: any }>();
 
   function makeMarketEvidenceId(key: string, period = 'current') {
     return `market_environment:${key}:${period}`.replace(/[^a-zA-Z0-9:_-]/g, '_');
@@ -3989,6 +4002,148 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
       snapshotMeta: { generatedAt: new Date().toISOString(), source: 'live', freshness: market && industry ? 'delayed' : 'stale', evidenceCount: evidence.length },
     };
     stockRelativeStrengthCache.set(symbol, { expiresAt: Date.now() + 5 * 60_000, value });
+    return value;
+  }
+
+  type TechnicalMarketSignalStatus = 'positive' | 'stable' | 'mixed' | 'risk' | 'data_insufficient';
+  type TechnicalMarketSignal = {
+    signalId: 'trend' | 'confirmation' | 'risk' | 'environment' | 'relative_strength' | 'data_quality';
+    dimension: 'trend' | 'confirmation' | 'risk' | 'environment' | 'relative_strength' | 'data_quality';
+    status: TechnicalMarketSignalStatus;
+    severity: 'low' | 'medium' | 'high';
+    summary: string;
+    values: Record<string, number | string | boolean | null>;
+    evidenceIds: string[];
+  };
+
+  function technicalCalculationEvidenceIds(symbol: string, keys: string[], period: string) {
+    return keys.map((key) => makeEvidenceId(symbol, 'technical_calculation', key, period));
+  }
+
+  // 第六步：只按已披露的指标和规则生成信号；不调用 AI，也不输出价格预测或交易指令。
+  async function buildTechnicalMarketSignals(input: string) {
+    const symbol = normalizeAshareSymbol(input).code;
+    const cached = technicalMarketSignalCache.get(symbol);
+    if (cached && cached.expiresAt > Date.now()) {
+      return { ...cached.value, snapshotMeta: { ...cached.value.snapshotMeta, source: 'cache', freshness: 'stale' } };
+    }
+
+    const [technicalResult, environmentResult, relativeStrengthResult] = await Promise.allSettled([
+      fetchStockTechnicalData(symbol),
+      buildMarketEnvironmentSnapshot(),
+      buildStockRelativeStrength(symbol),
+    ]);
+    if (technicalResult.status !== 'fulfilled') throw technicalResult.reason;
+
+    const technical = technicalResult.value;
+    const metrics = technical.metrics || {};
+    const period = String(technical.period?.end || new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Shanghai' }));
+    const riskThresholds = { atrPercentOfPrice: 0.05, volatilityPercentile1y: 0.8, maxDrawdown20d: -0.12, maxDrawdown60d: -0.2 };
+    const signals: TechnicalMarketSignal[] = [];
+    const evidence: any[] = [];
+    const dataGaps: string[] = [];
+    const addSignal = (signal: Omit<TechnicalMarketSignal, 'evidenceIds'>, sourceEvidenceIds: string[]) => {
+      const evidenceId = makeEvidenceId(symbol, 'technical_market_signal', signal.signalId, period);
+      const evidenceIds = [...new Set([...sourceEvidenceIds, evidenceId])];
+      signals.push({ ...signal, evidenceIds });
+      evidence.push({ evidenceId, type: 'market', title: `技术与市场信号：${signal.signalId}`, value: signal.status, period, source: 'calculation', fetchedAt: new Date().toISOString(), freshness: 'delayed', verification: 'third_party', sourceEvidenceIds });
+    };
+    const metricEvidence = (keys: string[]) => technicalCalculationEvidenceIds(symbol, keys, period);
+
+    const trend = String(metrics.trend || 'neutral');
+    const ma20Slope = finiteNumber(metrics.ma20Slope5d);
+    const ma50Slope = finiteNumber(metrics.ma50Slope5d);
+    const trendDurationDays = finiteNumber(metrics.trendDurationDays);
+    const trendStatus: TechnicalMarketSignalStatus = trend === 'bullish' && (ma20Slope ?? 0) > 0 && (ma50Slope ?? 0) >= 0
+      ? 'positive' : trend === 'bearish' && (ma20Slope ?? 0) < 0 && (ma50Slope ?? 0) <= 0 ? 'risk' : 'mixed';
+    addSignal({
+      signalId: 'trend', dimension: 'trend', status: trendStatus, severity: trendStatus === 'risk' ? 'high' : trendStatus === 'mixed' ? 'medium' : 'low',
+      summary: trendStatus === 'positive' ? `均线结构偏多，MA20/MA50 近5日斜率为 ${formatPercent(ma20Slope)} / ${formatPercent(ma50Slope)}，该状态已持续 ${trendDurationDays ?? '未知'} 个交易日。`
+        : trendStatus === 'risk' ? `均线结构偏空，MA20/MA50 近5日斜率为 ${formatPercent(ma20Slope)} / ${formatPercent(ma50Slope)}，该状态已持续 ${trendDurationDays ?? '未知'} 个交易日。`
+          : `均线结构与斜率未形成同向确认，当前趋势状态为 ${trend}。`,
+      values: { trend, ma20Slope5d: ma20Slope, ma50Slope5d: ma50Slope, trendDurationDays },
+    }, metricEvidence(['trend', 'ma20Slope5d', 'ma50Slope5d', 'trendDurationDays', 'ma20', 'ma50']));
+
+    const macdHistogram = finiteNumber(metrics.macdHistogram);
+    const macdHistogramChange = finiteNumber(metrics.macdHistogramChange5d);
+    const rsi14 = finiteNumber(metrics.rsi14);
+    const rsiChange = finiteNumber(metrics.rsi14Change5d);
+    const priceVolumeState = String(metrics.priceVolumeState || 'data_insufficient');
+    const confirmationStatus: TechnicalMarketSignalStatus = macdHistogram !== null && macdHistogramChange !== null && macdHistogram >= 0 && macdHistogramChange > 0 && ['up_volume_confirmed', 'up_volume_unconfirmed'].includes(priceVolumeState)
+      ? 'positive' : macdHistogram !== null && macdHistogramChange !== null && macdHistogram <= 0 && macdHistogramChange < 0 && priceVolumeState === 'down_volume_expanded' ? 'risk' : 'mixed';
+    addSignal({
+      signalId: 'confirmation', dimension: 'confirmation', status: confirmationStatus, severity: confirmationStatus === 'risk' ? 'high' : confirmationStatus === 'mixed' ? 'medium' : 'low',
+      summary: confirmationStatus === 'positive' ? 'MACD 柱位于零轴上方且近5日改善，量价未出现下跌放量，动量获得初步确认。'
+        : confirmationStatus === 'risk' ? 'MACD 柱位于零轴下方且近5日走弱，并出现下跌放量，动量确认偏弱。'
+          : 'MACD、RSI 与量价未形成充分同向确认，应视为等待验证的分歧状态。',
+      values: { macdHistogram, macdHistogramChange5d: macdHistogramChange, rsi14, rsi14Change5d: rsiChange, priceVolumeState },
+    }, metricEvidence(['macdHistogram', 'macdHistogramChange5d', 'rsi14', 'rsi14Change5d', 'priceVolumeState', 'volumeRatio20d']));
+
+    const atrPercent = finiteNumber(metrics.atrPercentOfPrice);
+    const volatilityPercentile = finiteNumber(metrics.volatilityPercentile1y);
+    const drawdown20d = finiteNumber(metrics.maxDrawdown20d);
+    const drawdown60d = finiteNumber(metrics.maxDrawdown60d);
+    const riskElevated = (atrPercent !== null && atrPercent >= riskThresholds.atrPercentOfPrice) || (volatilityPercentile !== null && volatilityPercentile >= riskThresholds.volatilityPercentile1y) || (drawdown20d !== null && drawdown20d <= riskThresholds.maxDrawdown20d) || (drawdown60d !== null && drawdown60d <= riskThresholds.maxDrawdown60d);
+    addSignal({
+      signalId: 'risk', dimension: 'risk', status: riskElevated ? 'risk' : atrPercent === null || volatilityPercentile === null || drawdown20d === null ? 'data_insufficient' : 'stable', severity: riskElevated ? 'high' : 'low',
+      summary: riskElevated ? 'ATR、波动率分位数或阶段最大回撤至少一项达到预设风险阈值，趋势信号应降低权重。'
+        : atrPercent === null || volatilityPercentile === null || drawdown20d === null ? '波动或回撤字段不完整，不能完整评估技术风险。'
+          : 'ATR、波动率分位数和阶段最大回撤均未触发预设高风险阈值。',
+      values: { atrPercentOfPrice: atrPercent, volatilityPercentile1y: volatilityPercentile, maxDrawdown20d: drawdown20d, maxDrawdown60d: drawdown60d },
+    }, metricEvidence(['atrPercentOfPrice', 'volatilityPercentile1y', 'maxDrawdown20d', 'maxDrawdown60d']));
+
+    if (environmentResult.status === 'fulfilled') {
+      const environment = environmentResult.value;
+      const marketRegime = String(environment.marketRegime?.state || 'neutral');
+      addSignal({
+        signalId: 'environment', dimension: 'environment', status: marketRegime === 'risk_on' ? 'positive' : marketRegime === 'risk_off' ? 'risk' : 'mixed', severity: marketRegime === 'risk_off' ? 'high' : marketRegime === 'neutral' ? 'medium' : 'low',
+        summary: String(environment.marketRegime?.reason || '市场环境状态未提供。'),
+        values: { marketRegime, breadthUpRatio: finiteNumber(environment.breadth?.upRatio), turnoverAmount: finiteNumber(environment.turnover?.amount) },
+      }, (environment.evidence || []).map((item: any) => String(item.evidenceId)));
+      dataGaps.push(...(environment.dataGaps || []).map(String));
+    } else {
+      dataGaps.push(`市场环境不可用：${environmentResult.reason?.message || '未知原因'}`);
+      addSignal({ signalId: 'environment', dimension: 'environment', status: 'data_insufficient', severity: 'medium', summary: '市场环境数据不可用，不能判断指数趋势与市场参与度是否配合。', values: { marketRegime: null, breadthUpRatio: null, turnoverAmount: null } }, []);
+    }
+
+    if (relativeStrengthResult.status === 'fulfilled') {
+      const relative = relativeStrengthResult.value;
+      const marketState = String(relative.market?.state || 'data_insufficient');
+      const industryState = String(relative.industry?.state || 'data_insufficient');
+      const relativeStatus: TechnicalMarketSignalStatus = marketState === 'strong' ? 'positive' : marketState === 'weak' ? 'risk' : marketState === 'data_insufficient' ? 'data_insufficient' : 'mixed';
+      addSignal({
+        signalId: 'relative_strength', dimension: 'relative_strength', status: relativeStatus, severity: relativeStatus === 'risk' ? 'high' : relativeStatus === 'data_insufficient' ? 'medium' : 'low',
+        summary: marketState === 'strong' ? `个股相对上证指数在 5/20/60 日窗口均为正；相对行业状态为 ${industryState}。`
+          : marketState === 'weak' ? `个股相对上证指数在 5/20/60 日窗口均为负；相对行业状态为 ${industryState}。`
+            : marketState === 'data_insufficient' ? '个股与市场基准未满足日期对齐或市场数据不可用，不能输出相对大盘强弱。'
+              : `个股相对上证指数的多周期表现分化；相对行业状态为 ${industryState}。`,
+        values: { relativeToMarket: marketState, relativeToIndustry: industryState, marketExcessReturn5d: finiteNumber(relative.market?.excessReturns?.change5d), marketExcessReturn20d: finiteNumber(relative.market?.excessReturns?.change20d), marketExcessReturn60d: finiteNumber(relative.market?.excessReturns?.change60d) },
+      }, (relative.evidence || []).map((item: any) => String(item.evidenceId)));
+      dataGaps.push(...(relative.dataGaps || []).map(String));
+    } else {
+      dataGaps.push(`相对强弱不可用：${relativeStrengthResult.reason?.message || '未知原因'}`);
+      addSignal({ signalId: 'relative_strength', dimension: 'relative_strength', status: 'data_insufficient', severity: 'medium', summary: '相对大盘与行业的超额收益不可用，不能给出强弱结论。', values: { relativeToMarket: null, relativeToIndustry: null, marketExcessReturn5d: null, marketExcessReturn20d: null, marketExcessReturn60d: null } }, []);
+    }
+
+    const qualityGaps: string[] = [];
+    if (technical.period?.barCount < 200) qualityGaps.push('有效日线不足 200 根，长期均线和一年分位数的稳定性有限。');
+    if (technical.period?.adjust !== 'qfq') qualityGaps.push(`当前日线复权方式为 ${technical.period?.adjust || 'unknown'}，不得与前复权序列直接比较。`);
+    if (technical.sourceMeta?.source === 'cache') qualityGaps.push('个股技术数据来自缓存，非本次实时拉取。');
+    dataGaps.push(...qualityGaps);
+    addSignal({
+      signalId: 'data_quality', dimension: 'data_quality', status: qualityGaps.length ? 'data_insufficient' : 'stable', severity: qualityGaps.length ? 'medium' : 'low',
+      summary: qualityGaps.length ? qualityGaps.join(' ') : '日线长度、复权方式与数据新鲜度满足当前技术信号计算要求。',
+      values: { barCount: finiteNumber(technical.period?.barCount), adjust: String(technical.period?.adjust || 'unknown'), source: String(technical.sourceMeta?.source || 'unknown'), stale: technical.sourceMeta?.source === 'cache' },
+    }, metricEvidence(['ma20', 'ma50', 'ma200', 'volatilityPercentile1y']));
+
+    const uniqueGaps = [...new Set(dataGaps.filter(Boolean))];
+    const value = {
+      symbol, period, signals, evidence, dataGaps: uniqueGaps,
+      ruleSet: { version: 'technical-market-v1', riskThresholds, relativeStrength: '5/20/60 日相对收益全正为 strong、全负为 weak，其余为 mixed；仅在交易日对齐时计算。', trend: '趋势需要均线结构与 MA20/MA50 近5日斜率同向确认。' },
+      inputMeta: { technical: { sourceMeta: technical.sourceMeta, period: technical.period }, marketEnvironment: environmentResult.status === 'fulfilled' ? environmentResult.value.snapshotMeta : null, relativeStrength: relativeStrengthResult.status === 'fulfilled' ? relativeStrengthResult.value.snapshotMeta : null },
+      snapshotMeta: { generatedAt: new Date().toISOString(), source: 'live', freshness: 'delayed', evidenceCount: evidence.length, signalVersion: 'technical-market-v1' },
+    };
+    technicalMarketSignalCache.set(symbol, { expiresAt: Date.now() + 5 * 60_000, value });
     return value;
   }
 
