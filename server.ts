@@ -2644,6 +2644,18 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
     }
   });
 
+  // GET /api/cninfo/business-segments - 最新正式定期报告中的分产品/地区/行业原文表格与页码。
+  app.get('/api/cninfo/business-segments', async (req, res) => {
+    try {
+      const symbol = String(req.query.symbol || '');
+      if (!symbol) return res.status(400).json({ error: 'symbol is required' });
+      res.json(await buildStockBusinessSegments(symbol));
+    } catch (error: any) {
+      console.error('[cninfo] business segment parse failed:', error.message);
+      res.status(503).json({ error: '分业务经营数据暂不可用', detail: safeRuntimeDataGap(error.message), dataUnavailable: true });
+    }
+  });
+
   // GET /api/stock-search — 全市场 A 股名称/代码检索。东方财富为主，新浪联想为兜底。
   app.get('/api/stock-search', async (req, res) => {
     try {
@@ -2785,6 +2797,18 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
     } catch (error: any) {
       console.error('[industry-benchmark] query failed:', error.message);
       res.status(503).json({ error: '行业归属与基准暂不可用', detail: error.message, dataUnavailable: true });
+    }
+  });
+
+  // GET /api/stock-industry-financial-percentiles - 全量行业成员财务缓存的渐进结果。
+  app.get('/api/stock-industry-financial-percentiles', async (req, res) => {
+    try {
+      const symbol = String(req.query.symbol || '');
+      if (!symbol) return res.status(400).json({ error: 'symbol is required' });
+      res.json(await buildIndustryFinancialPercentiles(symbol));
+    } catch (error: any) {
+      console.error('[industry-financial-percentiles] query failed:', error.message);
+      res.status(503).json({ error: '行业财务分位暂不可用', detail: safeRuntimeDataGap(error.message), dataUnavailable: true });
     }
   });
 
@@ -4463,7 +4487,7 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
       // Keep the deterministic source snapshot with each module. The UI can then show
       // date/source provenance and draw trends only from real series (never placeholders).
       agentOutputs: {
-        fundamental: fundamental ? { signals: fundamental.signals, vetoes: fundamental.vetoes, reports: fact?.facts?.financialReports || [], sourceMeta: fact?.facts?.financialMeta?.sourceMeta || null, template: fundamental.template, aiStatus: 'not_requested' } : null,
+        fundamental: fundamental ? { signals: fundamental.signals, vetoes: fundamental.vetoes, reports: fact?.facts?.financialReports || [], businessSegments: fact?.facts?.businessSegments || null, sourceMeta: fact?.facts?.financialMeta?.sourceMeta || null, template: fundamental.template, aiStatus: 'not_requested' } : null,
         technical: technical ? { signals: technical.signals, keyLevels: technical.keyLevels, chartBars: technical.chartBars || [], structureInvalidation: technical.structureInvalidation, sourceMeta: technical.inputMeta?.technical?.sourceMeta || technical.snapshotMeta || null, aiStatus: 'not_requested' } : null,
         events: eventSnapshot ? { events: activeEvents, sourceMeta: eventSnapshot.snapshotMeta || null, aiStatus: 'not_requested' } : null,
         sentiment: sentiment ? { attention: sentiment.attention, tone: sentiment.tone, disagreement: sentiment.disagreement, eventReaction: sentiment.eventReaction, propagationQuality: sentiment.propagationQuality, sourceQuality: sentiment.sourceQuality, sourceMeta: sentiment.snapshotMeta || null, aiStatus: 'not_requested' } : null,
@@ -4493,6 +4517,7 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
   }
 
   const cninfoDocumentCache = new Map<string, { expiresAt: number; value: any }>();
+  const stockBusinessSegmentsCache = new Map<string, { expiresAt: number; value: any }>();
 
   async function parseCninfoDocument(announcementId: string, announcementTime: string, stockCode: string, force = false) {
     if (!/^\d{8,20}$/.test(announcementId)) throw new Error('announcementId 应为 8 至 20 位数字');
@@ -4507,11 +4532,61 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
     const value = {
       document: payload?.document || null,
       sections: Array.isArray(payload?.sections) ? payload.sections : [],
+      businessSegments: payload?.businessSegments || { segmentSets: [], dataGaps: [] },
       ocrEvidence: Array.isArray(payload?.ocrEvidence) ? payload.ocrEvidence : [],
       dataGaps: Array.isArray(payload?.dataGaps) ? payload.dataGaps : [],
       sourceMeta: { ...(payload?.sourceMeta || {}), fetchedAt: new Date().toISOString(), freshness: 'delayed', confidence: 'official', fallbackLevel: 0 },
     };
     cninfoDocumentCache.set(cacheKey, { expiresAt: Date.now() + 30 * 60_000, value });
+    return value;
+  }
+
+  function cninfoAnnouncementIdentity(item: any) {
+    const url = String(item?.url || '');
+    const id = url.match(/announcementId[=:/]([0-9]{8,20})/i)?.[1] || url.match(/([0-9]{10,20})(?!.*[0-9])/)?.[1] || '';
+    const published = String(item?.publishedAt || '').match(/\d{4}-\d{2}-\d{2}/)?.[0] || '';
+    return { announcementId: id, announcementTime: published };
+  }
+
+  function isBusinessReportTitle(title: unknown) {
+    const value = String(title || '').replace(/\s+/g, '');
+    return /(年度报告|年报|半年度报告|半年报)/.test(value) && !/(摘要|英文版|取消|更正|问询函)/.test(value);
+  }
+
+  async function buildStockBusinessSegments(input: string) {
+    const symbol = normalizeAshareSymbol(input).code;
+    const cached = stockBusinessSegmentsCache.get(symbol);
+    if (cached && cached.expiresAt > Date.now()) return { ...cached.value, snapshotMeta: { ...cached.value.snapshotMeta, source: 'cache', freshness: 'stale' } };
+    const end = new Date();
+    const start = new Date(end.getTime() - 800 * 86_400_000);
+    const compact = (date: Date) => date.toLocaleDateString('sv-SE', { timeZone: 'Asia/Shanghai' }).replaceAll('-', '');
+    const announcementPayload = await fetchCninfoAnnouncements(symbol, compact(start), compact(end));
+    const candidates = (announcementPayload.announcements || []).filter((item: any) => isBusinessReportTitle(item?.title));
+    const selected = candidates.map((item: any) => ({ ...item, ...cninfoAnnouncementIdentity(item) })).find((item: any) => item.announcementId && item.announcementTime);
+    if (!selected) throw new Error('未找到可解析的年报或半年报公告；不会从标题或摘要推断分业务数据。');
+    const parsed = await parseCninfoDocument(selected.announcementId, selected.announcementTime, symbol);
+    const sets = Array.isArray(parsed?.businessSegments?.segmentSets) ? parsed.businessSegments.segmentSets : [];
+    const evidence = [
+      ...(parsed.sections || []).filter((section: any) => /^business_by_|revenue_composition$/.test(String(section?.sectionType || ''))).map((section: any) => ({
+        evidenceId: section.evidenceId, type: 'financial', title: `分业务原文：${section.sectionType}`, value: section.snippet, period: selected.announcementTime, pageNumber: section.pageNumber,
+        source: 'cninfo', sourceUrl: parsed.document?.documentUrl, fetchedAt: parsed.sourceMeta?.fetchedAt, freshness: 'delayed', verification: 'official_verified',
+      })),
+      ...sets.flatMap((set: any) => (set.items || []).map((item: any) => ({
+        evidenceId: item.evidenceId, type: 'financial', title: `${set.dimension}：${item.name}`, value: item.revenue, period: selected.announcementTime, pageNumber: item.pageNumber,
+        source: 'cninfo_pdf_table', sourceUrl: parsed.document?.documentUrl, fetchedAt: parsed.sourceMeta?.fetchedAt, freshness: 'delayed', verification: 'official_verified', sourceEvidenceIds: [item.sourceEvidenceId].filter(Boolean),
+      }))),
+    ];
+    const dataGaps = [...(parsed.dataGaps || []), ...sets.filter((set: any) => set.status !== 'available').map((set: any) => set.dataGap || `${set.dimension}章节仅有原文证据，未可靠识别表格数值。`)];
+    const value = {
+      symbol,
+      announcement: { title: selected.title, publishedAt: selected.announcementTime, announcementId: selected.announcementId, sourceUrl: selected.url || null },
+      document: parsed.document,
+      segmentSets: sets,
+      evidence,
+      dataGaps: [...new Set(dataGaps.filter(Boolean))],
+      snapshotMeta: { generatedAt: new Date().toISOString(), source: 'live', freshness: 'delayed', evidenceCount: evidence.length },
+    };
+    stockBusinessSegmentsCache.set(symbol, { expiresAt: Date.now() + 6 * 60 * 60_000, value });
     return value;
   }
 
@@ -5104,6 +5179,82 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
 
   let marketEnvironmentCache: { expiresAt: number; value: any } | null = null;
   const stockIndustryBenchmarkCache = new Map<string, { expiresAt: number; value: any }>();
+  type IndustryFinancialJob = { startedAt: string; total: number; processed: number; failed: number; status: 'warming' | 'ready' | 'failed'; records: any[]; result?: any; error?: string; promise?: Promise<void> };
+  const industryFinancialJobs = new Map<string, IndustryFinancialJob>();
+
+  function percentile(values: number[], value: number) {
+    if (!values.length) return null;
+    return values.filter((item) => item <= value).length / values.length;
+  }
+
+  function quartile(values: number[], ratio: number) {
+    if (!values.length) return null;
+    const ordered = [...values].sort((a, b) => a - b);
+    const position = (ordered.length - 1) * ratio;
+    const lower = Math.floor(position); const upper = Math.ceil(position);
+    return lower === upper ? ordered[lower] : ordered[lower] + (ordered[upper] - ordered[lower]) * (position - lower);
+  }
+
+  function buildIndustryFinancialResult(symbol: string, industry: any, target: any, job: IndustryFinancialJob) {
+    const targetTemplate = target?.template === 'bank' ? 'bank' : 'non_financial';
+    const targetPeriod = target?.reports?.[0]?.period || null;
+    const peers = job.records.filter((record) => record.symbol !== symbol && record.template === targetTemplate && record.period === targetPeriod);
+    const metrics = target?.calculations?.metrics || {};
+    const definitions: Record<string, { label: string; value: any }> = {
+      revenueYoY: { label: '营收同比', value: metrics.revenueYoY }, netMargin: { label: '净利率', value: metrics.netMargin },
+      roeApprox: { label: 'ROE（近似）', value: metrics.roeApprox }, assetLiabilityRatio: { label: '资产负债率', value: metrics.assetLiabilityRatio },
+      cashConversion: { label: '经营现金流/净利润', value: metrics.cashConversion },
+    };
+    const output: any[] = [];
+    const exclusions: Record<string, number> = { missing_report: job.failed, different_template: job.records.filter((record) => record.template !== targetTemplate).length, different_period: job.records.filter((record) => record.template === targetTemplate && record.period !== targetPeriod).length, outlier: 0 };
+    for (const [key, definition] of Object.entries(definitions)) {
+      const targetValue = finiteNumber(definition.value);
+      const raw = peers.map((record) => finiteNumber(record.metrics?.[key])).filter((value): value is number => value !== null);
+      const q1 = quartile(raw, 0.25); const q3 = quartile(raw, 0.75); const iqr = q1 !== null && q3 !== null ? q3 - q1 : null;
+      const values = iqr !== null ? raw.filter((value) => value >= q1! - 3 * iqr && value <= q3! + 3 * iqr) : raw;
+      exclusions.outlier += raw.length - values.length;
+      output.push({ key, label: definition.label, value: targetValue, median: quartile(values, 0.5), percentile: targetValue === null || values.length < 10 ? null : percentile(values, targetValue), sampleSize: values.length, status: targetValue === null || values.length < 10 ? 'data_insufficient' : 'available' });
+    }
+    return { symbol, industry: { name: industry.name, code: industry.code, classification: industry.classification, memberCount: industry.memberCount }, period: targetPeriod, template: targetTemplate, metrics: output, coverage: { totalMembers: job.total, processed: job.processed, successful: job.records.length, failed: job.failed, comparable: peers.length, exclusions }, status: 'ready', dataGaps: output.some((item) => item.status !== 'available') ? ['行业可比样本不足 10 家、报告期未对齐或指标缺失时，不显示分位数。'] : [], snapshotMeta: { generatedAt: new Date().toISOString(), source: 'ths_financial_statements', freshness: 'delayed', confidence: 'market' } };
+  }
+
+  function startIndustryFinancialWarmup(industry: any) {
+    const key = String(industry?.code || industry?.name || 'unknown');
+    const existing = industryFinancialJobs.get(key);
+    if (existing && existing.status !== 'failed') return existing;
+    const members = Array.isArray(industry?.members) ? industry.members : [];
+    const job: IndustryFinancialJob = { startedAt: new Date().toISOString(), total: members.length, processed: 0, failed: 0, status: 'warming', records: [] };
+    job.promise = (async () => {
+      let cursor = 0;
+      const worker = async () => {
+        while (cursor < members.length) {
+          const member = members[cursor++];
+          try {
+            const financial = await fetchFinancialDataWithFallback(String(member.symbol));
+            const latest = financial?.reports?.[0];
+            if (!latest?.period) throw new Error('missing latest report');
+            job.records.push({ symbol: String(member.symbol), name: member.name, template: financial.template, period: latest.period, metrics: financial.calculations?.metrics || {} });
+          } catch { job.failed += 1; }
+          finally { job.processed += 1; }
+        }
+      };
+      await Promise.all([worker(), worker()]);
+      job.status = 'ready';
+    })().catch((error: any) => { job.status = 'failed'; job.error = error?.message || 'industry financial warmup failed'; });
+    industryFinancialJobs.set(key, job);
+    return job;
+  }
+
+  async function buildIndustryFinancialPercentiles(input: string) {
+    const symbol = normalizeAshareSymbol(input).code;
+    const [industrySnapshot, target] = await Promise.all([fetchStockIndustryBenchmark(symbol), fetchFinancialDataWithFallback(symbol)]);
+    if (!industrySnapshot.industry?.code || !Array.isArray(industrySnapshot.industry?.members) || !industrySnapshot.industry.members.length) {
+      return { symbol, industry: { name: industrySnapshot.industry?.name || '未分类', code: industrySnapshot.industry?.code || null, memberCount: industrySnapshot.industry?.memberCount || 0 }, status: 'unavailable', period: target?.reports?.[0]?.period || null, coverage: { totalMembers: 0, processed: 0, successful: 0, failed: 0 }, metrics: [], dataGaps: ['当前未获取到同花顺全量行业成员快照；不会用证监会行业名称或空样本计算行业分位。'], snapshotMeta: { generatedAt: new Date().toISOString(), source: industrySnapshot.snapshotMeta?.source || 'unknown', freshness: 'delayed', confidence: 'limited' } };
+    }
+    const job = startIndustryFinancialWarmup(industrySnapshot.industry);
+    if (job.status === 'ready') return job.result = buildIndustryFinancialResult(symbol, industrySnapshot.industry, target, job);
+    return { symbol, industry: { name: industrySnapshot.industry.name, code: industrySnapshot.industry.code, memberCount: industrySnapshot.industry.memberCount }, status: job.status, period: target?.reports?.[0]?.period || null, coverage: { totalMembers: job.total, processed: job.processed, successful: job.records.length, failed: job.failed }, metrics: [], dataGaps: ['行业成员财务快照正在后台预热；只使用完成同报告期对齐与异常值处理后的样本。'], snapshotMeta: { generatedAt: new Date().toISOString(), source: 'ths_financial_statements', freshness: 'delayed', confidence: 'market' } };
+  }
   const stockRelativeStrengthCache = new Map<string, { expiresAt: number; value: any }>();
   const technicalMarketSignalCache = new Map<string, { expiresAt: number; value: any }>();
 
@@ -5521,13 +5672,14 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
     }
     const today = new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Shanghai' }).replaceAll('-', '');
     const startDate = `${today.slice(0, 4)}0101`;
-    const [quoteResult, financialResult, technicalResult, announcementResult, profileResult, heatResult] = await Promise.allSettled([
+    const [quoteResult, financialResult, technicalResult, announcementResult, profileResult, heatResult, businessSegmentsResult] = await Promise.allSettled([
       fetchAshareStockQuoteWithFallback(symbol),
       fetchFinancialDataWithFallback(symbol),
       fetchStockTechnicalData(symbol),
       fetchCninfoAnnouncements(symbol, startDate, today),
       fetchXueqiuProfile(symbol),
       fetchXueqiuHeat(),
+      buildStockBusinessSegments(symbol),
     ]);
     const evidence: any[] = [];
     const dataGaps: Array<{ source: string; reason: string }> = [];
@@ -5542,6 +5694,7 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
     const announcementData: any = fulfilled(announcementResult, 'cninfo');
     const profileData: any = fulfilled(profileResult, 'xueqiu_profile');
     const heatData: any = fulfilled(heatResult, 'xueqiu_heat');
+    const businessSegmentsData: any = fulfilled(businessSegmentsResult, 'cninfo_business_segments');
 
     if (quoteData?.quote) {
       const quote = quoteData.quote;
@@ -5574,6 +5727,8 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
     for (const item of (announcementData?.announcements || []).slice(0, 20)) {
       evidence.push({ evidenceId: makeEvidenceId(symbol, 'announcement', item.title, item.publishedAt), type: 'announcement', title: item.title, source: 'cninfo', sourceUrl: item.url, publishedAt: item.publishedAt, fetchedAt: announcementData.sourceMeta.fetchedAt, freshness: announcementData.sourceMeta.freshness, verification: 'official_verified' });
     }
+    evidence.push(...(businessSegmentsData?.evidence || []));
+    for (const gap of businessSegmentsData?.dataGaps || []) dataGaps.push({ source: 'cninfo_business_segments', reason: String(gap) });
     for (const [key, value] of Object.entries(profileData?.profile || {})) {
       if (!value) continue;
       evidence.push({ evidenceId: makeEvidenceId(symbol, 'profile', key), type: 'industry', title: key, value: String(value), source: profileData.sourceMeta.source, fetchedAt: profileData.sourceMeta.fetchedAt, freshness: profileData.sourceMeta.freshness, verification: 'third_party' });
@@ -5587,7 +5742,7 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
     const value = {
       symbol,
       company: { name: quoteData?.quote?.name || profileData?.profile?.org_short_name_cn || symbol, profile: profileData?.profile || {}, financialTemplate: financialData?.template || null },
-      facts: { quote: quoteData?.quote || null, financialReports: financialData?.reports || [], financialCalculations: financialData?.calculations || null, financialMeta: financialData ? { template: financialData.template, unit: financialData.unit, normalization: financialData.normalization, sourceMeta: financialData.sourceMeta } : null, technical: technicalData || null, announcements: announcementData?.announcements?.slice(0, 20) || [], sentiment: heatItem || null },
+      facts: { quote: quoteData?.quote || null, financialReports: financialData?.reports || [], financialCalculations: financialData?.calculations || null, financialMeta: financialData ? { template: financialData.template, unit: financialData.unit, normalization: financialData.normalization, sourceMeta: financialData.sourceMeta } : null, businessSegments: businessSegmentsData || null, technical: technicalData || null, announcements: announcementData?.announcements?.slice(0, 20) || [], sentiment: heatItem || null },
       evidence,
       dataGaps,
       snapshotMeta: { generatedAt: new Date().toISOString(), source: 'live', freshness: 'realtime', evidenceCount: evidence.length },
@@ -5670,6 +5825,21 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
       values: { businessSummary: String(businessSummary).slice(0, 300) || null }, evidenceIds: profileEvidence,
     });
     if (!businessSummary) dataGaps.push('缺少可核验的主营业务描述。');
+
+    const businessSegments = snapshot.facts?.businessSegments;
+    const segmentSets = Array.isArray(businessSegments?.segmentSets) ? businessSegments.segmentSets : [];
+    const availableSegmentSets = segmentSets.filter((set: any) => set?.status === 'available' && Array.isArray(set?.items) && set.items.length);
+    const concentrated = availableSegmentSets.find((set: any) => finiteNumber(set?.concentration?.top1RevenueShare) !== null && Number(set.concentration.top1RevenueShare) >= 0.7);
+    const businessEvidenceIds = availableSegmentSets.flatMap((set: any) => (set.items || []).map((item: any) => item.evidenceId).filter(Boolean));
+    addSignal({
+      signalId: 'business_segment_structure', dimension: 'business_model',
+      status: availableSegmentSets.length ? concentrated ? 'mixed' : 'stable' : 'data_insufficient', severity: concentrated ? 'medium' : 'low',
+      summary: availableSegmentSets.length
+        ? `${availableSegmentSets.map((set: any) => `${set.dimension}分部`).join('、')}已从巨潮原文表格提取；${concentrated ? `最大已提取分部收入占比${formatPercent(concentrated.concentration.top1RevenueShare)}，存在集中度观察项。` : '当前提取范围内未触发单一分部集中度观察规则。'}`
+        : '未获得可可靠结构化的分业务表格；仅保留巨潮原文页码证据，不据此推断增长来源或业务恶化。',
+      values: { segmentSetCount: availableSegmentSets.length, top1RevenueShare: finiteNumber(concentrated?.concentration?.top1RevenueShare) }, evidenceIds: businessEvidenceIds,
+    });
+    if (!availableSegmentSets.length) dataGaps.push('分业务经营章节已尝试解析，但尚未得到可可靠计算的收入/利润表格；请查看原文页码证据。');
 
     const revenueYoY = finiteNumber(metrics.revenueYoY);
     const adjustedYoY = finiteNumber(metrics.adjustedNetProfitYoY);

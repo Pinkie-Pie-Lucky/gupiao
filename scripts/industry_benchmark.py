@@ -114,7 +114,10 @@ def main():
         raise RuntimeError("行业指数日线不足 60 根")
     print(json.dumps({
         "symbol": symbol,
-        "industry": {"name": matched["name"], "code": matched["code"], "classification": "同花顺行业", "memberCount": len(members), "members": members[:50]},
+        # Do not truncate the canonical industry universe.  Consumers that need a
+        # compact response should summarize it themselves, while percentile jobs
+        # must see the complete, reproducible membership snapshot.
+        "industry": {"name": matched["name"], "code": matched["code"], "classification": "同花顺行业", "memberCount": len(members), "members": members},
         "bars": rows,
         "sourceMeta": {"mappingSource": "ths_industry_member_page", "benchmarkSource": "ths_industry_index", "adjust": "none", "barInterval": "1d", "lastTradingDate": rows[-1]["date"], "fetchedAt": dt.datetime.now(dt.timezone.utc).isoformat()},
     }, ensure_ascii=False))

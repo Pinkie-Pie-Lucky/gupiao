@@ -304,6 +304,147 @@ def page_sections(pages: list[dict], document_evidence_id: str) -> list[dict]:
     return found[:24]
 
 
+def as_number(value):
+    """Return a report-table number without guessing units or column meanings."""
+    text = str(value or "").strip().replace(",", "").replace("，", "")
+    text = re.sub(r"[()（）]", "", text)
+    if not text or text in {"-", "--", "不适用", "N/A"} or "%" in text:
+        return None
+    match = re.fullmatch(r"[-+]?\d+(?:\.\d+)?", text)
+    return float(text) if match else None
+
+
+def table_cell(value):
+    return re.sub(r"\s+", "", str(value or "")).strip()
+
+
+def table_headers(rows):
+    """Use up to two header rows; annual-report tables commonly have merged headers."""
+    if not rows:
+        return []
+    width = max(len(row) for row in rows[:2])
+    values = []
+    for index in range(width):
+        parts = []
+        for row in rows[:2]:
+            cell = table_cell(row[index] if index < len(row) else "")
+            if cell and cell not in parts:
+                parts.append(cell)
+        values.append("/".join(parts))
+    return values
+
+
+def find_column(headers, patterns):
+    for index, header in enumerate(headers):
+        if any(pattern in header for pattern in patterns):
+            return index
+    return None
+
+
+def segment_dimension(section_type):
+    return {
+        "business_by_product": "product",
+        "business_by_region": "region",
+        "business_by_industry": "industry",
+    }.get(section_type)
+
+
+def extract_business_segments(file_path: Path, is_html: bool, sections: list[dict], document_evidence_id: str) -> dict:
+    """Extract only explicit product/region/industry table values.
+
+    A text hit alone remains original evidence.  It never becomes a numerical segment
+    until the PDF table has a recognizable revenue column and a named row.
+    """
+    result = {"segmentSets": [], "dataGaps": []}
+    by_page = {}
+    for section in sections:
+        dimension = segment_dimension(section.get("sectionType"))
+        if dimension:
+            by_page.setdefault((dimension, int(section["pageNumber"])), section)
+    if not by_page:
+        result["dataGaps"].append("未在报告正文定位到分产品、分地区或分行业章节；仅保留其他原文证据。")
+        return result
+    if is_html:
+        result["dataGaps"].append("当前 HTML 公告未接入表格结构提取；已保留正文页码证据，不对经营分部数值作推断。")
+        return result
+    try:
+        with pdfplumber.open(file_path) as document:
+            for (dimension, page_number), section in by_page.items():
+                page = document.pages[page_number - 1]
+                tables = page.extract_tables() or []
+                selected_items = []
+                raw_rows = []
+                for table in tables:
+                    rows = [[table_cell(cell) for cell in (row or [])] for row in table if row]
+                    if len(rows) < 3:
+                        continue
+                    headers = table_headers(rows)
+                    revenue_index = find_column(headers, ["营业收入", "主营业务收入", "收入"])
+                    profit_index = find_column(headers, ["营业利润", "净利润", "分部利润"])
+                    revenue_yoy_index = find_column(headers, ["营业收入比上年", "收入同比", "收入增长"])
+                    name_index = 0
+                    if revenue_index is None:
+                        continue
+                    active_dimension = None
+                    for row in rows:
+                        name = table_cell(row[name_index] if name_index < len(row) else "")
+                        if "分产品" in name or "按产品" in name:
+                            active_dimension = "product"
+                            continue
+                        if "分地区" in name or "按地区" in name:
+                            active_dimension = "region"
+                            continue
+                        if "分行业" in name or "按行业" in name:
+                            active_dimension = "industry"
+                            continue
+                        if "销售模式" in name or "分渠道" in name or "按渠道" in name:
+                            # These are useful disclosures, but not one of the three
+                            # requested dimensions; do not leak them into regions.
+                            active_dimension = "unsupported"
+                            continue
+                        if active_dimension is not None and active_dimension != dimension:
+                            continue
+                        revenue = as_number(row[revenue_index] if revenue_index < len(row) else "")
+                        if not name or revenue is None or name in {"合计", "总计", "小计"}:
+                            continue
+                        profit = as_number(row[profit_index] if profit_index is not None and profit_index < len(row) else "")
+                        revenue_yoy = as_number(row[revenue_yoy_index] if revenue_yoy_index is not None and revenue_yoy_index < len(row) else "")
+                        selected_items.append({
+                            "name": name[:100], "revenue": revenue, "profit": profit,
+                            "revenueYoY": revenue_yoy / 100 if revenue_yoy is not None else None,
+                            "unit": "document_reported", "period": None, "pageNumber": page_number,
+                            "evidenceId": f"{document_evidence_id}:p{page_number}:{dimension}:{len(selected_items) + 1}",
+                            "sourceEvidenceId": section["evidenceId"], "source": "cninfo_pdf_table",
+                        })
+                    if selected_items:
+                        raw_rows = rows[:12]
+                        break
+                if selected_items:
+                    total = sum(item["revenue"] for item in selected_items)
+                    for item in selected_items:
+                        item["revenueShare"] = round(item["revenue"] / total, 6) if total else None
+                    ordered = sorted(selected_items, key=lambda item: item["revenue"], reverse=True)
+                    top3 = sum(item["revenueShare"] or 0 for item in ordered[:3])
+                    result["segmentSets"].append({
+                        "dimension": dimension, "period": None, "unit": "document_reported",
+                        "items": ordered[:30],
+                        "concentration": {"top1RevenueShare": ordered[0]["revenueShare"], "top3RevenueShare": round(top3, 6), "basis": "extracted_items_only"},
+                        "growthSources": [{"name": item["name"], "revenueYoY": item["revenueYoY"], "evidenceId": item["evidenceId"]} for item in ordered if item["revenueYoY"] is not None and item["revenueYoY"] > 0][:5],
+                        "deteriorationSignals": [{"name": item["name"], "revenueYoY": item["revenueYoY"], "evidenceId": item["evidenceId"]} for item in ordered if item["revenueYoY"] is not None and item["revenueYoY"] < 0][:5], "rawTable": raw_rows,
+                        "pageNumber": page_number, "evidenceId": section["evidenceId"], "status": "available",
+                    })
+                else:
+                    result["segmentSets"].append({
+                        "dimension": dimension, "period": None, "unit": None, "items": [],
+                        "concentration": None, "growthSources": [], "deteriorationSignals": [],
+                        "pageNumber": page_number, "evidenceId": section["evidenceId"], "status": "evidence_only",
+                        "dataGap": "已定位章节，但表格列无法可靠识别为收入/利润；保留原文与页码，不输出推断数值。",
+                    })
+    except Exception as error:
+        result["dataGaps"].append(f"分业务表格提取失败：{str(error)[:160]}；保留正文页码证据。")
+    return result
+
+
 def parse_document(announcement_id: str, announcement_time: str, stock_code: str, force: bool) -> dict:
     root = cache_root()
     item_dir = root / announcement_id
@@ -349,6 +490,7 @@ def parse_document(announcement_id: str, announcement_time: str, stock_code: str
     usable_coverage = round(usable_pages / page_count, 4) if page_count else 0
     scan_status = "text_ready" if coverage >= 0.8 else "ocr_ready" if usable_coverage >= 0.8 else "partial_ocr" if usable_pages else "needs_ocr"
     sections = page_sections(pages, document_evidence_id)
+    business_segments = extract_business_segments(document_path, is_html, sections, document_evidence_id)
     result = {
         "document": {
             **metadata,
@@ -365,8 +507,9 @@ def parse_document(announcement_id: str, announcement_time: str, stock_code: str
             "ocr": ocr_meta,
         },
         "sections": sections,
+        "businessSegments": business_segments,
         "ocrEvidence": ocr_evidence,
-        "dataGaps": (["文档为扫描件或没有可用文字层，PaddleOCR 未获得足够高置信度文本，不输出正文证据。"] if scan_status == "needs_ocr" else ["部分页面缺少可用文字层，已启用 PaddleOCR；仅使用高置信度 OCR 页作为证据。"] if scan_status == "partial_ocr" else []) + ocr_gaps,
+        "dataGaps": (["文档为扫描件或没有可用文字层，PaddleOCR 未获得足够高置信度文本，不输出正文证据。"] if scan_status == "needs_ocr" else ["部分页面缺少可用文字层，已启用 PaddleOCR；仅使用高置信度 OCR 页作为证据。"] if scan_status == "partial_ocr" else []) + ocr_gaps + business_segments.get("dataGaps", []),
         "sourceMeta": {"source": "cninfo", "verification": "official_verified", "cache": "hit" if cache_hit else "miss", "cachedAt": cached.get("cachedAt") if cached else None},
     }
     cache_path.write_text(json.dumps({"cachedAt": time.time(), "metadata": metadata, "sha256": sha256, "sizeBytes": size_bytes}, ensure_ascii=False), encoding="utf-8")
