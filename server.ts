@@ -2629,6 +2629,21 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
     }
   });
 
+  // GET /api/cninfo/document - 仅解析巨潮公告 ID，对正文页码和证据 ID 做可追溯提取。
+  app.get('/api/cninfo/document', async (req, res) => {
+    try {
+      const announcementId = String(req.query.announcementId || '').trim();
+      const announcementTime = String(req.query.announcementTime || '').trim();
+      const stockCode = String(req.query.stockCode || '').trim();
+      const force = String(req.query.force || '').trim() === '1';
+      res.json(await parseCninfoDocument(announcementId, announcementTime, stockCode, force));
+    } catch (error: any) {
+      console.error('[cninfo] document parse failed:', error.message);
+      const invalidInput = /announcementId 应为|announcementTime 应为|stockCode 应为/.test(String(error.message || ''));
+      res.status(invalidInput ? 400 : 503).json({ error: invalidInput ? '公告文档请求参数不正确' : 'CNINFO 公告文档暂不可用', detail: safeRuntimeDataGap(error.message), dataUnavailable: !invalidInput });
+    }
+  });
+
   // GET /api/stock-search — 全市场 A 股名称/代码检索。东方财富为主，新浪联想为兜底。
   app.get('/api/stock-search', async (req, res) => {
     try {
@@ -4475,6 +4490,28 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
       text: sanitizeTeacherText(item?.text, 220),
       evidenceIds: Array.isArray(item?.evidenceIds) ? [...new Set<string>(item.evidenceIds.map(String).filter((id: string) => evidenceSet.has(id)))].slice(0, 8) : [],
     })).filter((item: any) => item.text && item.evidenceIds.length);
+  }
+
+  const cninfoDocumentCache = new Map<string, { expiresAt: number; value: any }>();
+
+  async function parseCninfoDocument(announcementId: string, announcementTime: string, stockCode: string, force = false) {
+    if (!/^\d{8,20}$/.test(announcementId)) throw new Error('announcementId 应为 8 至 20 位数字');
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(announcementTime)) throw new Error('announcementTime 应为 YYYY-MM-DD');
+    if (!/^\d{6}$/.test(stockCode)) throw new Error('stockCode 应为 6 位证券代码');
+    const cacheKey = `${announcementId}:${announcementTime}:${stockCode}`;
+    const cached = cninfoDocumentCache.get(cacheKey);
+    if (!force && cached && cached.expiresAt > Date.now()) return { ...cached.value, sourceMeta: { ...cached.value.sourceMeta, cache: 'memory_hit' } };
+    const invocation = resolvePythonInvocation('cninfo_document_parser.py', [announcementId, announcementTime, stockCode, ...(force ? ['--force'] : [])]);
+    const { stdout } = await execFileAsync(invocation.command, invocation.args, { timeout: 120_000, windowsHide: true, maxBuffer: 3 * 1024 * 1024, env: pythonChildEnv() });
+    const payload = JSON.parse(stdout);
+    const value = {
+      document: payload?.document || null,
+      sections: Array.isArray(payload?.sections) ? payload.sections : [],
+      dataGaps: Array.isArray(payload?.dataGaps) ? payload.dataGaps : [],
+      sourceMeta: { ...(payload?.sourceMeta || {}), fetchedAt: new Date().toISOString(), freshness: 'delayed', confidence: 'official', fallbackLevel: 0 },
+    };
+    cninfoDocumentCache.set(cacheKey, { expiresAt: Date.now() + 30 * 60_000, value });
+    return value;
   }
 
   function normalizeCioModuleExplanations(items: unknown, evidenceSet: Set<string>) {
