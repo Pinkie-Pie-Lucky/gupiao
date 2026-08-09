@@ -4720,6 +4720,15 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
     const current = latest.metrics || {};
     const previous = prior?.metrics || {};
     const averageEquity = current.equity != null && previous.equity != null ? (Number(current.equity) + Number(previous.equity)) / 2 : null;
+    const averageBalance = (key: string) => current[key] != null && previous[key] != null ? (Number(current[key]) + Number(previous[key])) / 2 : null;
+    const interestBearingDebt = ['shortTermBorrowings', 'currentPortionOfNonCurrentDebt', 'longTermBorrowings', 'bondsPayable', 'leaseLiabilities']
+      .map((key) => finiteNumber(current[key]))
+      .reduce<number | null>((sum, value) => value === null ? sum : (sum ?? 0) + value, null);
+    const interestExpense = finiteNumber(current.interestExpense);
+    const ebitProxy = current.operatingProfit != null && interestExpense !== null ? Number(current.operatingProfit) + Math.abs(interestExpense) : null;
+    const effectiveTaxRate = divide(current.incomeTaxExpense, current.profitBeforeTax);
+    const investedCapitalProxy = current.equity != null && interestBearingDebt !== null && current.cashAndCashEquivalents != null
+      ? Number(current.equity) + interestBearingDebt - Number(current.cashAndCashEquivalents) : null;
     const common = {
       revenueYoY: ratio(current.revenue, previous.revenue),
       netProfitYoY: ratio(current.netProfit, previous.netProfit),
@@ -4748,11 +4757,28 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
         ...common,
         netMargin: divide(current.netProfit, current.revenue),
         adjustedNetMargin: divide(current.adjustedNetProfit, current.revenue),
+        grossMargin: divide(current.revenue != null && current.operatingCost != null ? Number(current.revenue) - Number(current.operatingCost) : null, current.revenue),
         cashConversion: divide(current.operatingCashFlow, current.netProfit),
         assetLiabilityRatio: divide(current.liabilities, current.assets),
         freeCashFlowProxy: current.operatingCashFlow != null && current.capex != null ? Number(current.operatingCashFlow) - Math.abs(Number(current.capex)) : null,
+        accountsReceivableTurnover: divide(current.revenue, averageBalance('accountsReceivable')),
+        inventoryTurnover: divide(current.operatingCost, averageBalance('inventory')),
+        accountsReceivableDays: (() => { const value = divide(current.revenue, averageBalance('accountsReceivable')); return value !== null && value > 0 ? 365 / value : null; })(),
+        inventoryDays: (() => { const value = divide(current.operatingCost, averageBalance('inventory')); return value !== null && value > 0 ? 365 / value : null; })(),
+        interestBearingDebt,
+        netDebtProxy: interestBearingDebt !== null && current.cashAndCashEquivalents != null ? interestBearingDebt - Number(current.cashAndCashEquivalents) : null,
+        interestCoverageProxy: ebitProxy !== null && interestExpense !== null && interestExpense !== 0 ? ebitProxy / Math.abs(interestExpense) : null,
+        effectiveTaxRate,
+        investedCapitalProxy,
+        roicProxy: ebitProxy !== null && effectiveTaxRate !== null && investedCapitalProxy !== null && investedCapitalProxy > 0 ? (ebitProxy * (1 - effectiveTaxRate)) / investedCapitalProxy : null,
       },
-      dataGaps: [],
+      dataGaps: [
+        ...(current.operatingCost == null ? ['缺少营业成本，无法计算毛利率和存货周转率。'] : []),
+        ...(current.accountsReceivable == null ? ['缺少应收账款，无法计算应收周转率。'] : []),
+        ...(current.inventory == null ? ['缺少存货，无法计算存货周转率。'] : []),
+        ...(interestExpense === null ? ['缺少利息费用，无法计算利息覆盖代理值。'] : []),
+        ...(investedCapitalProxy === null || effectiveTaxRate === null ? ['缺少投入资本或税费口径，无法计算 ROIC 代理值。'] : []),
+      ],
     };
   }
 
