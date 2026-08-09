@@ -4507,6 +4507,7 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
     const value = {
       document: payload?.document || null,
       sections: Array.isArray(payload?.sections) ? payload.sections : [],
+      ocrEvidence: Array.isArray(payload?.ocrEvidence) ? payload.ocrEvidence : [],
       dataGaps: Array.isArray(payload?.dataGaps) ? payload.dataGaps : [],
       sourceMeta: { ...(payload?.sourceMeta || {}), fetchedAt: new Date().toISOString(), freshness: 'delayed', confidence: 'official', fallbackLevel: 0 },
     };
