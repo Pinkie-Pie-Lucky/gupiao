@@ -14,6 +14,7 @@ interface WatchlistTabProps {
   setFollowedStocks: React.Dispatch<React.SetStateAction<StockItem[]>>;
   onAskTeacherAboutStock: (stockName: string, stockCode: string) => void;
   onNavigateToTab: (tabId: string) => void;
+  onOpenResearch: (stock: StockItem) => void;
 }
 
 export function WatchlistTab({
@@ -21,6 +22,7 @@ export function WatchlistTab({
   setFollowedStocks,
   onAskTeacherAboutStock,
   onNavigateToTab,
+  onOpenResearch,
 }: WatchlistTabProps) {
   const [selectedAlert, setSelectedAlert] = useState<PersonalizedAlert | null>(null);
 
@@ -127,13 +129,12 @@ export function WatchlistTab({
                     </button>
                     <button
                       onClick={() => {
-                        onAskTeacherAboutStock(stock.name, stock.code);
-                        onNavigateToTab('ai-teacher');
+                        onOpenResearch(stock);
                       }}
                       className="flex-1 bg-gray-50 hover:bg-gray-100 text-gray-600 font-bold text-[10px] py-1.5 rounded-xl transition-all flex items-center justify-center gap-1"
                     >
                       <ArrowUpRight className="w-3.5 h-3.5" />
-                      查看日内走势
+                      查看研究报告
                     </button>
                   </div>
                 </div>

@@ -1,0 +1,6 @@
+akshare==1.18.83
+baostock==0.9.3
+pandas==3.0.5
+pytdx==1.72
+requests==2.34.2
+tickflow==0.1.24
