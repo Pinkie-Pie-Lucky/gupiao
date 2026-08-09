@@ -15,6 +15,16 @@ export function mergeResearchItems(...values: any[]) {
   return values.flatMap((value) => Array.isArray(value) ? value : value == null || value === '' ? [] : [value]).filter((item) => researchItemText(item));
 }
 
+function uniqueResearchItems(items: any[]) {
+  const seen = new Set<string>();
+  return items.filter((item) => {
+    const value = researchItemText(item);
+    if (!value || seen.has(value)) return false;
+    seen.add(value);
+    return true;
+  });
+}
+
 export function researchDataGapText(value: any) {
   const text = researchItemText(value);
   if (!text) return '';
@@ -52,7 +62,7 @@ export function createResearchViewModel(payload: any) {
   const evidence = Array.isArray(snapshot.evidence) ? snapshot.evidence : [];
   const supporting = mergeResearchItems(Array.isArray(opinion.supportingCase) && opinion.supportingCase.length ? opinion.supportingCase : snapshot.supportingCase);
   const counter = mergeResearchItems(Array.isArray(opinion.counterCase) && opinion.counterCase.length ? opinion.counterCase : snapshot.counterCase);
-  const required = mergeResearchItems(Array.isArray(opinion.requiredConditions) && opinion.requiredConditions.length ? opinion.requiredConditions : snapshot.requiredConditions, Array.isArray(opinion.researchPriorities) && opinion.researchPriorities.length ? opinion.researchPriorities : snapshot.researchPriorities);
+  const required = uniqueResearchItems(mergeResearchItems(Array.isArray(opinion.requiredConditions) && opinion.requiredConditions.length ? opinion.requiredConditions : snapshot.requiredConditions, Array.isArray(opinion.researchPriorities) && opinion.researchPriorities.length ? opinion.researchPriorities : snapshot.researchPriorities));
   const dataGaps = [...new Set(mergeResearchItems(snapshot.dataGaps, opinion.dataGaps).map(researchDataGapText).filter(Boolean))].slice(0, 8);
   return { manager, opinion, snapshot, outputs, evidence, supporting, counter, required, dataGaps };
 }

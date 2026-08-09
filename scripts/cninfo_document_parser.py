@@ -314,6 +314,12 @@ def as_number(value):
     return float(text) if match else None
 
 
+def as_percent(value):
+    text = str(value or "").strip().replace(",", "").replace("，", "")
+    match = re.fullmatch(r"([-+]?\d+(?:\.\d+)?)%", text)
+    return float(match.group(1)) if match else None
+
+
 def table_cell(value):
     return re.sub(r"\s+", "", str(value or "")).strip()
 
@@ -339,6 +345,101 @@ def find_column(headers, patterns):
         if any(pattern in header for pattern in patterns):
             return index
     return None
+
+
+def find_revenue_column(headers):
+    """Find the current-period revenue amount, never a revenue-share column.
+
+    In annual reports the two-row header often renders the amount column as
+    ``2025年/金额`` while the adjacent percentage column is
+    ``占营业收入比重``.  A plain substring search for ``营业收入`` therefore
+    selected the percentage column and silently discarded the actual rows.
+    """
+    direct = find_column(headers, ["营业收入", "主营业务收入"])
+    if direct is not None and "比重" not in headers[direct] and "比例" not in headers[direct]:
+        return direct
+    if any("营业收入" in header or "主营业务收入" in header for header in headers):
+        return next((index for index, header in enumerate(headers) if "金额" in header), None)
+    return None
+
+
+def find_share_column(headers):
+    return find_column(headers, ["占营业收入比重", "收入占比", "营业收入占比"])
+
+
+def table_dimension_marker(value):
+    """Return a disclosure dimension only for an explicit table divider."""
+    text = table_cell(value)
+    if not text:
+        return None
+    if "分客户所处行业" in text or text.startswith("分行业") or text.startswith("按行业"):
+        return "industry"
+    if text.startswith("分产品") or text.startswith("按产品"):
+        return "product"
+    if text.startswith("分地区") or text.startswith("按地区"):
+        return "region"
+    if "分销售模式" in text or "分渠道" in text or "按渠道" in text:
+        return "unsupported"
+    return None
+
+
+def normalize_segment_name(value):
+    return re.sub(r"^[一二三四五六七八九十]+、|^\d+、", "", table_cell(value)).strip()
+
+
+def numeric_segment_heading(value):
+    """Return a numbered product heading, preserving its hierarchy signal."""
+    match = re.match(r"^\d+、(.+)$", table_cell(value))
+    return normalize_segment_name(match.group(0)) if match else None
+
+
+def product_business_group(value):
+    text = table_cell(value)
+    if text.startswith("一、主营业务"):
+        return "main_business"
+    if text.startswith("二、其他业务"):
+        return "other_business"
+    return None
+
+
+def aggregate_product_groups(items):
+    """Replace child rows with their explicit report-table parent product.
+
+    Annual reports commonly show a total heading such as "3、开放平台及消费者
+    业务", followed by product details.  Exposing both makes the distribution
+    double-count itself; exposing only children hides the reporting hierarchy.
+    """
+    output = []
+    groups = {}
+    for item in items:
+        parent = item.get("parentProduct")
+        if not parent:
+            output.append(item)
+            continue
+        group = groups.get(parent)
+        if group is None:
+            group = {
+                **item, "name": parent, "revenue": 0.0, "profit": None,
+                "revenueYoY": None, "revenueShare": None,
+                "childNames": [], "childEvidenceIds": [], "isAggregatedParent": True,
+            }
+            groups[parent] = group
+            output.append(group)
+        group["revenue"] += item["revenue"]
+        group["childNames"].append(item["name"])
+        group["childEvidenceIds"].append(item["evidenceId"])
+        # Reconstruct prior-period revenue only when every child discloses YoY;
+        # otherwise do not manufacture a consolidated growth rate.
+        if item["revenueYoY"] is None or item["revenueYoY"] <= -1:
+            group["_cannotCalculateYoY"] = True
+        else:
+            group["_priorRevenue"] = group.get("_priorRevenue", 0.0) + item["revenue"] / (1 + item["revenueYoY"])
+    for item in output:
+        if item.get("isAggregatedParent"):
+            prior = item.pop("_priorRevenue", None)
+            cannot_calculate = item.pop("_cannotCalculateYoY", False)
+            item["revenueYoY"] = None if cannot_calculate or not prior else item["revenue"] / prior - 1
+    return output
 
 
 def segment_dimension(section_type):
@@ -368,78 +469,126 @@ def extract_business_segments(file_path: Path, is_html: bool, sections: list[dic
         result["dataGaps"].append("当前 HTML 公告未接入表格结构提取；已保留正文页码证据，不对经营分部数值作推断。")
         return result
     try:
+        # Include the following page: annual-report revenue composition tables often
+        # continue there without repeating their headers or the "分产品" divider.
+        candidate_pages = {page for _, page in by_page}
+        candidate_pages.update(int(section["pageNumber"]) + 1 for section in sections if section.get("sectionType") == "revenue_composition")
+        buckets = {}
+        active_dimension = None
+        active_product_parent = None
+        active_product_business_group = None
+        continuation_schema = None
         with pdfplumber.open(file_path) as document:
-            for (dimension, page_number), section in by_page.items():
-                page = document.pages[page_number - 1]
-                tables = page.extract_tables() or []
-                selected_items = []
-                raw_rows = []
-                for table in tables:
+            for page_number in sorted(page for page in candidate_pages if 1 <= page <= len(document.pages)):
+                for table in document.pages[page_number - 1].extract_tables() or []:
                     rows = [[table_cell(cell) for cell in (row or [])] for row in table if row]
                     if len(rows) < 3:
                         continue
                     headers = table_headers(rows)
-                    revenue_index = find_column(headers, ["营业收入", "主营业务收入", "收入"])
-                    profit_index = find_column(headers, ["营业利润", "净利润", "分部利润"])
-                    revenue_yoy_index = find_column(headers, ["营业收入比上年", "收入同比", "收入增长"])
-                    name_index = 0
-                    if revenue_index is None:
+                    explicit_revenue_index = find_revenue_column(headers)
+                    has_marker = any(table_dimension_marker(row[0] if row else "") for row in rows)
+                    is_continuation = continuation_schema is not None and len(rows[0]) >= 5 and not any("季度" in cell for cell in headers)
+                    if explicit_revenue_index is None and not is_continuation:
                         continue
-                    active_dimension = None
+                    if explicit_revenue_index is None:
+                        schema = continuation_schema
+                    else:
+                        schema = {
+                            "revenue": explicit_revenue_index,
+                            "profit": find_column(headers, ["营业利润", "净利润", "分部利润"]),
+                            "yoy": find_column(headers, ["营业收入比上年", "收入同比", "收入增长", "同比增减"]),
+                            "share": find_share_column(headers),
+                        }
+                        continuation_schema = schema
+                    scope = "full_revenue_composition" if any("营业收入合计" in row[0] for row in rows if row) else "above_10_percent_disclosure" if any("分客户所处行业" in row[0] for row in rows if row) else "full_revenue_composition"
                     for row in rows:
-                        name = table_cell(row[name_index] if name_index < len(row) else "")
-                        if "分产品" in name or "按产品" in name:
-                            active_dimension = "product"
+                        name = table_cell(row[0] if row else "")
+                        marker = table_dimension_marker(name)
+                        if marker:
+                            active_dimension = marker
+                            active_product_parent = None
+                            active_product_business_group = "main_business" if marker == "product" else None
                             continue
-                        if "分地区" in name or "按地区" in name:
-                            active_dimension = "region"
+                        if active_dimension not in {"product", "region", "industry"}:
                             continue
-                        if "分行业" in name or "按行业" in name:
-                            active_dimension = "industry"
+                        revenue = as_number(row[schema["revenue"]] if schema["revenue"] < len(row) else "")
+                        section_group = product_business_group(name) if active_dimension == "product" else None
+                        if section_group:
+                            active_product_business_group = section_group
+                        product_heading = numeric_segment_heading(name) if active_dimension == "product" else None
+                        if product_heading:
+                            # A heading without an amount owns the following rows;
+                            # a numbered row with an amount is itself a top-level
+                            # product and closes any preceding child group.
+                            active_product_parent = product_heading if revenue is None else None
+                        elif re.match(r"^[一二三四五六七八九十]+、", name):
+                            # "一、主营业务" / "二、其他业务" are report sections,
+                            # not parents of the subsequent product names.
+                            active_product_parent = None
+                        if not name or revenue is None or name in {"合计", "总计", "小计", "营业收入合计"}:
                             continue
-                        if "销售模式" in name or "分渠道" in name or "按渠道" in name:
-                            # These are useful disclosures, but not one of the three
-                            # requested dimensions; do not leak them into regions.
-                            active_dimension = "unsupported"
+                        normalized_name = normalize_segment_name(name)
+                        if not normalized_name:
                             continue
-                        if active_dimension is not None and active_dimension != dimension:
+                        share = as_percent(row[schema["share"]] if schema["share"] is not None and schema["share"] < len(row) else "")
+                        profit = as_number(row[schema["profit"]] if schema["profit"] is not None and schema["profit"] < len(row) else "")
+                        revenue_yoy = as_percent(row[schema["yoy"]] if schema["yoy"] is not None and schema["yoy"] < len(row) else "")
+                        key = (active_dimension, scope)
+                        bucket = buckets.setdefault(key, {"items": [], "pages": [], "rawRows": []})
+                        # A report may separately list the same region for
+                        # "主营业务" and "其他业务".  The latter is a subset, not
+                        # another geographic market, so displaying both would
+                        # double-count the region.
+                        if any(item["name"] == normalized_name for item in bucket["items"]):
                             continue
-                        revenue = as_number(row[revenue_index] if revenue_index < len(row) else "")
-                        if not name or revenue is None or name in {"合计", "总计", "小计"}:
-                            continue
-                        profit = as_number(row[profit_index] if profit_index is not None and profit_index < len(row) else "")
-                        revenue_yoy = as_number(row[revenue_yoy_index] if revenue_yoy_index is not None and revenue_yoy_index < len(row) else "")
-                        selected_items.append({
-                            "name": name[:100], "revenue": revenue, "profit": profit,
+                        index = len(bucket["items"]) + 1
+                        bucket["items"].append({
+                            "name": normalized_name[:100], "revenue": revenue, "profit": profit,
                             "revenueYoY": revenue_yoy / 100 if revenue_yoy is not None else None,
+                            "revenueShare": share / 100 if share is not None else None,
                             "unit": "document_reported", "period": None, "pageNumber": page_number,
-                            "evidenceId": f"{document_evidence_id}:p{page_number}:{dimension}:{len(selected_items) + 1}",
-                            "sourceEvidenceId": section["evidenceId"], "source": "cninfo_pdf_table",
+                            "evidenceId": f"{document_evidence_id}:p{page_number}:{active_dimension}:{index}",
+                            "sourceEvidenceId": document_evidence_id, "source": "cninfo_pdf_table",
+                            "parentProduct": active_product_parent if active_dimension == "product" and not product_heading else None,
+                            "businessGroup": active_product_business_group if active_dimension == "product" else None,
                         })
-                    if selected_items:
-                        raw_rows = rows[:12]
-                        break
-                if selected_items:
-                    total = sum(item["revenue"] for item in selected_items)
-                    for item in selected_items:
-                        item["revenueShare"] = round(item["revenue"] / total, 6) if total else None
-                    ordered = sorted(selected_items, key=lambda item: item["revenue"], reverse=True)
-                    top3 = sum(item["revenueShare"] or 0 for item in ordered[:3])
-                    result["segmentSets"].append({
-                        "dimension": dimension, "period": None, "unit": "document_reported",
-                        "items": ordered[:30],
-                        "concentration": {"top1RevenueShare": ordered[0]["revenueShare"], "top3RevenueShare": round(top3, 6), "basis": "extracted_items_only"},
-                        "growthSources": [{"name": item["name"], "revenueYoY": item["revenueYoY"], "evidenceId": item["evidenceId"]} for item in ordered if item["revenueYoY"] is not None and item["revenueYoY"] > 0][:5],
-                        "deteriorationSignals": [{"name": item["name"], "revenueYoY": item["revenueYoY"], "evidenceId": item["evidenceId"]} for item in ordered if item["revenueYoY"] is not None and item["revenueYoY"] < 0][:5], "rawTable": raw_rows,
-                        "pageNumber": page_number, "evidenceId": section["evidenceId"], "status": "available",
-                    })
-                else:
-                    result["segmentSets"].append({
-                        "dimension": dimension, "period": None, "unit": None, "items": [],
-                        "concentration": None, "growthSources": [], "deteriorationSignals": [],
-                        "pageNumber": page_number, "evidenceId": section["evidenceId"], "status": "evidence_only",
-                        "dataGap": "已定位章节，但表格列无法可靠识别为收入/利润；保留原文与页码，不输出推断数值。",
-                    })
+                        if page_number not in bucket["pages"]:
+                            bucket["pages"].append(page_number)
+                        if len(bucket["rawRows"]) < 24:
+                            bucket["rawRows"].append(row)
+        # Prefer the complete revenue-composition disclosure.  The 10%-threshold
+        # table is useful corroboration, but is not a complete product/region list.
+        for dimension in ("product", "region", "industry"):
+            bucket = buckets.get((dimension, "full_revenue_composition")) or buckets.get((dimension, "above_10_percent_disclosure"))
+            if not bucket or not bucket["items"]:
+                continue
+            items = aggregate_product_groups(bucket["items"]) if dimension == "product" else bucket["items"]
+            total = sum(item["revenue"] for item in items)
+            for item in items:
+                if item["revenueShare"] is None:
+                    item["revenueShare"] = round(item["revenue"] / total, 6) if total else None
+            ordered = sorted(items, key=lambda item: item["revenue"], reverse=True)
+            top3 = sum(item["revenueShare"] or 0 for item in ordered[:3])
+            pages = bucket["pages"]
+            result["segmentSets"].append({
+                "dimension": dimension, "period": None, "unit": "document_reported", "items": ordered[:30],
+                "concentration": {"top1RevenueShare": ordered[0]["revenueShare"], "top3RevenueShare": round(top3, 6), "basis": "reported_revenue_share" if any(item["revenueShare"] is not None for item in ordered) else "extracted_items_only"},
+                "growthSources": [{"name": item["name"], "revenueYoY": item["revenueYoY"], "evidenceId": item["evidenceId"]} for item in ordered if item["revenueYoY"] is not None and item["revenueYoY"] > 0][:5],
+                "deteriorationSignals": [{"name": item["name"], "revenueYoY": item["revenueYoY"], "evidenceId": item["evidenceId"]} for item in ordered if item["revenueYoY"] is not None and item["revenueYoY"] < 0][:5],
+                "rawTable": bucket["rawRows"], "pageNumber": pages[0], "pageNumbers": pages,
+                "evidenceId": f"{document_evidence_id}:p{pages[0]}:business_by_{dimension}", "status": "available",
+                "disclosureScope": "complete_revenue_composition" if (dimension, "full_revenue_composition") in buckets else "items_above_10_percent",
+            })
+        existing = {item["dimension"] for item in result["segmentSets"]}
+        for (dimension, page_number), section in by_page.items():
+            if dimension in existing:
+                continue
+            result["segmentSets"].append({
+                "dimension": dimension, "period": None, "unit": None, "items": [],
+                "concentration": None, "growthSources": [], "deteriorationSignals": [],
+                "pageNumber": page_number, "evidenceId": section["evidenceId"], "status": "evidence_only",
+                "dataGap": "已定位章节，但表格列无法可靠识别为收入/利润；保留原文与页码，不输出推断数值。",
+            })
     except Exception as error:
         result["dataGaps"].append(f"分业务表格提取失败：{str(error)[:160]}；保留正文页码证据。")
     return result

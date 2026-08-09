@@ -4,7 +4,6 @@ import {
   ArrowLeft,
   ChevronDown,
   Database,
-  FileText,
   Landmark,
   MessageCircle,
   RefreshCw,
@@ -25,7 +24,7 @@ interface StockResearchTabProps {
   onAskTeacher: () => void;
 }
 
-type SectionKey = ResearchSectionKey;
+type SectionKey = Exclude<ResearchSectionKey, 'evidence'>;
 type IconType = typeof Landmark;
 
 const sectionMeta: Record<SectionKey, { title: string; subtitle: string; icon: IconType }> = {
@@ -35,7 +34,6 @@ const sectionMeta: Record<SectionKey, { title: string; subtitle: string; icon: I
   sentiment: { title: '舆情', subtitle: '讨论热度、情绪和传播质量', icon: MessageCircle },
   valuation: { title: '估值', subtitle: '估值状态与可比数据', icon: Scale },
   risk: { title: '风险与反方', subtitle: '否决项、风险项和观察条件', icon: ShieldAlert },
-  evidence: { title: '证据来源', subtitle: '每条结论的来源和核验状态', icon: FileText },
 };
 
 function FactList({ items, tone = 'slate', emptyText = '暂无可用数据' }: { items: any[]; tone?: 'slate' | 'emerald' | 'rose' | 'amber'; emptyText?: string }) {
@@ -51,7 +49,7 @@ export function StockResearchTab({ stock, followedStocks, onSelectStock, onBack,
   const [refreshing, setRefreshing] = useState(false);
   const [refreshError, setRefreshError] = useState<string | null>(null);
   const requestSequence = useRef(0);
-  const [openSections, setOpenSections] = useState<Record<SectionKey, boolean>>({ fundamental: true, technical: false, events: false, sentiment: false, valuation: false, risk: true, evidence: false });
+  const [openSections, setOpenSections] = useState<Record<SectionKey, boolean>>({ fundamental: true, technical: false, events: false, sentiment: false, valuation: false, risk: true });
 
   const load = useCallback(async (refresh = false) => {
     const requestId = ++requestSequence.current;
