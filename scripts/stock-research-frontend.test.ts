@@ -102,7 +102,7 @@ test('uses domain-specific structures for every research module', () => {
   for (const component of ['Fundamental', 'Technical', 'Events', 'Sentiment', 'Valuation', 'Risk', 'Evidence']) {
     assert.ok(source.includes(`function ${component}`), `missing module: ${component}`);
   }
-  for (const text of ['基本面否决项', '结构失效条件', '事件后反应', '估值情景（非目标价）', '观察与解除条件', '核验：']) {
+  for (const text of ['基本面否决项', '结构失效条件', '事件后反应', '历史估值位置', '同行业可比', '模型情景', '观察与解除条件', '核验：']) {
     assert.ok(source.includes(text), `missing module copy: ${text}`);
   }
 });
