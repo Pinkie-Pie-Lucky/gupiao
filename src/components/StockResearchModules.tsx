@@ -1,4 +1,4 @@
-import { ExternalLink } from 'lucide-react';
+import { Bot, CalendarDays, CheckCircle2, CircleAlert, Database, FileWarning, Info, Sparkles, XCircle } from 'lucide-react';
 import { researchItemText, type ResearchSectionKey } from '../lib/stockResearch';
 
 interface Props {
@@ -6,121 +6,126 @@ interface Props {
   outputs: any;
   counterCase: any[];
   evidence: any[];
+  dataGaps?: string[];
+  agentMeta?: any;
 }
 
 const labels: Record<string, string> = {
-  available: '可用', unavailable: '不可用', limited: '有限可用', meaningful: '有效', not_meaningful: '不具解释意义',
-  positive: '正向', negative: '负面', stable: '稳定', mixed: '分歧', risk: '风险', data_insufficient: '数据不足',
+  available: '可用', unavailable: '暂不可用', limited: '有限可用', meaningful: '有效', not_meaningful: '不具解释意义',
+  positive: '正向', negative: '负向', stable: '稳定', mixed: '分歧', risk: '风险', data_insufficient: '数据不足',
   triggered: '已触发', watch: '观察中', clear: '未触发', veto: '否决', downgrade: '降级',
   new: '最新披露', ongoing: '持续跟踪', settled: '已披露', expired: '已过期', unconfirmed: '待核验', unknown: '待评估', other: '其他公告',
-  earnings: '业绩披露', forecast: '业绩预告', contract: '订单/合同', m_and_a: '并购重组', financing: '融资', shareholder: '股东事项', governance: '公司治理', regulatory: '监管', litigation: '诉讼仲裁', production: '生产经营', dividend: '分红回购', clarification: '澄清说明',
-  high: '高', medium: '中', low: '低', rejected: '风险否决', blocked: '输入阻断', deferred: '暂缓推进', research_ready: '材料完整',
-  bullish: '偏多', bearish: '偏空', neutral: '中性', uncertain: '待确认',
+  high: '高', medium: '中', low: '低', bullish: '偏多', bearish: '偏空', neutral: '中性', uncertain: '待确认',
   immediate: '即时', short: '短期', long: '长期', short_term: '短期', medium_term: '中期', long_term: '长期',
-  official_and_media: '官方与媒体交叉验证', official_primary: '以官方来源为主', media_only: '仅媒体来源',
-  community_heat_only: '仅社区热度', insufficient: '来源不足', third_party: '第三方数据', derived: '计算结果', market_data: '行情数据',
+  official_and_media: '官方与媒体交叉核验', official_primary: '以官方来源为主', media_only: '仅媒体来源', community_heat_only: '仅社区热度', insufficient: '来源不足', third_party: '第三方数据', derived: '计算结果', market_data: '行情数据',
 };
 
 const asList = (value: any): any[] => Array.isArray(value) ? value.filter(Boolean) : value == null ? [] : [value];
-const display = (value: any, fallback = '暂无数据') => value == null || value === '' ? fallback : labels[String(value)] || String(value);
-const displayHorizon = (value: any) => ({ immediate: '即时', short: '短期', medium: '中期', long: '长期', short_term: '短期', medium_term: '中期', long_term: '长期' }[String(value)] || display(value));
-
-function Empty({ text = '暂无可用数据' }: { text?: string }) {
-  return <p className="rounded-lg bg-slate-100 px-3 py-3 text-[11px] leading-relaxed text-slate-600">{text}</p>;
-}
-
-const triggerValueLabels: Record<string, string> = {
-  ma50: 'MA50', support20d: '20 日区间低点', invalidationLevel: '失效参考位', consecutiveDays: '连续跌破天数', volumeConfirmed: '放量确认',
-  ma20Slope5d: 'MA20 近 5 日斜率', macdHistogram: 'MACD 柱值', macdHistogramChange5d: 'MACD 柱近 5 日变化',
-  atrPercentOfPrice: 'ATR/股价', volatilityPercentile1y: '波动率一年分位数', maxDrawdown20d: '20 日最大回撤', maxDrawdown60d: '60 日最大回撤',
+const text = (value: any, fallback = '暂无数据') => value == null || value === '' ? fallback : labels[String(value)] || String(value);
+const unique = (items: any[]) => {
+  const result = new Map<string, any>();
+  for (const item of items) {
+    const value = researchItemText(item);
+    if (value && !result.has(value)) result.set(value, item);
+  }
+  return [...result.values()];
 };
+const dateText = (value: any) => value ? String(value).replace('T', ' ').slice(0, 16) : '日期未标注';
 
-function triggerValueText(key: string, value: any) {
-  if (typeof value === 'boolean') return value ? '是' : '否';
-  if (value == null || value === '') return '数据不足';
-  if (/Slope|Percent|Drawdown/.test(key) && Number.isFinite(Number(value))) return `${(Number(value) * 100).toFixed(2)}%`;
-  return Number.isFinite(Number(value)) ? Number(value).toFixed(4).replace(/\.?(0+)$/, '') : String(value);
+function Empty({ children = '暂无可展示数据' }: { children?: React.ReactNode }) {
+  return <p className="rounded-lg bg-slate-100 px-3 py-3 text-[11px] leading-relaxed text-slate-600">{children}</p>;
 }
 
-function TriggerData({ values }: { values?: Record<string, any> }) {
-  const entries = Object.entries(values || {}).filter(([, value]) => value !== null && value !== undefined);
-  if (!entries.length) return null;
-  return <p className="mt-2 text-[10px] leading-relaxed text-slate-600"><b className="text-slate-700">触发数据：</b>{entries.map(([key, value]) => `${triggerValueLabels[key] || key} ${triggerValueText(key, value)}`).join('；')}。</p>;
+function BulletList({ items, tone = 'neutral', empty }: { items: any[]; tone?: 'neutral' | 'positive' | 'negative'; empty: string }) {
+  if (!items.length) return <Empty>{empty}</Empty>;
+  const tones = { neutral: 'border-slate-200 bg-white text-slate-800', positive: 'border-emerald-200 bg-emerald-50/60 text-emerald-950', negative: 'border-rose-200 bg-rose-50/60 text-rose-950' };
+  return <ul className="space-y-2">{unique(items).slice(0, 4).map((item, index) => <li className={`rounded-lg border px-3 py-2 text-[11px] leading-relaxed ${tones[tone]}`} key={`${researchItemText(item)}-${index}`}>{researchItemText(item)}</li>)}</ul>;
 }
 
-function Group({ title, count, children }: { title: string; count?: number; children: React.ReactNode }) {
-  return <section><div className="mb-2 flex items-center justify-between gap-3"><h3 className="text-[11px] font-bold text-slate-800">{title}</h3>{typeof count === 'number' && <span className="text-[10px] text-slate-500">{count} 项</span>}</div>{children}</section>;
-}
-
-function Rows({ items, tone = 'neutral', showTriggerData = false }: { items: any[]; tone?: 'neutral' | 'positive' | 'risk' | 'warning'; showTriggerData?: boolean }) {
-  if (!items.length) return <Empty />;
-  const tones = { neutral: 'border-slate-200 bg-white', positive: 'border-emerald-200 bg-emerald-50/50', risk: 'border-rose-200 bg-rose-50/50', warning: 'border-amber-200 bg-amber-50/50' };
-  return <div className="space-y-2">{items.slice(0, 8).map((item, index) => {
-    const text = researchItemText(item);
-    const state = item?.triggered === true ? 'triggered' : item?.status;
-    return <article className={`rounded-lg border p-3 ${tones[tone]}`} key={`${item?.signalId || item?.riskId || item?.ruleId || text || 'row'}-${index}`}>
-      <div className="flex items-start justify-between gap-3"><p className="min-w-0 text-[11px] font-medium leading-relaxed text-slate-800">{text || '未提供说明'}</p>{state && <span className="shrink-0 rounded-md bg-white/80 px-1.5 py-0.5 text-[10px] font-semibold text-slate-700">{display(state)}</span>}</div>
-      {item?.trigger && <p className="mt-2 text-[10px] leading-relaxed text-slate-600"><b className="text-slate-700">触发：</b>{item.trigger}</p>}
-      {showTriggerData && item?.triggered === true && <TriggerData values={item?.values} />}
-      {item?.resolutionCondition && <p className="mt-1 text-[10px] leading-relaxed text-slate-600"><b className="text-slate-700">解除：</b>{item.resolutionCondition}</p>}
-    </article>;
-  })}</div>;
-}
-
-function Fundamental({ data }: { data: any }) {
-  const signals = asList(data?.signals); const vetoes = asList(data?.vetoes).filter((item) => item?.triggered === true);
-  return <div className="space-y-4"><Group title="确定性信号" count={signals.length}><Rows items={signals} /></Group>{vetoes.length > 0 && <Group title="已触发基本面否决项" count={vetoes.length}><Rows items={vetoes} tone="risk" /></Group>}</div>;
-}
-
-function Technical({ data }: { data: any }) {
-  const signals = asList(data?.signals); const rules = asList(data?.structureInvalidation?.rules).filter((item) => item?.triggered === true);
-  return <div className="space-y-4"><Group title="趋势与市场信号" count={signals.length}><Rows items={signals} /></Group>{rules.length > 0 && <Group title="已触发结构失效条件" count={rules.length}><Rows items={rules} tone="risk" showTriggerData /></Group>}</div>;
-}
-
-function Events({ data }: { data: any }) {
-  const events = asList(data?.events || data?.items);
-  if (!events.length) return <Empty text="当前窗口内暂无可展示的有效事件" />;
-  return <div className="divide-y divide-slate-200 rounded-lg border border-slate-200 bg-white">{events.slice(0, 8).map((event, index) => {
-    const direction = String(event?.direction || 'uncertain');
-    const tone = direction === 'positive' ? 'text-emerald-700' : direction === 'negative' ? 'text-rose-700' : 'text-slate-600';
-    return <article className="p-3" key={event?.eventId || index}><div className="flex items-start justify-between gap-3"><p className="text-[11px] font-semibold leading-relaxed text-slate-800">{event?.title || event?.summary || '未命名事件'}</p><span className={`shrink-0 text-[10px] font-bold ${tone}`}>{display(direction)}</span></div><div className="mt-1.5 flex flex-wrap gap-x-3 gap-y-1 text-[10px] text-slate-600"><span>影响：{displayHorizon(event?.impactHorizon)}</span><span>状态：{display(event?.status)}</span>{event?.category && <span>类型：{display(event.category)}</span>}</div>{event?.summary && event.summary !== event.title && <p className="mt-2 text-[10px] leading-relaxed text-slate-600">{event.summary}</p>}</article>;
-  })}</div>;
-}
-
-function Sentiment({ data }: { data: any }) {
-  const metrics = [['关注度', data?.attention], ['情绪倾向', data?.tone], ['观点分歧', data?.disagreement], ['事件后反应', data?.eventReaction], ['传播质量', data?.propagationQuality]];
-  return <div className="grid grid-cols-2 gap-px overflow-hidden rounded-lg border border-slate-200 bg-slate-200 sm:grid-cols-3">{metrics.map(([name, value]) => <div className="min-h-16 bg-white p-3" key={name}><span className="block text-[10px] text-slate-500">{name}</span><b className={`mt-1 block text-[11px] leading-relaxed ${value == null || value === 'unavailable' ? 'text-slate-500' : 'text-slate-800'}`}>{display(value)}</b></div>)}</div>;
-}
-
-function Valuation({ data }: { data: any }) {
-  const multiples = data?.multiples || {}; const comparison = data?.comparison || {}; const model = data?.scenarioModel || {};
-  const metrics = [['动态 PE', 'peDynamic'], ['静态 PE', 'peStatic'], ['市净率 PB', 'pb'], ['市销率 PS', 'ps']];
-  const scenarios = [['盈利情景', model.earnings], ['DCF 情景', model.dcf], ['剩余收益', model.residualIncome]];
-  const number = (value: any) => Number.isFinite(Number(value)) ? new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 2 }).format(Number(value)) : '--';
-  return <div className="space-y-4">
-    <div className="flex items-center justify-between rounded-lg bg-slate-100 px-3 py-2"><span className="text-[11px] font-semibold text-slate-700">估值数据状态</span><b className="text-[11px] text-slate-900">{display(data?.valuationStatus)}</b></div>
-    <Group title="估值倍数"><div className="grid grid-cols-2 gap-px overflow-hidden rounded-lg border border-slate-200 bg-slate-200">{metrics.map(([name, key]) => <div className="bg-white p-3" key={key}><span className="block text-[10px] text-slate-500">{name}</span><b className="mt-1 block font-mono text-sm text-slate-900">{number(multiples[key])}</b><span className="mt-1 block text-[10px] text-slate-600">{display(multiples[`${key}Status`])}</span></div>)}</div></Group>
-    <Group title="历史与同行比较"><div className="rounded-lg border border-slate-200 bg-white p-3"><div className="flex items-center justify-between gap-3 text-[11px]"><span className="text-slate-600">可比状态</span><b className="text-slate-800">{display(comparison.status)}</b></div>{comparison.reason && <p className="mt-2 text-[10px] leading-relaxed text-slate-600">{comparison.reason}</p>}</div></Group>
-    <Group title="估值情景（非目标价）"><div className="space-y-2">{scenarios.map(([name, scenario]: any) => <div className="rounded-lg border border-slate-200 bg-white p-3" key={name}><div className="flex items-center justify-between gap-3"><span className="text-[11px] font-semibold text-slate-800">{name}</span><span className="text-[10px] text-slate-600">{display(scenario?.status)}</span></div>{scenario?.reason && <p className="mt-1.5 text-[10px] leading-relaxed text-slate-600">{scenario.reason}</p>}</div>)}</div></Group>
+function MetaStrip({ data, evidence, agentMeta }: { data: any; evidence: any[]; agentMeta: any }) {
+  const sourceMeta = data?.sourceMeta || {};
+  const latestEvidence = [...evidence].sort((a, b) => String(b?.period || b?.publishedAt || b?.fetchedAt || '').localeCompare(String(a?.period || a?.publishedAt || a?.fetchedAt || '')))[0];
+  const source = sourceMeta.source || latestEvidence?.source || '来源未标注';
+  const quality = data?.sourceQuality || latestEvidence?.verification || '未核验';
+  const aiStatus = data?.aiStatus || 'not_requested';
+  const cioStatus = agentMeta?.aiStatus;
+  const aiLabel = aiStatus === 'completed' ? '本模块 AI 已完成' : aiStatus === 'fallback' ? '本模块 AI 未完成，已回退' : cioStatus === 'completed' ? '本模块为确定性计算；CIO AI 已完成解释' : cioStatus === 'fallback' ? '本模块为确定性计算；CIO AI 已回退' : '本模块为确定性计算，未单独调用 AI';
+  const aiTone = aiStatus === 'fallback' || cioStatus === 'fallback' ? 'text-amber-800 bg-amber-50' : 'text-slate-700 bg-slate-100';
+  return <div className="mt-4 grid gap-2 border-t border-slate-200 pt-3 sm:grid-cols-3">
+    <div className="rounded-lg bg-slate-100 px-2.5 py-2"><span className="flex items-center gap-1 text-[10px] font-bold text-slate-600"><Bot className="h-3 w-3" />AI 运行</span><p className={`mt-1 text-[10px] leading-relaxed ${aiTone}`}>{aiLabel}</p></div>
+    <div className="rounded-lg bg-slate-100 px-2.5 py-2"><span className="flex items-center gap-1 text-[10px] font-bold text-slate-600"><CalendarDays className="h-3 w-3" />数据日期</span><p className="mt-1 text-[10px] leading-relaxed text-slate-700">{dateText(sourceMeta.generatedAt || sourceMeta.fetchedAt || latestEvidence?.period || latestEvidence?.publishedAt || latestEvidence?.fetchedAt)}</p></div>
+    <div className="rounded-lg bg-slate-100 px-2.5 py-2"><span className="flex items-center gap-1 text-[10px] font-bold text-slate-600"><Database className="h-3 w-3" />来源与质量</span><p className="mt-1 break-words text-[10px] leading-relaxed text-slate-700">{source} · {text(quality)}</p></div>
   </div>;
 }
 
-function Risk({ data, counterCase }: { data: any; counterCase: any[] }) {
-  const vetoes = asList(data?.vetoes); const risks = asList(data?.risks).length ? asList(data?.risks) : asList(counterCase); const watches = asList(data?.watchConditions);
-  return <div className="space-y-4"><div className="grid grid-cols-2 gap-px overflow-hidden rounded-lg border border-slate-200 bg-slate-200"><div className="bg-white p-3"><span className="block text-[10px] text-slate-500">风险等级</span><b className="mt-1 block text-[11px] text-slate-900">{display(data?.riskLevel)}</b></div><div className="bg-white p-3"><span className="block text-[10px] text-slate-500">风险决策</span><b className="mt-1 block text-[11px] text-slate-900">{display(data?.decision)}</b></div></div><Group title="已触发否决项" count={vetoes.length}><Rows items={vetoes} tone="risk" /></Group><Group title="风险项与反方证据" count={risks.length}><Rows items={risks} tone="warning" /></Group><Group title="观察与解除条件" count={watches.length}><Rows items={watches} /></Group></div>;
+function ModuleFrame({ conclusion, why, support, counter, gaps, data, evidence, agentMeta, children }: { conclusion: string; why: any[]; support: any[]; counter: any[]; gaps: string[]; data: any; evidence: any[]; agentMeta: any; children: React.ReactNode }) {
+  return <div className="space-y-4 pt-3">
+    <section className="rounded-xl border border-indigo-200 bg-indigo-50/70 p-3"><p className="flex items-center gap-1.5 text-[10px] font-bold text-indigo-800"><Sparkles className="h-3.5 w-3.5" />一句话结论</p><p className="mt-1.5 text-xs font-semibold leading-relaxed text-slate-900">{conclusion}</p></section>
+    <section><h3 className="mb-2 text-[11px] font-bold text-slate-800">为什么</h3><BulletList items={why} empty="暂未形成可解释的确定性原因。" /></section>
+    {children}
+    <div className="grid gap-4 sm:grid-cols-2"><section><h3 className="mb-2 flex items-center gap-1.5 text-[11px] font-bold text-emerald-800"><CheckCircle2 className="h-3.5 w-3.5" />支持证据</h3><BulletList items={support} tone="positive" empty="暂无足够的正向证据。" /></section><section><h3 className="mb-2 flex items-center gap-1.5 text-[11px] font-bold text-rose-800"><XCircle className="h-3.5 w-3.5" />反方证据</h3><BulletList items={counter} tone="negative" empty="暂未发现本模块的反方证据。" /></section></div>
+    <section><h3 className="mb-2 flex items-center gap-1.5 text-[11px] font-bold text-slate-800"><FileWarning className="h-3.5 w-3.5" />数据缺口</h3>{gaps.length ? <ul className="space-y-1.5">{[...new Set(gaps)].slice(0, 4).map((gap) => <li className="flex gap-2 text-[11px] leading-relaxed text-slate-700" key={gap}><span aria-hidden="true">•</span><span>{gap}</span></li>)}</ul> : <Empty>当前模块未返回明确的数据缺口。</Empty>}</section>
+    <MetaStrip data={data} evidence={evidence} agentMeta={agentMeta} />
+  </div>;
 }
 
-function Evidence({ evidence }: { evidence: any[] }) {
-  if (!evidence.length) return <Empty text="暂无证据记录，当前结论只能按数据不足处理" />;
-  return <div className="divide-y divide-slate-200 rounded-lg border border-slate-200 bg-white">{evidence.slice(0, 12).map((item, index) => <article className="p-3" key={item?.evidenceId || index}><div className="flex items-start justify-between gap-3"><div className="min-w-0"><p className="text-[11px] font-semibold leading-relaxed text-slate-800">{item?.title || item?.evidenceId || '未命名证据'}</p>{item?.value != null && <p className="mt-1 break-all font-mono text-[10px] text-slate-700">{String(item.value)}</p>}</div>{item?.sourceUrl && <a href={item.sourceUrl} target="_blank" rel="noreferrer" aria-label="打开证据来源" className="grid h-8 w-8 shrink-0 place-items-center rounded-lg text-indigo-700 hover:bg-indigo-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600"><ExternalLink className="h-3.5 w-3.5" /></a>}</div><div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[10px] text-slate-600"><span>来源：{item?.source || '未标注'}</span><span>日期：{item?.period || item?.publishedAt || '未知'}</span><span>核验：{display(item?.verification, '未核验')}</span></div>{item?.evidenceId && <p className="mt-1.5 break-all font-mono text-[9px] text-slate-500">{item.evidenceId}</p>}</article>)}</div>;
+function Trend({ reports }: { reports: any[] }) {
+  const series = reports.slice(0, 5).reverse().map((report) => ({ period: report?.period, revenue: Number(report?.metrics?.revenue), profit: Number(report?.metrics?.netProfit) })).filter((item) => item.period && Number.isFinite(item.revenue));
+  if (series.length < 2) return <Empty>历史财务趋势需要至少两个报告期；当前序列不足，未绘制图形。</Empty>;
+  const max = Math.max(...series.flatMap((item) => [Math.abs(item.revenue), Number.isFinite(item.profit) ? Math.abs(item.profit) : 0]), 1);
+  return <div className="rounded-xl border border-slate-200 bg-white p-3"><div className="flex items-center justify-between"><h3 className="text-[11px] font-bold text-slate-800">财务历史趋势</h3><span className="text-[10px] text-slate-500">营收 / 归母净利润</span></div><div className="mt-3 flex h-28 items-end gap-2" aria-label="基于报告期真实数值的财务趋势图">{series.map((item) => <div className="flex min-w-0 flex-1 flex-col items-center gap-1" key={item.period}><div className="flex h-20 w-full items-end justify-center gap-1"><i className="w-2 rounded-t bg-indigo-500" style={{ height: `${Math.max(8, Math.abs(item.revenue) / max * 100)}%` }} title={`营收 ${item.revenue}`} />{Number.isFinite(item.profit) && <i className={`w-2 rounded-t ${item.profit >= 0 ? 'bg-emerald-500' : 'bg-rose-500'}`} style={{ height: `${Math.max(5, Math.abs(item.profit) / max * 100)}%` }} title={`归母净利润 ${item.profit}`} />}</div><span className="w-full truncate text-center text-[9px] text-slate-500">{String(item.period).slice(0, 7)}</span></div>)}</div><p className="mt-2 text-[9px] text-slate-500">蓝色：营收；绿色/红色：归母净利润。柱高仅比较本图内报告期。</p></div>;
 }
 
-export function StockResearchModules({ sectionKey, outputs, counterCase, evidence }: Props) {
-  if (sectionKey === 'fundamental') return <Fundamental data={outputs?.fundamental} />;
-  if (sectionKey === 'technical') return <Technical data={outputs?.technical} />;
-  if (sectionKey === 'events') return <Events data={outputs?.events} />;
-  if (sectionKey === 'sentiment') return <Sentiment data={outputs?.sentiment} />;
-  if (sectionKey === 'valuation') return <Valuation data={outputs?.valuation} />;
-  if (sectionKey === 'risk') return <Risk data={outputs?.risk} counterCase={counterCase} />;
-  return <Evidence evidence={evidence} />;
+function Fundamental({ data, gaps, evidence, counter, agentMeta }: any) {
+  const signals = asList(data?.signals); const positive = signals.filter((item) => ['positive', 'stable'].includes(item?.status)); const negative = [...signals.filter((item) => ['deteriorating', 'risk', 'mixed'].includes(item?.status)), ...asList(data?.vetoes).filter((item) => item?.triggered)];
+  const conclusion = positive[0] ? researchItemText(positive[0]) : negative[0] ? researchItemText(negative[0]) : '基本面尚未形成足够的确定性结论。';
+  return <ModuleFrame conclusion={conclusion} why={signals} support={positive} counter={negative} gaps={gaps} data={data} evidence={evidence} agentMeta={agentMeta}><Trend reports={asList(data?.reports)} />{asList(data?.vetoes).filter((item) => item?.triggered).length > 0 && <section><h3 className="mb-2 text-[11px] font-bold text-rose-900">基本面否决项</h3><BulletList items={asList(data?.vetoes).filter((item) => item?.triggered)} tone="negative" empty="" /></section>}</ModuleFrame>;
+}
+
+function Technical({ data, gaps, evidence, counter, agentMeta }: any) {
+  const signals = asList(data?.signals); const invalidations = asList(data?.structureInvalidation?.rules).filter((item) => item?.triggered); const positive = signals.filter((item) => item?.status === 'positive'); const negative = [...signals.filter((item) => ['negative', 'risk', 'deteriorating', 'mixed'].includes(item?.status)), ...invalidations];
+  const conclusion = positive[0] ? researchItemText(positive[0]) : negative[0] ? researchItemText(negative[0]) : '技术与市场信号暂未形成明确方向。';
+  return <ModuleFrame conclusion={conclusion} why={signals} support={positive} counter={negative} gaps={gaps} data={data} evidence={evidence} agentMeta={agentMeta}><>{invalidations.length > 0 && <section className="rounded-xl border border-rose-200 bg-rose-50 p-3"><h3 className="flex items-center gap-1.5 text-[11px] font-bold text-rose-900"><CircleAlert className="h-3.5 w-3.5" />结构失效条件</h3><BulletList items={invalidations} tone="negative" empty="" /></section>}</></ModuleFrame>;
+}
+
+function Events({ data, gaps, evidence, counter, agentMeta }: any) {
+  const events = asList(data?.events).sort((a, b) => String(b?.publishedAt || b?.date || '').localeCompare(String(a?.publishedAt || a?.date || ''))); const positive = events.filter((item) => item?.direction === 'positive'); const negative = events.filter((item) => item?.direction === 'negative');
+  const conclusion = events[0] ? `${text(events[0]?.direction, '待评估')}事件：${researchItemText(events[0])}` : '当前窗口内没有可展示的有效事件。';
+  return <ModuleFrame conclusion={conclusion} why={events} support={positive} counter={negative} gaps={gaps} data={data} evidence={evidence} agentMeta={agentMeta}><section><h3 className="mb-2 text-[11px] font-bold text-slate-800">事件时间线</h3>{events.length ? <ol className="relative ml-2 space-y-0 border-l border-slate-200">{events.slice(0, 8).map((event, index) => <li className="relative pb-4 pl-4 last:pb-0" key={event?.eventId || index}><span className={`absolute -left-[5px] top-1 h-2 w-2 rounded-full ${event?.direction === 'positive' ? 'bg-emerald-500' : event?.direction === 'negative' ? 'bg-rose-500' : 'bg-slate-400'}`} /><p className="text-[10px] text-slate-500">{dateText(event?.publishedAt || event?.date)} · {text(event?.status)} · {text(event?.impactHorizon)}</p><p className="mt-1 text-[11px] font-semibold leading-relaxed text-slate-800">{researchItemText(event)}</p>{event?.summary && event.summary !== event.title && <p className="mt-1 text-[10px] leading-relaxed text-slate-600">{event.summary}</p>}</li>)}</ol> : <Empty>没有事件，因此没有绘制时间线。</Empty>}</section></ModuleFrame>;
+}
+
+function Sentiment({ data, gaps, evidence, counter, agentMeta }: any) {
+  const metrics = [['关注度', data?.attention], ['情绪倾向', data?.tone], ['观点分歧', data?.disagreement], ['事件后反应', data?.eventReaction], ['传播质量', data?.propagationQuality]].filter(([, value]) => value != null).map(([name, value]) => ({ text: `${name}：${text(value)}` }));
+  return <ModuleFrame conclusion={metrics[0] ? researchItemText(metrics[0]) : '当前未获得足够的舆情与市场反应数据。'} why={metrics} support={[]} counter={counter} gaps={gaps} data={data} evidence={evidence} agentMeta={agentMeta}><div className="grid grid-cols-2 overflow-hidden rounded-xl border border-slate-200 bg-slate-200 sm:grid-cols-3">{metrics.map((item) => <div className="min-h-16 bg-white p-3" key={item.text}><p className="text-[10px] leading-relaxed text-slate-700">{item.text}</p></div>)}</div></ModuleFrame>;
+}
+
+function Valuation({ data, gaps, evidence, counter, agentMeta }: any) {
+  const multiples = data?.multiples || {}; const values = [['动态 PE', multiples.peDynamic], ['静态 PE', multiples.peStatic], ['PB', multiples.pb], ['PS', multiples.ps]].filter(([, value]) => Number.isFinite(Number(value)));
+  const comparison = data?.comparison || {}; const percentile = Number(comparison?.percentile ?? comparison?.industryPercentile);
+  const conclusion = data?.valuationStatus === 'available' ? (comparison?.reason || '估值快照可用，但需结合历史与可比基准解释。') : '估值事实或可比基准不完整，当前不判断高低估。';
+  return <ModuleFrame conclusion={conclusion} why={comparison?.reason ? [{ text: comparison.reason }] : []} support={data?.valuationStatus === 'available' ? [{ text: '估值事实快照可用。' }] : []} counter={counter} gaps={[...gaps, ...(data?.valuationStatus === 'available' && Number.isFinite(percentile) ? [] : ['历史估值或行业分位尚未完整接入，不能据此判断相对高低。'])]} data={data} evidence={evidence} agentMeta={agentMeta}><section className="grid grid-cols-2 gap-2">{values.length ? values.map(([name, value]) => <div className="rounded-xl border border-slate-200 bg-white p-3" key={String(name)}><span className="text-[10px] text-slate-500">{name}</span><b className="mt-1 block font-mono text-lg text-slate-900">{Number(value).toFixed(2)}</b></div>) : <div className="col-span-2"><Empty>当前没有可展示的估值倍数。</Empty></div>}</section><section className="rounded-xl border border-slate-200 bg-white p-3"><div className="flex items-center justify-between"><h3 className="text-[11px] font-bold text-slate-800">行业分位</h3><span className="text-[10px] text-slate-500">真实可比数据</span></div>{Number.isFinite(percentile) ? <><div className="mt-3 h-2 overflow-hidden rounded-full bg-slate-100"><div className="h-full rounded-full bg-indigo-600" style={{ width: `${Math.max(0, Math.min(100, percentile * (percentile <= 1 ? 100 : 1)))}%` }} /></div><p className="mt-2 text-[10px] text-slate-700">当前分位：{(percentile <= 1 ? percentile * 100 : percentile).toFixed(1)}%</p></> : <p className="mt-2 text-[10px] leading-relaxed text-slate-600">尚无可核验的行业分位数，图表不显示推测位置。</p>}</section><section><h3 className="mb-2 text-[11px] font-bold text-slate-800">估值情景（非目标价）</h3><Empty>当前仅展示估值事实与可比基准，不输出目标价或交易建议。</Empty></section></ModuleFrame>;
+}
+
+function Risk({ data, gaps, evidence, counter, agentMeta }: any) {
+  const vetoes = asList(data?.vetoes).filter((item) => item?.triggered); const risks = asList(data?.risks); const watches = asList(data?.watchConditions); const negative = unique([...vetoes, ...risks, ...counter]);
+  const conclusion = vetoes.length ? `已触发 ${vetoes.length} 项否决条件，需要优先核验。` : data?.riskLevel ? `当前风险等级为${text(data.riskLevel)}，决策状态为${text(data.decision)}。` : '风险输入不完整，暂不能形成可靠评估。';
+  return <ModuleFrame conclusion={conclusion} why={[...vetoes, ...risks, ...watches]} support={data?.decision === 'clear' ? [{ text: '当前未触发风险快照中的否决或降级条件。' }] : []} counter={negative} gaps={gaps} data={data} evidence={evidence} agentMeta={agentMeta}><>{watches.length > 0 && <section><h3 className="mb-2 text-[11px] font-bold text-slate-800">观察与解除条件</h3><BulletList items={watches} empty="暂无新增观察条件。" /></section>}</></ModuleFrame>;
+}
+
+function Evidence({ evidence, gaps, agentMeta }: any) {
+  const sourceData = { sourceMeta: { generatedAt: evidence?.[0]?.fetchedAt }, aiStatus: 'not_requested' };
+  return <ModuleFrame conclusion={evidence?.length ? `当前研究共引用 ${evidence.length} 条可追溯证据。` : '暂无可追溯证据，不能将结论视作已核验。'} why={evidence} support={evidence} counter={[]} gaps={gaps} data={sourceData} evidence={evidence} agentMeta={agentMeta}><section className="divide-y divide-slate-200 overflow-hidden rounded-xl border border-slate-200 bg-white">{asList(evidence).slice(0, 12).map((item, index) => <article className="p-3" key={item?.evidenceId || index}><p className="text-[11px] font-semibold leading-relaxed text-slate-800">{item?.title || '未命名证据'}</p><div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-[10px] text-slate-600"><span>来源：{item?.source || '未标注'}</span><span>日期：{dateText(item?.period || item?.publishedAt || item?.fetchedAt)}</span><span>核验：{text(item?.verification, '未核验')}</span></div></article>)}</section></ModuleFrame>;
+}
+
+export function StockResearchModules({ sectionKey, outputs, counterCase, evidence, dataGaps = [], agentMeta }: Props) {
+  const data = sectionKey === 'evidence' ? null : outputs?.[sectionKey];
+  const moduleEvidence = evidence.filter((item: any) => sectionKey === 'evidence' || !data?.sourceMeta?.source || item?.source === data?.sourceMeta?.source || item?.type === (sectionKey === 'fundamental' ? 'financial' : sectionKey === 'events' ? 'announcement' : sectionKey === 'sentiment' ? 'sentiment' : undefined));
+  const common = { data, gaps: dataGaps, evidence: moduleEvidence.length ? moduleEvidence : evidence, counter: counterCase, agentMeta };
+  if (sectionKey === 'fundamental') return <Fundamental {...common} />;
+  if (sectionKey === 'technical') return <Technical {...common} />;
+  if (sectionKey === 'events') return <Events {...common} />;
+  if (sectionKey === 'sentiment') return <Sentiment {...common} />;
+  if (sectionKey === 'valuation') return <Valuation {...common} />;
+  if (sectionKey === 'risk') return <Risk {...common} />;
+  return <Evidence evidence={evidence} gaps={dataGaps} agentMeta={agentMeta} />;
 }
