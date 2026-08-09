@@ -4732,12 +4732,14 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
   }
 
   function ratio(current: unknown, prior: unknown) {
+    if (current === null || current === undefined || prior === null || prior === undefined) return null;
     const currentValue = Number(current);
     const priorValue = Number(prior);
     return Number.isFinite(currentValue) && Number.isFinite(priorValue) && priorValue !== 0 ? currentValue / priorValue - 1 : null;
   }
 
   function divide(numerator: unknown, denominator: unknown) {
+    if (numerator === null || numerator === undefined || denominator === null || denominator === undefined) return null;
     const numeratorValue = Number(numerator);
     const denominatorValue = Number(denominator);
     return Number.isFinite(numeratorValue) && Number.isFinite(denominatorValue) && denominatorValue !== 0 ? numeratorValue / denominatorValue : null;
@@ -4751,7 +4753,7 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
     return reports.find((report: any) => report.period === priorPeriod) || null;
   }
 
-  function calculateFinancialMetrics(reports: any[], template: 'bank' | 'non_financial') {
+  function calculateFinancialMetrics(reports: any[], template: 'bank' | 'non_financial', source = 'ths_financial_statements') {
     const latest = reports[0] || null;
     const prior = previousYearReport(reports, latest?.period);
     if (!latest) return { template, period: null, metrics: {}, dataGaps: ['尚无可用于计算的结构化报告期'] };
@@ -4759,14 +4761,29 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
     const previous = prior?.metrics || {};
     const averageEquity = current.equity != null && previous.equity != null ? (Number(current.equity) + Number(previous.equity)) / 2 : null;
     const averageBalance = (key: string) => current[key] != null && previous[key] != null ? (Number(current[key]) + Number(previous[key])) / 2 : null;
-    const interestBearingDebt = ['shortTermBorrowings', 'currentPortionOfNonCurrentDebt', 'longTermBorrowings', 'bondsPayable', 'leaseLiabilities']
-      .map((key) => finiteNumber(current[key]))
-      .reduce<number | null>((sum, value) => value === null ? sum : (sum ?? 0) + value, null);
+    const debtKeys = ['shortTermBorrowings', 'currentPortionOfNonCurrentDebt', 'longTermBorrowings', 'bondsPayable', 'leaseLiabilities'];
+    const sumDebt = (row: any) => {
+      const values = debtKeys.map((key) => finiteNumber(row?.[key]));
+      return values.some((value) => value !== null) ? values.reduce((sum, value) => sum + (value || 0), 0) : null;
+    };
+    const interestBearingDebt = sumDebt(current);
+    const priorInterestBearingDebt = sumDebt(previous);
     const interestExpense = finiteNumber(current.interestExpense);
     const ebitProxy = current.operatingProfit != null && interestExpense !== null ? Number(current.operatingProfit) + Math.abs(interestExpense) : null;
     const effectiveTaxRate = divide(current.incomeTaxExpense, current.profitBeforeTax);
-    const investedCapitalProxy = current.equity != null && interestBearingDebt !== null && current.cashAndCashEquivalents != null
-      ? Number(current.equity) + interestBearingDebt - Number(current.cashAndCashEquivalents) : null;
+    const investedCapitalProxy = averageEquity !== null && interestBearingDebt !== null && priorInterestBearingDebt !== null && current.cashAndCashEquivalents != null && previous.cashAndCashEquivalents != null
+      ? averageEquity + (interestBearingDebt + priorInterestBearingDebt) / 2 - (Number(current.cashAndCashEquivalents) + Number(previous.cashAndCashEquivalents)) / 2 : null;
+    const month = Number((latest.period || '').slice(5, 7));
+    const periodDays = month === 3 ? 90 : month === 6 ? 181 : month === 9 ? 273 : month === 12 ? 365 : null;
+    const annualizedTurnover = (numerator: unknown, averageBalanceValue: number | null) => {
+      const value = divide(numerator, averageBalanceValue);
+      return value !== null && periodDays !== null ? value * 365 / periodDays : null;
+    };
+    const metricDetails = (metrics: Record<string, unknown>, definitions: Record<string, { unit: string; formula: string; inputs: string[]; applicability?: 'applicable' | 'not_applicable' }>) => Object.fromEntries(Object.entries(definitions).map(([key, definition]) => {
+      const value = finiteNumber(metrics[key]);
+      const applicable = definition.applicability !== 'not_applicable';
+      return [key, { value, status: !applicable ? 'not_applicable' : value === null ? 'data_insufficient' : 'available', period: latest.period, comparisonPeriod: prior?.period || null, unit: definition.unit, source, formula: definition.formula, inputFields: definition.inputs, dataGap: !applicable ? '该指标不适用于银行财务口径。' : value === null ? `缺少计算 ${key} 所需字段。` : null }];
+    }));
     const common = {
       revenueYoY: ratio(current.revenue, previous.revenue),
       netProfitYoY: ratio(current.netProfit, previous.netProfit),
@@ -4775,47 +4792,46 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
       roeApprox: divide(current.netProfit, averageEquity),
     };
     if (template === 'bank') {
+      const metrics = {
+        ...common,
+        assetYoY: ratio(current.assets, previous.assets),
+        loanYoY: ratio(current.loans, previous.loans),
+        depositYoY: ratio(current.deposits, previous.deposits),
+        interestNetIncomeYoY: ratio(current.interestNetIncome, previous.interestNetIncome),
+        feeNetIncomeYoY: ratio(current.feeNetIncome, previous.feeNetIncome),
+        creditImpairmentToRevenue: divide(current.creditImpairment, current.revenue),
+      };
       return {
         template, period: latest.period, comparisonPeriod: prior?.period || null,
-        metrics: {
-          ...common,
-          assetYoY: ratio(current.assets, previous.assets),
-          loanYoY: ratio(current.loans, previous.loans),
-          depositYoY: ratio(current.deposits, previous.deposits),
-          interestNetIncomeYoY: ratio(current.interestNetIncome, previous.interestNetIncome),
-          feeNetIncomeYoY: ratio(current.feeNetIncome, previous.feeNetIncome),
-          creditImpairmentToRevenue: divide(current.creditImpairment, current.revenue),
-        },
-        dataGaps: ['净息差、不良贷款率、拨备覆盖率和资本充足率需继续从 CNINFO 定期报告解析。'],
+        unit: { amount: 'CNY', ratio: 'fraction' }, source,
+        metrics,
+        metricDetails: metricDetails(metrics, {
+          revenueYoY: { unit: 'fraction', formula: '(本期营业收入/上年同期营业收入)-1', inputs: ['revenue'] }, netProfitYoY: { unit: 'fraction', formula: '(本期净利润/上年同期净利润)-1', inputs: ['netProfit'] }, adjustedNetProfitYoY: { unit: 'fraction', formula: '(本期扣非净利润/上年同期扣非净利润)-1', inputs: ['adjustedNetProfit'] }, equityYoY: { unit: 'fraction', formula: '(本期权益/上年同期权益)-1', inputs: ['equity'] }, roeApprox: { unit: 'fraction', formula: '本期净利润/平均权益', inputs: ['netProfit', 'equity'] }, assetYoY: { unit: 'fraction', formula: '(本期资产/上年同期资产)-1', inputs: ['assets'] }, loanYoY: { unit: 'fraction', formula: '(本期贷款/上年同期贷款)-1', inputs: ['loans'] }, depositYoY: { unit: 'fraction', formula: '(本期存款/上年同期存款)-1', inputs: ['deposits'] }, interestNetIncomeYoY: { unit: 'fraction', formula: '(本期净利息收入/上年同期净利息收入)-1', inputs: ['interestNetIncome'] }, feeNetIncomeYoY: { unit: 'fraction', formula: '(本期手续费及佣金净收入/上年同期)-1', inputs: ['feeNetIncome'] }, creditImpairmentToRevenue: { unit: 'fraction', formula: '信用减值损失/营业收入', inputs: ['creditImpairment', 'revenue'] },
+        }),
+        notApplicableMetrics: ['grossMargin', 'inventoryTurnover', 'inventoryDays', 'accountsReceivableTurnover', 'accountsReceivableDays', 'interestBearingDebt', 'netDebt', 'interestCoverage', 'freeCashFlow', 'roic'],
+        dataGaps: ['净息差、不良贷款率、拨备覆盖率和资本充足率需继续从 CNINFO 定期报告解析。普通企业的毛利率、存货周转、债务覆盖和自由现金流指标不适用于银行模板。'],
       };
     }
+    const freeCashFlow = current.operatingCashFlow != null && current.capex != null ? Number(current.operatingCashFlow) - Math.abs(Number(current.capex)) : null;
+    const accountsReceivableTurnover = annualizedTurnover(current.revenue, averageBalance('accountsReceivable'));
+    const inventoryTurnover = annualizedTurnover(current.operatingCost, averageBalance('inventory'));
+    const interestCoverage = ebitProxy !== null && interestExpense !== null && interestExpense !== 0 ? ebitProxy / Math.abs(interestExpense) : null;
+    const metrics = {
+      ...common,
+      netMargin: divide(current.netProfit, current.revenue), adjustedNetMargin: divide(current.adjustedNetProfit, current.revenue), grossMargin: divide(current.revenue != null && current.operatingCost != null ? Number(current.revenue) - Number(current.operatingCost) : null, current.revenue), cashConversion: divide(current.operatingCashFlow, current.netProfit), assetLiabilityRatio: divide(current.liabilities, current.assets), freeCashFlow, freeCashFlowProxy: freeCashFlow, capex: finiteNumber(current.capex), accountsReceivableTurnover, inventoryTurnover, accountsReceivableDays: accountsReceivableTurnover !== null && accountsReceivableTurnover > 0 ? 365 / accountsReceivableTurnover : null, inventoryDays: inventoryTurnover !== null && inventoryTurnover > 0 ? 365 / inventoryTurnover : null, interestBearingDebt, netDebt: interestBearingDebt !== null && current.cashAndCashEquivalents != null ? interestBearingDebt - Number(current.cashAndCashEquivalents) : null, netDebtProxy: interestBearingDebt !== null && current.cashAndCashEquivalents != null ? interestBearingDebt - Number(current.cashAndCashEquivalents) : null, interestCoverage, interestCoverageProxy: interestCoverage, effectiveTaxRate, investedCapitalProxy, roic: ebitProxy !== null && effectiveTaxRate !== null && investedCapitalProxy !== null && investedCapitalProxy > 0 ? (ebitProxy * (1 - effectiveTaxRate)) / investedCapitalProxy : null,
+    };
     return {
       template, period: latest.period, comparisonPeriod: prior?.period || null,
-      metrics: {
-        ...common,
-        netMargin: divide(current.netProfit, current.revenue),
-        adjustedNetMargin: divide(current.adjustedNetProfit, current.revenue),
-        grossMargin: divide(current.revenue != null && current.operatingCost != null ? Number(current.revenue) - Number(current.operatingCost) : null, current.revenue),
-        cashConversion: divide(current.operatingCashFlow, current.netProfit),
-        assetLiabilityRatio: divide(current.liabilities, current.assets),
-        freeCashFlowProxy: current.operatingCashFlow != null && current.capex != null ? Number(current.operatingCashFlow) - Math.abs(Number(current.capex)) : null,
-        accountsReceivableTurnover: divide(current.revenue, averageBalance('accountsReceivable')),
-        inventoryTurnover: divide(current.operatingCost, averageBalance('inventory')),
-        accountsReceivableDays: (() => { const value = divide(current.revenue, averageBalance('accountsReceivable')); return value !== null && value > 0 ? 365 / value : null; })(),
-        inventoryDays: (() => { const value = divide(current.operatingCost, averageBalance('inventory')); return value !== null && value > 0 ? 365 / value : null; })(),
-        interestBearingDebt,
-        netDebtProxy: interestBearingDebt !== null && current.cashAndCashEquivalents != null ? interestBearingDebt - Number(current.cashAndCashEquivalents) : null,
-        interestCoverageProxy: ebitProxy !== null && interestExpense !== null && interestExpense !== 0 ? ebitProxy / Math.abs(interestExpense) : null,
-        effectiveTaxRate,
-        investedCapitalProxy,
-        roicProxy: ebitProxy !== null && effectiveTaxRate !== null && investedCapitalProxy !== null && investedCapitalProxy > 0 ? (ebitProxy * (1 - effectiveTaxRate)) / investedCapitalProxy : null,
-      },
+      unit: { amount: 'CNY', ratio: 'fraction', turnover: 'times_per_year', days: 'days' }, source, metrics,
+      metricDetails: metricDetails(metrics, {
+        revenueYoY: { unit: 'fraction', formula: '(本期营业收入/上年同期营业收入)-1', inputs: ['revenue'] }, netProfitYoY: { unit: 'fraction', formula: '(本期净利润/上年同期净利润)-1', inputs: ['netProfit'] }, adjustedNetProfitYoY: { unit: 'fraction', formula: '(本期扣非净利润/上年同期扣非净利润)-1', inputs: ['adjustedNetProfit'] }, equityYoY: { unit: 'fraction', formula: '(本期权益/上年同期权益)-1', inputs: ['equity'] }, roeApprox: { unit: 'fraction', formula: '本期净利润/平均权益', inputs: ['netProfit', 'equity'] }, grossMargin: { unit: 'fraction', formula: '(营业收入-营业成本)/营业收入', inputs: ['revenue', 'operatingCost'] }, netMargin: { unit: 'fraction', formula: '净利润/营业收入', inputs: ['netProfit', 'revenue'] }, adjustedNetMargin: { unit: 'fraction', formula: '扣非净利润/营业收入', inputs: ['adjustedNetProfit', 'revenue'] }, accountsReceivableTurnover: { unit: 'times_per_year', formula: '营业收入年化/平均应收账款', inputs: ['revenue', 'accountsReceivable'] }, accountsReceivableDays: { unit: 'days', formula: '365/应收账款周转率', inputs: ['accountsReceivableTurnover'] }, inventoryTurnover: { unit: 'times_per_year', formula: '营业成本年化/平均存货', inputs: ['operatingCost', 'inventory'] }, inventoryDays: { unit: 'days', formula: '365/存货周转率', inputs: ['inventoryTurnover'] }, interestBearingDebt: { unit: 'CNY', formula: '短期借款+一年内到期非流动负债+长期借款+应付债券+租赁负债', inputs: debtKeys }, netDebt: { unit: 'CNY', formula: '有息负债-货币资金', inputs: ['interestBearingDebt', 'cashAndCashEquivalents'] }, interestCoverage: { unit: 'times', formula: 'EBIT代理值/利息费用绝对值', inputs: ['operatingProfit', 'interestExpense'] }, operatingCashFlow: { unit: 'CNY', formula: '经营活动现金流量净额', inputs: ['operatingCashFlow'] }, capex: { unit: 'CNY', formula: '购建长期资产支付的现金', inputs: ['capex'] }, freeCashFlow: { unit: 'CNY', formula: '经营现金流-资本开支绝对值', inputs: ['operatingCashFlow', 'capex'] }, roic: { unit: 'fraction', formula: 'EBIT代理值×(1-有效税率)/平均投入资本代理值', inputs: ['operatingProfit', 'interestExpense', 'incomeTaxExpense', 'profitBeforeTax', 'equity', ...debtKeys, 'cashAndCashEquivalents'] },
+      }),
       dataGaps: [
         ...(current.operatingCost == null ? ['缺少营业成本，无法计算毛利率和存货周转率。'] : []),
         ...(current.accountsReceivable == null ? ['缺少应收账款，无法计算应收周转率。'] : []),
         ...(current.inventory == null ? ['缺少存货，无法计算存货周转率。'] : []),
         ...(interestExpense === null ? ['缺少利息费用，无法计算利息覆盖代理值。'] : []),
-        ...(investedCapitalProxy === null || effectiveTaxRate === null ? ['缺少投入资本或税费口径，无法计算 ROIC 代理值。'] : []),
+        ...(investedCapitalProxy === null || effectiveTaxRate === null ? ['缺少平均投入资本或税费口径，无法计算 ROIC。'] : []),
       ],
     };
   }
@@ -4830,7 +4846,7 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
     const template = payload?.template === 'bank' ? 'bank' : 'non_financial';
     return {
       reports, template, unit: payload?.unit || 'CNY', normalization: payload?.normalization,
-      calculations: calculateFinancialMetrics(reports, template),
+      calculations: calculateFinancialMetrics(reports, template, 'ths_financial_statements'),
       sourceMeta: { source: 'ths_financial_statements', fetchedAt: new Date().toISOString(), freshness: 'delayed', confidence: 'market', fallbackLevel: 0, officialStatus: 'official_document_only' },
     };
   }
@@ -4847,7 +4863,7 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
         template: 'non_financial' as const,
         unit: 'CNY',
         normalization: '金额单位由摘要源提供；未覆盖的字段为空。',
-        calculations: calculateFinancialMetrics(reports, 'non_financial'),
+        calculations: calculateFinancialMetrics(reports, 'non_financial', fallback.sourceMeta?.source || 'sina_financial_summary'),
         sourceMeta: { ...fallback.sourceMeta, fallbackLevel: 1 },
       };
     }

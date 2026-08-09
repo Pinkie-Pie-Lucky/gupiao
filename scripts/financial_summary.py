@@ -30,7 +30,7 @@ def main() -> None:
     reports = []
     for period in periods:
         metrics = {key: clean(by_metric.get(label, {}).get(period)) for label, key in METRICS.items()}
-        reports.append({"period": str(period), "metrics": metrics})
+        reports.append({"period": str(period), "unit": "CNY", "source": "sina_financial_summary", "metrics": metrics})
     print(json.dumps({"reports": reports, "metricSource": "sina_financial_summary"}, ensure_ascii=False))
 
 

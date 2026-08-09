@@ -116,7 +116,7 @@ def main():
             "roe": metric(a, ["净资产收益率-摊薄", "净资产收益率"]),
             "netMargin": metric(a, ["销售净利率"]),
         }
-        reports.append({"period": period, "metrics": metrics})
+        reports.append({"period": period, "unit": "CNY", "source": "ths_financial_statements", "metrics": metrics})
 
     latest = reports[0]["metrics"] if reports else {}
     template = "bank" if latest.get("interestNetIncome") is not None or (latest.get("loans") is not None and latest.get("deposits") is not None) else "non_financial"
