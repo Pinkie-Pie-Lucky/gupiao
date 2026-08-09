@@ -4477,6 +4477,23 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
     })).filter((item: any) => item.text && item.evidenceIds.length);
   }
 
+  function normalizeCioModuleExplanations(items: unknown, evidenceSet: Set<string>) {
+    const validModules = new Set(['fundamental', 'technical', 'events', 'sentiment', 'valuation', 'risk']);
+    if (!Array.isArray(items)) return {};
+    const result: Record<string, any> = {};
+    for (const item of items.slice(0, 6)) {
+      const module = String(item?.module || '');
+      if (!validModules.has(module) || result[module]) continue;
+      const why = normalizeManagerItems(item?.why, evidenceSet, 3);
+      const supporting = normalizeManagerItems(item?.supporting, evidenceSet, 3);
+      const counter = normalizeManagerItems(item?.counter, evidenceSet, 3);
+      const conclusion = sanitizeTeacherText(item?.conclusion, 180);
+      if (!conclusion && !why.length && !supporting.length && !counter.length) continue;
+      result[module] = { conclusion, why, supporting, counter, evidenceIds: [...new Set([...why, ...supporting, ...counter].flatMap((entry: any) => entry.evidenceIds || []))] };
+    }
+    return result;
+  }
+
   function fallbackCioManagerOpinion(snapshot: any, input: ReturnType<typeof buildCioManagerInput>, reason: string) {
     const toItems = (items: any[]) => normalizeManagerItems((items || []).map((item: any) => ({ text: item.text || item.claim || item.description || '', evidenceIds: item.evidenceIds || [] })), input.evidenceIds);
     const blocked = snapshot.researchStatus === 'blocked';
@@ -4487,7 +4504,7 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
       agent: 'cio_manager', status: blocked ? 'blocked' : 'limited', conclusion,
       confidence: { score: Math.min(60, 25 + input.evidenceIds.size), level: 'limited', reason: `CIO/Manager 使用确定性回退：${reason}` },
       researchStatus: snapshot.researchStatus, riskDecision: snapshot.riskDecision, riskLevel: snapshot.riskLevel, conflicts: snapshot.conflicts || [],
-      supportingCase: toItems(snapshot.supportingCase), counterCase: toItems(snapshot.counterCase), requiredConditions: toItems(snapshot.requiredConditions), researchPriorities: toItems(snapshot.researchPriorities), uncertainties: (snapshot.dataGaps || []).slice(0, 10).map((text: string) => ({ text, evidenceIds: [] })),
+      supportingCase: toItems(snapshot.supportingCase), counterCase: toItems(snapshot.counterCase), requiredConditions: toItems(snapshot.requiredConditions), researchPriorities: toItems(snapshot.researchPriorities), uncertainties: (snapshot.dataGaps || []).slice(0, 10).map((text: string) => ({ text, evidenceIds: [] })), moduleExplanations: {},
       evidenceIds: [...input.evidenceIds], dataGaps: snapshot.dataGaps || [], managerStance: snapshot.managerStance,
     };
   }
@@ -4516,8 +4533,8 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
     let aiStatus: 'completed' | 'fallback' = 'completed';
     try {
       const parsed = await callAIWithParseRetry(
-        '你是 CIO/Manager Agent。只解释输入中的冻结多 Agent 汇总快照和证据目录，不搜索新事实，不重新计算下游信号，不修改 researchStatus、riskDecision、riskLevel、conflicts、requiredConditions 或 researchPriorities。riskDecision 为 veto 时必须保留 researchStatus=rejected，blocked 必须保持 blocked；research_ready 只表示研究材料完整，不得写成买入、看多、可交易或收益判断。必须区分支持项、反方项、冲突和待验证条件。所有事实判断必须引用 evidenceCatalog 中存在的 evidenceId；没有证据只能放入 uncertainties。输出必须精简：summary 不超过 120 个汉字，confidence.reason 不超过 80 个汉字；supportingCase、counterCase、requiredConditions、researchPriorities、uncertainties 各最多 4 条；每条 text 不超过 100 个汉字，evidenceIds 最多 3 个。严格输出 JSON：{"summary":"","confidence":{"score":0,"level":"high|medium|limited","reason":""},"supportingCase":[{"text":"","evidenceIds":[]}],"counterCase":[{"text":"","evidenceIds":[]}],"requiredConditions":[{"text":"","evidenceIds":[]}],"researchPriorities":[{"text":"","evidenceIds":[]}],"uncertainties":[{"text":"","evidenceIds":[]}]}' ,
-        JSON.stringify({ symbol, deterministicManager: { researchStatus: snapshot.researchStatus, riskDecision: snapshot.riskDecision, riskLevel: snapshot.riskLevel, conflicts: snapshot.conflicts, supportingCase: snapshot.supportingCase, counterCase: snapshot.counterCase, requiredConditions: snapshot.requiredConditions, researchPriorities: snapshot.researchPriorities }, dataGaps: snapshot.dataGaps, evidenceCatalog }),
+        '你是 CIO/Manager Agent。只解释输入中的冻结多 Agent 汇总快照和证据目录，不搜索新事实，不重新计算下游信号，不修改 researchStatus、riskDecision、riskLevel、conflicts、requiredConditions 或 researchPriorities。riskDecision 为 veto 时必须保留 researchStatus=rejected，blocked 必须保持 blocked；research_ready 只表示研究材料完整，不得写成买入、看多、可交易或收益判断。必须区分支持项、反方项、冲突和待验证条件。所有事实判断必须引用 evidenceCatalog 中存在的 evidenceId；没有证据只能放入 uncertainties。除总览外，为每个已提供的模块生成一段解释：只解释该模块事实，不能跨模块补充内容。输出必须精简：summary 不超过 120 个汉字；每个模块 conclusion 不超过 100 个汉字，why/supporting/counter 各最多 3 条；每条 text 不超过 100 个汉字，evidenceIds 最多 3 个。严格输出 JSON：{"summary":"","confidence":{"score":0,"level":"high|medium|limited","reason":""},"supportingCase":[{"text":"","evidenceIds":[]}],"counterCase":[{"text":"","evidenceIds":[]}],"requiredConditions":[{"text":"","evidenceIds":[]}],"researchPriorities":[{"text":"","evidenceIds":[]}],"uncertainties":[{"text":"","evidenceIds":[]}],"moduleExplanations":[{"module":"fundamental|technical|events|sentiment|valuation|risk","conclusion":"","why":[{"text":"","evidenceIds":[]}],"supporting":[{"text":"","evidenceIds":[]}],"counter":[{"text":"","evidenceIds":[]}]}]}' ,
+        JSON.stringify({ symbol, deterministicManager: { researchStatus: snapshot.researchStatus, riskDecision: snapshot.riskDecision, riskLevel: snapshot.riskLevel, conflicts: snapshot.conflicts, supportingCase: snapshot.supportingCase, counterCase: snapshot.counterCase, requiredConditions: snapshot.requiredConditions, researchPriorities: snapshot.researchPriorities }, agentOutputs: snapshot.agentOutputs, dataGaps: snapshot.dataGaps, evidenceCatalog: (snapshot.evidence || []).map((item: any) => ({ evidenceId: String(item.evidenceId), title: item.title, value: item.value, period: item.period, source: item.source, verification: item.verification })).slice(0, 80) }),
         0.1,
         2,
         4_000,
@@ -4527,7 +4544,8 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
       const requiredConditions = normalizeManagerItems(parsed?.requiredConditions, input.evidenceIds);
       const researchPriorities = normalizeManagerItems(parsed?.researchPriorities, input.evidenceIds);
       const uncertainties = normalizeEventAgentItems(parsed?.uncertainties, input.evidenceIds);
-      const citedIds = [...new Set<string>([...supportingCase, ...counterCase, ...requiredConditions, ...researchPriorities, ...uncertainties].flatMap((item: any) => item.evidenceIds || []))];
+      const moduleExplanations = normalizeCioModuleExplanations(parsed?.moduleExplanations, input.evidenceIds);
+      const citedIds = [...new Set<string>([...supportingCase, ...counterCase, ...requiredConditions, ...researchPriorities, ...uncertainties, ...Object.values(moduleExplanations).flatMap((item: any) => item.evidenceIds || [])].flatMap((item: any) => item.evidenceIds || item))];
       const requestedLevel = ['high', 'medium', 'limited'].includes(parsed?.confidence?.level) ? parsed.confidence.level : 'limited';
       const confidenceLevel = snapshot.dataGaps.length || !citedIds.length || snapshot.researchStatus !== 'research_ready' ? 'limited' : requestedLevel === 'high' ? 'medium' : requestedLevel;
       const confidenceScore = Math.max(0, Math.min(confidenceLevel === 'limited' ? 65 : 85, Number(parsed?.confidence?.score) || 0));
@@ -4536,7 +4554,7 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
         conclusion: sanitizeTeacherText(parsed?.summary, 280) || 'CIO/Manager 汇总解释暂不可用。',
         confidence: { score: confidenceScore, level: confidenceLevel, reason: sanitizeTeacherText(parsed?.confidence?.reason, 180) || '置信度由输入完整度、风险状态、冲突和证据引用共同约束。' },
         researchStatus: snapshot.researchStatus, riskDecision: snapshot.riskDecision, riskLevel: snapshot.riskLevel, conflicts: snapshot.conflicts || [],
-        supportingCase, counterCase, requiredConditions, researchPriorities, uncertainties, evidenceIds: citedIds, dataGaps: snapshot.dataGaps || [], managerStance: snapshot.managerStance,
+        supportingCase, counterCase, requiredConditions, researchPriorities, uncertainties, moduleExplanations, evidenceIds: citedIds, dataGaps: snapshot.dataGaps || [], managerStance: snapshot.managerStance,
       };
     } catch (error: any) {
       aiStatus = 'fallback';

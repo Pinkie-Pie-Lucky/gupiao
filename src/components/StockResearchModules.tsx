@@ -49,7 +49,7 @@ function MetaStrip({ data, evidence, agentMeta }: { data: any; evidence: any[]; 
   const quality = data?.sourceQuality || latestEvidence?.verification || '未核验';
   const aiStatus = data?.aiStatus || 'not_requested';
   const cioStatus = agentMeta?.aiStatus;
-  const aiLabel = aiStatus === 'completed' ? '本模块 AI 已完成' : aiStatus === 'fallback' ? '本模块 AI 未完成，已回退' : cioStatus === 'completed' ? '本模块为确定性计算；CIO AI 已完成解释' : cioStatus === 'fallback' ? '本模块为确定性计算；CIO AI 已回退' : '本模块为确定性计算，未单独调用 AI';
+  const aiLabel = data?.aiExplanation && cioStatus === 'completed' ? 'CIO AI 已完成本模块解释' : aiStatus === 'completed' ? '本模块 AI 已完成' : aiStatus === 'fallback' ? '本模块 AI 未完成，已回退' : cioStatus === 'completed' ? '本模块为确定性计算；CIO AI 已完成解释' : cioStatus === 'fallback' ? '本模块为确定性计算；CIO AI 已回退' : '本模块为确定性计算，未单独调用 AI';
   const aiTone = aiStatus === 'fallback' || cioStatus === 'fallback' ? 'text-amber-800 bg-amber-50' : 'text-slate-700 bg-slate-100';
   return <div className="mt-4 grid gap-2 border-t border-slate-200 pt-3 sm:grid-cols-3">
     <div className="rounded-lg bg-slate-100 px-2.5 py-2"><span className="flex items-center gap-1 text-[10px] font-bold text-slate-600"><Bot className="h-3 w-3" />AI 运行</span><p className={`mt-1 text-[10px] leading-relaxed ${aiTone}`}>{aiLabel}</p></div>
@@ -59,11 +59,14 @@ function MetaStrip({ data, evidence, agentMeta }: { data: any; evidence: any[]; 
 }
 
 function ModuleFrame({ conclusion, why, support, counter, gaps, data, evidence, agentMeta, children }: { conclusion: string; why: any[]; support: any[]; counter: any[]; gaps: string[]; data: any; evidence: any[]; agentMeta: any; children: React.ReactNode }) {
+  const ai = data?.aiExplanation || {};
+  const aiWhy = asList(ai?.why); const aiSupport = asList(ai?.supporting); const aiCounter = asList(ai?.counter);
+  const displayConclusion = ai?.conclusion || conclusion;
   return <div className="space-y-4 pt-3">
-    <section className="rounded-xl border border-indigo-200 bg-indigo-50/70 p-3"><p className="flex items-center gap-1.5 text-[10px] font-bold text-indigo-800"><Sparkles className="h-3.5 w-3.5" />一句话结论</p><p className="mt-1.5 text-xs font-semibold leading-relaxed text-slate-900">{conclusion}</p></section>
-    <section><h3 className="mb-2 text-[11px] font-bold text-slate-800">为什么</h3><BulletList items={why} empty="暂未形成可解释的确定性原因。" /></section>
+    <section className="rounded-xl border border-indigo-200 bg-indigo-50/70 p-3"><p className="flex items-center gap-1.5 text-[10px] font-bold text-indigo-800"><Sparkles className="h-3.5 w-3.5" />一句话结论{ai?.conclusion && <span className="rounded bg-white px-1.5 py-0.5 text-[9px] text-indigo-700">AI 解读</span>}</p><p className="mt-1.5 text-xs font-semibold leading-relaxed text-slate-900">{displayConclusion}</p></section>
+    <section><h3 className="mb-2 text-[11px] font-bold text-slate-800">为什么{aiWhy.length > 0 && <span className="ml-1.5 text-[9px] font-medium text-indigo-700">AI 解读</span>}</h3><BulletList items={aiWhy.length ? aiWhy : why} empty="暂未形成可解释的确定性原因。" /></section>
     {children}
-    <div className="grid gap-4 sm:grid-cols-2"><section><h3 className="mb-2 flex items-center gap-1.5 text-[11px] font-bold text-emerald-800"><CheckCircle2 className="h-3.5 w-3.5" />支持证据</h3><BulletList items={support} tone="positive" empty="暂无足够的正向证据。" /></section><section><h3 className="mb-2 flex items-center gap-1.5 text-[11px] font-bold text-rose-800"><XCircle className="h-3.5 w-3.5" />反方证据</h3><BulletList items={counter} tone="negative" empty="暂未发现本模块的反方证据。" /></section></div>
+    <div className="grid gap-4 sm:grid-cols-2"><section><h3 className="mb-2 flex items-center gap-1.5 text-[11px] font-bold text-emerald-800"><CheckCircle2 className="h-3.5 w-3.5" />支持证据</h3><BulletList items={aiSupport.length ? aiSupport : support} tone="positive" empty="暂无足够的正向证据。" /></section><section><h3 className="mb-2 flex items-center gap-1.5 text-[11px] font-bold text-rose-800"><XCircle className="h-3.5 w-3.5" />反方证据</h3><BulletList items={aiCounter.length ? aiCounter : counter} tone="negative" empty="暂未发现本模块的反方证据。" /></section></div>
     <section><h3 className="mb-2 flex items-center gap-1.5 text-[11px] font-bold text-slate-800"><FileWarning className="h-3.5 w-3.5" />数据缺口</h3>{gaps.length ? <ul className="space-y-1.5">{[...new Set(gaps)].slice(0, 4).map((gap) => <li className="flex gap-2 text-[11px] leading-relaxed text-slate-700" key={gap}><span aria-hidden="true">•</span><span>{gap}</span></li>)}</ul> : <Empty>当前模块未返回明确的数据缺口。</Empty>}</section>
     <MetaStrip data={data} evidence={evidence} agentMeta={agentMeta} />
   </div>;
@@ -118,7 +121,9 @@ function Evidence({ evidence, gaps, agentMeta }: any) {
 }
 
 export function StockResearchModules({ sectionKey, outputs, counterCase, evidence, dataGaps = [], agentMeta }: Props) {
-  const data = sectionKey === 'evidence' ? null : outputs?.[sectionKey];
+  const rawData = sectionKey === 'evidence' ? null : outputs?.[sectionKey];
+  const aiExplanation = (agentMeta as any)?.moduleExplanations?.[sectionKey];
+  const data = rawData ? { ...rawData, aiExplanation } : rawData;
   const moduleEvidence = evidence.filter((item: any) => sectionKey === 'evidence' || !data?.sourceMeta?.source || item?.source === data?.sourceMeta?.source || item?.type === (sectionKey === 'fundamental' ? 'financial' : sectionKey === 'events' ? 'announcement' : sectionKey === 'sentiment' ? 'sentiment' : undefined));
   const common = { data, gaps: dataGaps, evidence: moduleEvidence.length ? moduleEvidence : evidence, counter: counterCase, agentMeta };
   if (sectionKey === 'fundamental') return <Fundamental {...common} />;
