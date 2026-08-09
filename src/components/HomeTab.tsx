@@ -467,7 +467,7 @@ export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStoc
             <button
               id="search-trigger-btn"
               onClick={() => setIsSearching(true)}
-              className="p-2 bg-gray-50 rounded-full hover:bg-gray-100 transition-all text-gray-700 hover:scale-105 active:scale-95 shadow-sm border border-gray-100"
+            className="grid h-11 w-11 place-items-center bg-gray-50 rounded-full hover:bg-gray-100 transition-all text-gray-700 hover:scale-105 active:scale-95 shadow-sm border border-gray-100"
             >
               <Search className="w-4 h-4" />
             </button>
@@ -669,14 +669,14 @@ export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStoc
         <div className="flex gap-2 pt-1">
           <button
             onClick={() => setIsReasonOpen(true)}
-            className="flex-1 bg-indigo-50 hover:bg-indigo-100/80 text-indigo-600 font-bold text-xs py-2.5 rounded-xl transition-all flex items-center justify-center gap-1.5 border border-indigo-100 active:scale-[0.98]"
+            className="flex min-h-11 flex-1 bg-indigo-50 hover:bg-indigo-100/80 text-indigo-600 font-bold text-xs py-2.5 rounded-xl transition-all items-center justify-center gap-1.5 border border-indigo-100 active:scale-[0.98]"
           >
             <BookOpen className="w-3.5 h-3.5" />
             查看原因
           </button>
           <button
             onClick={() => onNavigateToTab('ai-teacher')}
-            className="flex-1 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs py-2.5 rounded-xl transition-all flex items-center justify-center gap-1.5 shadow-sm active:scale-[0.98]"
+            className="flex min-h-11 flex-1 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs py-2.5 rounded-xl transition-all items-center justify-center gap-1.5 shadow-sm active:scale-[0.98]"
           >
             <MessageSquare className="w-3.5 h-3.5" />
             问问老师
@@ -821,7 +821,7 @@ export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStoc
                   setStoryMode(mode);
                   setExpandedStories(new Set());
                 }}
-                className={`px-2.5 py-1.5 rounded-lg text-[10px] font-bold transition-colors ${
+                className={`min-h-11 px-2.5 py-2 rounded-lg text-[10px] font-bold transition-colors ${
                   storyMode === mode
                     ? 'bg-white text-indigo-700 shadow-sm'
                     : 'text-slate-500 hover:text-slate-700'
@@ -1120,7 +1120,7 @@ export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStoc
           <h3 className="text-base font-bold text-gray-950">全景市场地图</h3>
           <button
             onClick={() => onNavigateToTab('market-map')}
-            className="text-[11px] font-bold text-indigo-600 hover:underline flex items-center"
+            className="min-h-11 px-2 text-[11px] font-bold text-indigo-600 hover:underline flex items-center"
           >
             全屏查看 <ChevronRight className="w-3.5 h-3.5" />
           </button>

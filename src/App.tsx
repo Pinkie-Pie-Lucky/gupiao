@@ -9,17 +9,20 @@ import { MarketMapTab } from './components/MarketMapTab';
 import { WatchlistTab } from './components/WatchlistTab';
 import { AiTeacherTab } from './components/AiTeacherTab';
 import { MineTab } from './components/MineTab';
-import { Home, Compass, Star, MessageSquare, User } from 'lucide-react';
+import { StockResearchTab } from './components/StockResearchTab';
+import { StockResearchEmptyState } from './components/StockResearchEmptyState';
+import { Home, Compass, Star, MessageSquare, User, BarChart3 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { StockItem } from './types';
 
-type TabId = 'home' | 'market-map' | 'watchlist' | 'ai-teacher' | 'mine';
+type TabId = 'home' | 'market-map' | 'watchlist' | 'ai-teacher' | 'mine' | 'stock-research';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<TabId>('home');
   const [selectedSectorId, setSelectedSectorId] = useState<string | null>(null);
   const [prefilledStock, setPrefilledStock] = useState<{ name: string; code: string } | null>(null);
   const [pendingPrompt, setPendingPrompt] = useState<string | null>(null);
+  const [researchStock, setResearchStock] = useState<StockItem | null>(null);
 
   // Centralized Watchlist state shared among tabs
   const [followedStocks, setFollowedStocks] = useState<StockItem[]>([
@@ -81,6 +84,17 @@ export default function App() {
     setPendingPrompt(null);
   };
 
+  const handleOpenResearch = (stock: StockItem) => {
+    setResearchStock(stock);
+    setActiveTab('stock-research');
+  };
+
+  const handleOpenResearchEntry = () => {
+    const stock = researchStock || followedStocks[0];
+    if (stock) setResearchStock(stock);
+    setActiveTab('stock-research');
+  };
+
   return (
     <div id="app-root-container" className="min-h-screen bg-[#F8FAFC] text-gray-900 font-sans flex justify-center">
       {/* Centered Mobile Frame container to match design and prevent layout stretching on large screens */}
@@ -119,8 +133,14 @@ export default function App() {
                   setFollowedStocks={setFollowedStocks}
                   onAskTeacherAboutStock={handleAskTeacherAboutStock}
                   onNavigateToTab={(tabId) => setActiveTab(tabId as TabId)}
+                  onOpenResearch={handleOpenResearch}
                 />
               )}
+              {activeTab === 'stock-research' && (researchStock ? (
+                <StockResearchTab stock={researchStock} followedStocks={followedStocks} onSelectStock={setResearchStock} onBack={() => setActiveTab('watchlist')} onAskTeacher={() => { handleAskTeacherAboutStock(researchStock.name, researchStock.code); setActiveTab('ai-teacher'); }} />
+              ) : (
+                <StockResearchEmptyState followedStocks={followedStocks} onSelectStock={setResearchStock} onBack={() => setActiveTab('watchlist')} />
+              ))}
               {activeTab === 'ai-teacher' && (
                 <AiTeacherTab
                   prefilledStock={prefilledStock}
@@ -184,6 +204,22 @@ export default function App() {
             <Star className="w-4.5 h-4.5 stroke-[2.2]" />
             <span className="text-[9px] mt-1 tracking-tight">我的关注</span>
             {activeTab === 'watchlist' && (
+              <motion.div layoutId="activeTabDot" className="absolute -bottom-1 w-1 h-1 bg-indigo-600 rounded-full" />
+            )}
+          </button>
+
+          {/* Tab: 个股分析 */}
+          <button
+            id="tab-btn-stock-research"
+            onClick={handleOpenResearchEntry}
+            className={`flex flex-col items-center justify-center flex-1 py-1 transition-all relative ${
+              activeTab === 'stock-research' ? 'text-indigo-600 scale-105 font-semibold' : 'text-slate-400 hover:text-slate-600'
+            }`}
+            aria-label="打开个股分析"
+          >
+            <BarChart3 className="w-4.5 h-4.5 stroke-[2.2]" />
+            <span className="text-[9px] mt-1 tracking-tight">个股分析</span>
+            {activeTab === 'stock-research' && (
               <motion.div layoutId="activeTabDot" className="absolute -bottom-1 w-1 h-1 bg-indigo-600 rounded-full" />
             )}
           </button>

@@ -83,7 +83,11 @@ export function MarketMapTab({ selectedSectorId, onSelectSectorId, onNavigateToT
   // 已发起过请求的标记。不放进 state，否则它变化会触发 effect 重跑并中断在途请求。
   const bubbleRequestedRef = useRef(false);
   const bubbleMountedRef = useRef(true);
-  useEffect(() => () => { bubbleMountedRef.current = false; }, []);
+  useEffect(() => {
+    // React StrictMode 在开发环境会执行一次清理后重新挂载；重新挂载必须恢复可更新状态。
+    bubbleMountedRef.current = true;
+    return () => { bubbleMountedRef.current = false; };
+  }, []);
 
   const loadBubbleSelection = useCallback(async () => {
     bubbleRequestedRef.current = true;
@@ -238,7 +242,7 @@ export function MarketMapTab({ selectedSectorId, onSelectSectorId, onNavigateToT
       <div className="flex gap-2 overflow-x-auto pb-1">
         {(['all','featured','anomaly','followed'] as MapFilter[]).map(o => (
           <button key={o} onClick={() => setMapFilter(o)}
-            className={`shrink-0 rounded-full px-3 py-1.5 text-xs font-semibold transition ${mapFilter===o?'bg-indigo-600 text-white':'bg-slate-100 text-slate-600'}`}>
+            className={`min-h-11 shrink-0 rounded-full px-3 text-xs font-semibold transition ${mapFilter===o?'bg-indigo-600 text-white':'bg-slate-100 text-slate-600'}`}>
             {o==='all'?'全部':o==='featured'?'泡泡精选':o==='anomaly'?'异动':'关注'}
             {filterCounts[o] === null ? '' : ` (${filterCounts[o]})`}
           </button>
@@ -364,13 +368,13 @@ export function MarketMapTab({ selectedSectorId, onSelectSectorId, onNavigateToT
               <div className="mt-3 flex gap-2">
                 <button
                   onClick={() => openBubbleDetail(item.sectorName)}
-                  className="rounded-full bg-indigo-600 px-3 py-1.5 text-[11px] font-semibold text-white"
+                  className="min-h-11 rounded-full bg-indigo-600 px-3 py-2 text-[11px] font-semibold text-white"
                 >
                   查看板块详情
                 </button>
                 <button
                   onClick={() => onAskTeacherAboutSector(item.sectorName, `${item.sectorName}今天为什么会有这样的变化？`)}
-                  className="flex items-center gap-1 rounded-full bg-slate-100 px-3 py-1.5 text-[11px] font-semibold text-slate-600"
+                  className="flex min-h-11 items-center gap-1 rounded-full bg-slate-100 px-3 py-2 text-[11px] font-semibold text-slate-600"
                 >
                   <MessageCircle className="h-3 w-3"/>问泡泡老师
                 </button>
