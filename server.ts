@@ -4449,7 +4449,7 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
       // date/source provenance and draw trends only from real series (never placeholders).
       agentOutputs: {
         fundamental: fundamental ? { signals: fundamental.signals, vetoes: fundamental.vetoes, reports: fact?.facts?.financialReports || [], sourceMeta: fact?.facts?.financialMeta?.sourceMeta || null, template: fundamental.template, aiStatus: 'not_requested' } : null,
-        technical: technical ? { signals: technical.signals, structureInvalidation: technical.structureInvalidation, sourceMeta: technical.snapshotMeta || null, aiStatus: 'not_requested' } : null,
+        technical: technical ? { signals: technical.signals, keyLevels: technical.keyLevels, chartBars: technical.chartBars || [], structureInvalidation: technical.structureInvalidation, sourceMeta: technical.inputMeta?.technical?.sourceMeta || technical.snapshotMeta || null, aiStatus: 'not_requested' } : null,
         events: eventSnapshot ? { events: activeEvents, sourceMeta: eventSnapshot.snapshotMeta || null, aiStatus: 'not_requested' } : null,
         sentiment: sentiment ? { attention: sentiment.attention, tone: sentiment.tone, disagreement: sentiment.disagreement, eventReaction: sentiment.eventReaction, propagationQuality: sentiment.propagationQuality, sourceQuality: sentiment.sourceQuality, sourceMeta: sentiment.snapshotMeta || null, aiStatus: 'not_requested' } : null,
         valuation: valuation ? { valuationStatus: valuation.valuationStatus, multiples: valuation.multiples, comparison: valuation.comparison, scenarioModel: valuation.scenarioModel, market: valuation.market || null, sourceMeta: valuation.snapshotMeta || null, aiStatus: 'not_requested' } : null,
@@ -5005,7 +5005,9 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
     if (cached && cached.expiresAt > Date.now()) return { ...cached.value, sourceMeta: { ...cached.value.sourceMeta, source: 'cache', freshness: 'stale', fallbackLevel: 1 } };
     const payload = await fetchMarketDailyKline('stock', symbol);
     const computed = calculateTechnicalMetrics(Array.isArray(payload?.bars) ? payload.bars : [], String(payload?.sourceMeta?.adjust || 'none'));
-    const value = { ...computed, sourceMeta: { ...payload.sourceMeta, freshness: 'delayed', confidence: 'market' } };
+    // The research UI only needs a short, auditable window. Keep the full series server-side.
+    const chartBars = payload.bars.slice(-30).map((bar: any) => ({ date: bar.date, open: Number(bar.open), high: Number(bar.high), low: Number(bar.low), close: Number(bar.close), volume: Number(bar.volume) }));
+    const value = { ...computed, chartBars, sourceMeta: { ...payload.sourceMeta, freshness: 'delayed', confidence: 'market' } };
     stockTechnicalCache.set(symbol, { expiresAt: Date.now() + 15 * 60_000, value });
     return value;
   }
@@ -5416,7 +5418,7 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
     };
     const uniqueGaps = [...new Set(dataGaps.filter(Boolean))];
     const value = {
-      symbol, period, signals, keyLevels: { ...keyLevels, evidenceIds: [...new Set([...keyLevelEvidenceIds, keyLevelsEvidenceId])] }, structureInvalidation, structureRuleSet: { version: 'technical-market-structure-v1', atrBuffer: { multiplier: 0.5, basis: 'ATR14', breakDefinition: 'close < key level - 0.5 * ATR14' } }, evidence, dataGaps: uniqueGaps,
+      symbol, period, signals, keyLevels: { ...keyLevels, evidenceIds: [...new Set([...keyLevelEvidenceIds, keyLevelsEvidenceId])] }, chartBars: technical.chartBars || [], structureInvalidation, structureRuleSet: { version: 'technical-market-structure-v1', atrBuffer: { multiplier: 0.5, basis: 'ATR14', breakDefinition: 'close < key level - 0.5 * ATR14' } }, evidence, dataGaps: uniqueGaps,
       ruleSet: { version: 'technical-market-v1', riskThresholds, relativeStrength: '5/20/60 日相对收益全正为 strong、全负为 weak，其余为 mixed；仅在交易日对齐时计算。', trend: '趋势需要均线结构与 MA20/MA50 近5日斜率同向确认。' },
       inputMeta: { technical: { sourceMeta: technical.sourceMeta, period: technical.period }, marketEnvironment: environmentResult.status === 'fulfilled' ? environmentResult.value.snapshotMeta : null, relativeStrength: relativeStrengthResult.status === 'fulfilled' ? relativeStrengthResult.value.snapshotMeta : null },
       snapshotMeta: { generatedAt: new Date().toISOString(), source: 'live', freshness: 'delayed', evidenceCount: evidence.length, signalVersion: 'technical-market-v1' },

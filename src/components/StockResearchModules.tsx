@@ -79,6 +79,38 @@ function Trend({ reports }: { reports: any[] }) {
   return <div className="rounded-xl border border-slate-200 bg-white p-3"><div className="flex items-center justify-between"><h3 className="text-[11px] font-bold text-slate-800">财务历史趋势</h3><span className="text-[10px] text-slate-500">营收 / 归母净利润</span></div><div className="mt-3 flex h-28 items-end gap-2" aria-label="基于报告期真实数值的财务趋势图">{series.map((item) => <div className="flex min-w-0 flex-1 flex-col items-center gap-1" key={item.period}><div className="flex h-20 w-full items-end justify-center gap-1"><i className="w-2 rounded-t bg-indigo-500" style={{ height: `${Math.max(8, Math.abs(item.revenue) / max * 100)}%` }} title={`营收 ${item.revenue}`} />{Number.isFinite(item.profit) && <i className={`w-2 rounded-t ${item.profit >= 0 ? 'bg-emerald-500' : 'bg-rose-500'}`} style={{ height: `${Math.max(5, Math.abs(item.profit) / max * 100)}%` }} title={`归母净利润 ${item.profit}`} />}</div><span className="w-full truncate text-center text-[9px] text-slate-500">{String(item.period).slice(0, 7)}</span></div>)}</div><p className="mt-2 text-[9px] text-slate-500">蓝色：营收；绿色/红色：归母净利润。柱高仅比较本图内报告期。</p></div>;
 }
 
+function formatPrice(value: any) {
+  return Number.isFinite(Number(value)) ? Number(value).toFixed(2) : '--';
+}
+
+function CandleChart({ bars, keyLevels }: { bars: any[]; keyLevels: any }) {
+  const candles = asList(bars).filter((bar) => [bar?.open, bar?.high, bar?.low, bar?.close].every((value) => Number.isFinite(Number(value)))).slice(-30);
+  if (candles.length < 8) return <Empty>最近日线数量不足，暂不绘制 K 线图。</Empty>;
+  const levels = [
+    { name: '20日支撑', value: keyLevels?.range?.low20d, color: '#0284c7' },
+    { name: '60日压力', value: keyLevels?.range?.high60d, color: '#a855f7' },
+    { name: 'MA20', value: keyLevels?.movingAverages?.ma20, color: '#f59e0b' },
+    { name: 'MA50', value: keyLevels?.movingAverages?.ma50, color: '#64748b' },
+  ].filter((item) => Number.isFinite(Number(item.value)));
+  const allValues = [...candles.flatMap((bar) => [Number(bar.high), Number(bar.low)]), ...levels.map((item) => Number(item.value))];
+  const min = Math.min(...allValues); const max = Math.max(...allValues); const span = Math.max(max - min, max * 0.015, 0.01);
+  const chartTop = 14; const chartBottom = 148; const width = 320; const innerWidth = 292;
+  const y = (value: number) => chartBottom - ((value - min) / span) * (chartBottom - chartTop);
+  const x = (index: number) => 14 + (innerWidth * index) / Math.max(candles.length - 1, 1);
+  const bodyWidth = Math.max(3, Math.min(7, innerWidth / candles.length * 0.55));
+  return <section className="rounded-xl border border-slate-200 bg-white p-3"><div className="flex flex-wrap items-start justify-between gap-2"><div><h3 className="text-[11px] font-bold text-slate-800">近 30 日 K 线与关键位</h3><p className="mt-1 text-[9px] leading-relaxed text-slate-500">红：收涨；绿：收跌。虚线是程序计算的参考位，不是买卖指令。</p></div><span className="text-[9px] text-slate-500">{String(candles[0]?.date || '').slice(5)} — {String(candles.at(-1)?.date || '').slice(5)}</span></div><div className="mt-3 overflow-x-auto"><svg viewBox="0 0 320 170" className="h-44 min-w-[320px] w-full" role="img" aria-label="最近三十个交易日的真实 K 线和关键价格参考位"><rect x="0" y="0" width="320" height="170" fill="#ffffff" />{[0, 0.5, 1].map((ratio) => <line key={ratio} x1="14" x2="306" y1={chartTop + (chartBottom - chartTop) * ratio} y2={chartTop + (chartBottom - chartTop) * ratio} stroke="#e2e8f0" strokeWidth="1" />)}{levels.map((level) => <g key={level.name}><line x1="14" x2="306" y1={y(Number(level.value))} y2={y(Number(level.value))} stroke={level.color} strokeWidth="1" strokeDasharray="4 3" /><text x="307" y={y(Number(level.value)) + 3} fill={level.color} fontSize="8" textAnchor="end">{level.name}</text></g>)}{candles.map((bar, index) => { const open = Number(bar.open); const close = Number(bar.close); const rising = close >= open; const color = rising ? '#ef4444' : '#10b981'; const center = x(index); const top = y(Math.max(open, close)); const height = Math.max(1.5, Math.abs(y(open) - y(close))); return <g key={`${bar.date}-${index}`}><line x1={center} x2={center} y1={y(Number(bar.high))} y2={y(Number(bar.low))} stroke={color} strokeWidth="1" /><rect x={center - bodyWidth / 2} y={top} width={bodyWidth} height={height} fill={color} rx="0.5" /></g>; })}<text x="14" y="163" fill="#64748b" fontSize="8">{String(candles[0]?.date || '').slice(5)}</text><text x="306" y="163" fill="#64748b" fontSize="8" textAnchor="end">{String(candles.at(-1)?.date || '').slice(5)}</text></svg></div><div className="mt-2 flex flex-wrap gap-1.5">{levels.map((level) => <span className="rounded-md bg-slate-100 px-2 py-1 text-[9px] font-medium text-slate-700" key={level.name}>{level.name} {formatPrice(level.value)}</span>)}</div></section>;
+}
+
+function TechnicalLevels({ keyLevels, rules }: { keyLevels: any; rules: any[] }) {
+  const levels = [
+    ['20日支撑', keyLevels?.range?.low20d, '价格回到该区域上方，才说明支撑仍有待验证的有效性。'],
+    ['60日压力', keyLevels?.range?.high60d, '向上突破后仍需结合量能与后续交易日确认。'],
+    ['MA50失效参考位', keyLevels?.invalidationLevels?.ma50, '连续两日跌破且放量，触发结构风险规则。'],
+    ['20日支撑失效参考位', keyLevels?.invalidationLevels?.low20d, '连续两日跌破且放量，触发结构风险规则。'],
+  ].filter(([, value]) => Number.isFinite(Number(value)));
+  return <section><div className="mb-2 flex items-center justify-between gap-2"><h3 className="text-[11px] font-bold text-slate-800">关键位与结构参考</h3><span className="text-[9px] text-slate-500">非止盈止损建议</span></div>{levels.length ? <div className="space-y-2">{levels.map(([name, value, note]) => <div className="rounded-lg border border-slate-200 bg-white px-3 py-2" key={String(name)}><div className="flex items-baseline justify-between gap-3"><span className="text-[10px] font-semibold text-slate-800">{name}</span><b className="font-mono text-sm text-slate-950">{formatPrice(value)}</b></div><p className="mt-1 text-[9px] leading-relaxed text-slate-600">{note}</p></div>)}</div> : <Empty>关键位数据暂不可用。</Empty>}{rules.some((rule) => rule?.triggered) && <p className="mt-2 text-[10px] leading-relaxed text-rose-800">已有结构规则触发，请结合“结构失效条件”查看具体数据。</p>}</section>;
+}
+
 function Fundamental({ data, gaps, evidence, counter, agentMeta }: any) {
   const signals = asList(data?.signals); const positive = signals.filter((item) => ['positive', 'stable'].includes(item?.status)); const negative = [...signals.filter((item) => ['deteriorating', 'risk', 'mixed'].includes(item?.status)), ...asList(data?.vetoes).filter((item) => item?.triggered)];
   const conclusion = positive[0] ? researchItemText(positive[0]) : negative[0] ? researchItemText(negative[0]) : '基本面尚未形成足够的确定性结论。';
@@ -88,7 +120,7 @@ function Fundamental({ data, gaps, evidence, counter, agentMeta }: any) {
 function Technical({ data, gaps, evidence, counter, agentMeta }: any) {
   const signals = asList(data?.signals); const invalidations = asList(data?.structureInvalidation?.rules).filter((item) => item?.triggered); const positive = signals.filter((item) => item?.status === 'positive'); const negative = [...signals.filter((item) => ['negative', 'risk', 'deteriorating', 'mixed'].includes(item?.status)), ...invalidations];
   const conclusion = positive[0] ? researchItemText(positive[0]) : negative[0] ? researchItemText(negative[0]) : '技术与市场信号暂未形成明确方向。';
-  return <ModuleFrame conclusion={conclusion} why={signals} support={positive} counter={negative} gaps={gaps} data={data} evidence={evidence} agentMeta={agentMeta}><>{invalidations.length > 0 && <section className="rounded-xl border border-rose-200 bg-rose-50 p-3"><h3 className="flex items-center gap-1.5 text-[11px] font-bold text-rose-900"><CircleAlert className="h-3.5 w-3.5" />结构失效条件</h3><BulletList items={invalidations} tone="negative" empty="" /></section>}</></ModuleFrame>;
+  return <ModuleFrame conclusion={conclusion} why={signals} support={positive} counter={negative} gaps={gaps} data={data} evidence={evidence} agentMeta={agentMeta}><><CandleChart bars={data?.chartBars} keyLevels={data?.keyLevels} /><TechnicalLevels keyLevels={data?.keyLevels} rules={asList(data?.structureInvalidation?.rules)} />{invalidations.length > 0 && <section className="rounded-xl border border-rose-200 bg-rose-50 p-3"><h3 className="flex items-center gap-1.5 text-[11px] font-bold text-rose-900"><CircleAlert className="h-3.5 w-3.5" />结构失效条件</h3><BulletList items={invalidations} tone="negative" empty="" /></section>}</></ModuleFrame>;
 }
 
 function Events({ data, gaps, evidence, counter, agentMeta }: any) {
