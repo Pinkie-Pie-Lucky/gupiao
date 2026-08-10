@@ -1,0 +1,15 @@
+node_modules/
+.venv/
+dist/
+build/
+coverage/
+.git/
+.gitignore
+.env*
+!.env.example
+*.log
+work/
+README.md
+Dockerfile
+.dockerignore
+.deploy
