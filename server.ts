@@ -10,7 +10,6 @@ import https from 'node:https';
 import http from 'node:http';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { createServer as createViteServer } from 'vite';
 import OpenAI from 'openai';
 import dotenv from 'dotenv';
 import { eventCategory, eventDate, eventDirection, eventImpactHorizon, eventStatus, normalizedEventKey } from './event-rules.js';
@@ -7718,8 +7717,13 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
   });
 
 
+  // Vercel 上静态资源由平台托管，函数只处理 /api/*，无需托管 dist。
   // Vite middleware integration for full-stack build/dev environment
-  if (process.env.NODE_ENV !== 'production') {
+  if (process.env.VERCEL) {
+    // no static handling on Vercel
+  } else if (process.env.NODE_ENV !== 'production') {
+    const viteModuleName = 'vite';
+    const { createServer: createViteServer } = await import(viteModuleName);
     const vite = await createViteServer({
       server: { middlewareMode: true, hmr: false, watch: null },
       appType: 'spa',
@@ -7733,9 +7737,26 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
     });
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
-    console.log(`[Paopao Server] Running at http://localhost:${PORT} in ${process.env.NODE_ENV || 'development'} mode`);
-  });
+  if (!process.env.VERCEL) {
+    app.listen(PORT, '0.0.0.0', () => {
+      console.log(`[Paopao Server] Running at http://localhost:${PORT} in ${process.env.NODE_ENV || 'development'} mode`);
+    });
+  }
+
+  return app;
 }
 
-startServer();
+// Vercel Serverless 模式：导出 Express app 作为 handler。
+// 在 Vercel 上通过 api/[...path].ts 引用；本地开发时仍由 startServer() 启动。
+let cachedApp: express.Express | null = null;
+
+export default async function vercelHandler(req: express.Request, res: express.Response) {
+  if (!cachedApp) {
+    cachedApp = await startServer();
+  }
+  return cachedApp(req, res);
+}
+
+if (!process.env.VERCEL) {
+  void startServer();
+}
