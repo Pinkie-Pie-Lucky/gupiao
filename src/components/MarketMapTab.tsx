@@ -31,8 +31,12 @@ interface IntelligenceResponse {
   timestamp?: string;
 }
 
-type MapFilter = 'all' | 'featured' | 'anomaly' | 'followed';
+type MapFilter = 'all' | 'featured' | 'gainers' | 'losers' | 'anomaly' | 'followed';
 type CategoryScope = 'all' | 'industry' | 'concept';
+
+const LEADING_SECTOR_LIMIT = 8;
+// “异动”“关注”保留筛选逻辑，当前阶段不在页签栏展示。
+const visibleMapFilters: MapFilter[] = ['featured', 'gainers', 'losers', 'all'];
 
 const signalTypeLabels: Record<BubbleSignalItem['signalType'], { text: string; className: string }> = {
   trend_start: { text: '趋势启动', className: 'bg-violet-100 text-violet-700' },
@@ -64,11 +68,12 @@ const tagStyles: Record<string, string> = {
 };
 
 export function MarketMapTab({ selectedSectorId, onSelectSectorId, onNavigateToTab, onAskTeacherAboutSector }: MarketMapTabProps) {
+  const PAGE_SIZE = 40;
   const [sectors, setSectors] = useState<SectorIntelligence[]>([]);
   const [activeSector, setActiveSector] = useState<SectorIntelligence | null>(null);
   const [detailTarget, setDetailTarget] = useState<{ sectorId: string; sectorName: string } | null>(null);
   const [filterQuery, setFilterQuery] = useState('');
-  const [mapFilter, setMapFilter] = useState<MapFilter>('all');
+  const [mapFilter, setMapFilter] = useState<MapFilter>('featured');
   const [categoryScope, setCategoryScope] = useState<CategoryScope>('all');
   const [followedSectorIds, setFollowedSectorIds] = useState<string[]>([]);
   const [dataError, setDataError] = useState<string | null>(null);
@@ -79,6 +84,7 @@ export function MarketMapTab({ selectedSectorId, onSelectSectorId, onNavigateToT
   const [bubbleLoading, setBubbleLoading] = useState(false);
   const [bubbleError, setBubbleError] = useState<string | null>(null);
   const [bubbleFallback, setBubbleFallback] = useState(false);
+  const [currentPage, setCurrentPage] = useState(1);
 
   // 已发起过请求的标记。不放进 state，否则它变化会触发 effect 重跑并中断在途请求。
   const bubbleRequestedRef = useRef(false);
@@ -180,22 +186,48 @@ export function MarketMapTab({ selectedSectorId, onSelectSectorId, onNavigateToT
   };
 
   // featured 的数量来自 P5 实际返回结果，未加载时不显示数字，避免和规则打分的旧口径混淆
+  const leadingSectors = useMemo(() => {
+    const ranked = [...sectors].sort((a, b) => b.changePercent - a.changePercent);
+    return {
+      gainers: ranked.slice(0, LEADING_SECTOR_LIMIT),
+      losers: ranked.slice(-LEADING_SECTOR_LIMIT).reverse(),
+    };
+  }, [sectors]);
+
   const filterCounts = useMemo(() => ({
     all: sectors.length,
     featured: bubbleItems?.length ?? null,
+    gainers: leadingSectors.gainers.length,
+    losers: leadingSectors.losers.length,
     anomaly: Math.min(10, sectors.filter(s => s.isAnomaly).length),
     followed: followedSectorIds.length,
-  }), [sectors, followedSectorIds, bubbleItems]);
+  }), [sectors, followedSectorIds, bubbleItems, leadingSectors]);
 
   const filteredSectors = useMemo(() => {
     const q = filterQuery.trim().toLowerCase();
-    return sectors.filter(s => {
-      const pm = mapFilter === 'all' || (mapFilter === 'featured' && s.shouldHighlight) || (mapFilter === 'anomaly' && s.isAnomaly) || (mapFilter === 'followed' && followedSectorIds.includes(s.sectorId));
+    const source = mapFilter === 'gainers'
+      ? leadingSectors.gainers
+      : mapFilter === 'losers'
+        ? leadingSectors.losers
+        : sectors;
+    return source.filter(s => {
+      const pm = mapFilter === 'all' || mapFilter === 'gainers' || mapFilter === 'losers' || (mapFilter === 'featured' && s.shouldHighlight) || (mapFilter === 'anomaly' && s.isAnomaly) || (mapFilter === 'followed' && followedSectorIds.includes(s.sectorId));
       const cm = categoryScope === 'all' || s.category === categoryScope;
       const qm = !q || s.sector.toLowerCase().includes(q);
       return pm && cm && qm;
     });
-  }, [sectors, filterQuery, mapFilter, categoryScope, followedSectorIds]);
+  }, [sectors, leadingSectors, filterQuery, mapFilter, categoryScope, followedSectorIds]);
+
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [filterQuery, mapFilter, categoryScope]);
+
+  const totalPages = Math.max(1, Math.ceil(filteredSectors.length / PAGE_SIZE));
+  const visibleSectors = useMemo(() => {
+    const page = Math.min(currentPage, totalPages);
+    const start = (page - 1) * PAGE_SIZE;
+    return filteredSectors.slice(start, start + PAGE_SIZE);
+  }, [filteredSectors, currentPage, totalPages]);
 
   // P5 只返回 sectorName，详情面板需要 sectorId，这里回查市场地图已加载的板块列表
   const openBubbleDetail = (sectorName: string) => {
@@ -221,13 +253,12 @@ export function MarketMapTab({ selectedSectorId, onSelectSectorId, onNavigateToT
     <div className="space-y-4 px-3 pb-24 pt-3">
       <header className="flex items-center gap-2 px-1">
         <div className="grid h-8 w-8 place-items-center rounded-xl bg-indigo-600 text-white"><Compass className="h-4 w-4" /></div>
-        <h2 className="text-xl font-bold">A股市场地图</h2>
-        <span className="ml-auto rounded-full bg-indigo-50 px-2.5 py-1 text-[10px] font-semibold text-indigo-700">β</span>
+        <h2 className="text-xl font-bold">市场地图</h2>
       </header>
 
       {/* 市场概览卡片 */}
       {marketSummary ? <div className="bg-gradient-to-r from-indigo-50 to-blue-50 rounded-2xl p-4 border border-indigo-100">
-        <div className="flex items-center gap-2 mb-2"><Sparkles className="w-4 h-4 text-indigo-600"/><span className="text-xs font-bold text-indigo-700">泡泡发现</span></div>
+        <div className="flex items-center gap-2 mb-2"><Sparkles className="w-4 h-4 text-indigo-600"/><span className="text-xs font-bold text-indigo-700">市场概览</span></div>
         <div className="flex items-center justify-between">
           <div className="flex gap-4 text-[11px]">
             {(marketSummary.indices||[]).map(function(idx,i){return <div key={i}><span className="text-slate-500">{idx.name}</span><span className={'ml-1 font-bold '+(idx.changePercent>=0?'text-red-500':'text-emerald-500')}>{idx.changePercent>=0?'+':''}{idx.changePercent?.toFixed(2)}%</span></div>;})}
@@ -240,10 +271,10 @@ export function MarketMapTab({ selectedSectorId, onSelectSectorId, onNavigateToT
       {dataError && <div className="rounded-xl bg-amber-50 p-3 text-xs text-amber-800"><AlertTriangle className="inline w-3 h-3 mr-1"/>{dataError}</div>}
 
       <div className="flex gap-2 overflow-x-auto pb-1">
-        {(['all','featured','anomaly','followed'] as MapFilter[]).map(o => (
+        {visibleMapFilters.map(o => (
           <button key={o} onClick={() => setMapFilter(o)}
             className={`min-h-11 shrink-0 rounded-full px-3 text-xs font-semibold transition ${mapFilter===o?'bg-indigo-600 text-white':'bg-slate-100 text-slate-600'}`}>
-            {o==='all'?'全部':o==='featured'?'泡泡精选':o==='anomaly'?'异动':'关注'}
+            {o==='all'?'全部':o==='featured'?'泡泡精选':o==='gainers'?'领涨':o==='losers'?'领跌':o==='anomaly'?'异动':'关注'}
             {filterCounts[o] === null ? '' : ` (${filterCounts[o]})`}
           </button>
         ))}
@@ -275,7 +306,7 @@ export function MarketMapTab({ selectedSectorId, onSelectSectorId, onNavigateToT
 
           {!bubbleLoading && !bubbleError && bubbleFallback && (
             <div className="rounded-xl bg-slate-50 p-3 text-[11px] leading-relaxed text-slate-600">
-              当前排序由规则引擎计算，尚未经过 AI 解释，仅供参考。
+              当前榜单基于行情规则排序，尚未生成 AI 解读，仅供参考。
             </div>
           )}
 
@@ -395,7 +426,7 @@ export function MarketMapTab({ selectedSectorId, onSelectSectorId, onNavigateToT
         <div className="grid grid-cols-2 gap-2.5">{[0,1,2,3,4,5].map(i => <div key={i} className="h-28 animate-pulse rounded-2xl bg-slate-100"/>)}</div>
       ) : (
         <div className="grid grid-cols-2 gap-2.5">
-          {filteredSectors.map(s => (
+          {visibleSectors.map(s => (
             <div key={s.sectorId} className={`rounded-2xl border p-3 transition min-h-[100px] ${isUp(s.changePercent)?'border-red-100 bg-red-50/80':'border-emerald-100 bg-emerald-50/80'}`}>
               <button onClick={() => selectSector(s)} className="w-full text-left">
                 <span className="text-sm font-bold">{s.sector}</span>
@@ -429,6 +460,28 @@ export function MarketMapTab({ selectedSectorId, onSelectSectorId, onNavigateToT
           <Layers3 className="mx-auto h-5 w-5 text-slate-300"/>
           <p className="mt-2 text-xs text-slate-500">没有找到匹配板块。</p>
         </div>
+      )}
+
+      {!loading && mapFilter !== 'featured' && filteredSectors.length > PAGE_SIZE && (
+        <nav className="flex items-center justify-center gap-3 py-2" aria-label="板块列表分页">
+          <button
+            type="button"
+            onClick={() => setCurrentPage((page) => Math.max(1, page - 1))}
+            disabled={currentPage === 1}
+            className="min-h-11 rounded-full border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-700 transition enabled:hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600"
+          >
+            上一页
+          </button>
+          <span className="text-[11px] font-medium text-slate-600" aria-live="polite">第 {Math.min(currentPage, totalPages)} / {totalPages} 页</span>
+          <button
+            type="button"
+            onClick={() => setCurrentPage((page) => Math.min(totalPages, page + 1))}
+            disabled={currentPage >= totalPages}
+            className="min-h-11 rounded-full border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-700 transition enabled:hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600"
+          >
+            下一页
+          </button>
+        </nav>
       )}
 
       {/* 板块详情弹窗 */}
