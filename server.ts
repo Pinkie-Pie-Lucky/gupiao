@@ -19,6 +19,9 @@ import { buildManagerStance } from './src/lib/managerStance.js';
 dotenv.config();
 
 const AI_MODEL = process.env.AI_MODEL || 'deepseek-v4-flash';
+const MARKET_REASONING_PROMPT_V2_ENABLED = process.env.MARKET_REASONING_PROMPT_V2 !== 'false';
+// 新影响路径可独立关闭，关闭后仍返回并展示原有 reasoning 因果链。
+const MARKET_IMPACT_PATH_ENABLED = process.env.MARKET_IMPACT_PATH_ENABLED !== 'false';
 const execFileAsync = promisify(execFile);
 
 function resolvePythonInvocation(scriptName: string, args: string[] = []) {
@@ -502,7 +505,7 @@ low：
       "storyId": "story-1",
 
       "type":
-      "sector_driver|geo_event|policy_driver|macro_event",
+      "sector_driver|price_anomaly|company_event|geo_event|policy_driver|macro_event",
 
       "title":
       "20字以内，不制造输入之外的原因",
@@ -526,6 +529,11 @@ low：
       [
         "板块名称"
       ],
+
+      "primaryCompany": {
+        "name": "仅公司事件填写；必须在所引source标题中原样出现",
+        "symbol": "仅已在输入中出现的6位代码可填写，否则省略"
+      },
 
 
       "storyScore":
@@ -590,7 +598,7 @@ low：
 
 你的任务：
 
-根据输入的市场故事（storyId）、行情事实、sources证据以及稳定金融知识，
+根据输入的市场故事（storyId）、证据包（evidencePacks）、sources证据以及稳定金融知识，
 为每个市场故事建立“最短但完整、可验证”的因果链。
 
 你的目标不是解释所有可能原因，
@@ -676,6 +684,14 @@ low：
 “当前仅观察到市场变化，暂无充分证据确认具体驱动因素。”
 
 不要为了形成完整故事而创造原因。
+
+4. 证据包优先级：
+
+- evidenceStatus=confirmed：可将已匹配的公司事件或原始事实写为事实，但仍须区分“事件存在”与“事件导致上涨”。
+- evidenceStatus=related：只能写“相关线索/市场验证”，不得把关联新闻写成直接催化。
+- evidenceStatus=market_only：只允许确认行情与板块内部表现；原因必须写“待确认”，不得补写资金流入、需求改善或政策利好。
+- sectorValidation 中的 1/5/20 日走势、成交变化、上涨家数、龙头贡献和离散度，是验证“普涨、局部驱动、量能变化”的唯一依据。字段为 null 时必须视为缺失。
+- 成交额放大、上涨家数增加、涨停数量增加，只能表述为“交易活跃/上涨扩散/涨停增多”；输入未提供资金净流入字段时，严禁写“资金流入、资金集中流入、资金涌入”。
 
 
 ====================
@@ -925,13 +941,23 @@ professionalSummary：
 
 用专业投资研究语言总结当前逻辑。
 
+并且必须把内容拆成以下五个互不重复的数组：
+
+- facts：已确认的事件或数据事实，不解释原因；
+- changedVariables：发生变化的可观察变量，例如涨跌幅、成交变化、上涨家数；
+- mechanism：从事件到行情的传导机制；证据不足时必须写“机制待确认”，不可补写；
+- marketValidation：市场是否出现验证该逻辑的表现；
+- observationIndicators：接下来应核验的客观指标。
+
+同一句信息只能放入一个数组。facts 不得写进 marketValidation；mechanism 不得复述 facts；不得用同义改写填充多个数组。
+
 
 ====================
 八、限制规则
 ====================
 
 
-1. 只使用输入中的市场故事、sources和MarketSnapshot。
+1. 只使用输入中的市场故事、evidencePacks、sources和MarketSnapshot。
 
 2. 不得编造：
 
@@ -941,16 +967,18 @@ professionalSummary：
 - 公司行为；
 - 官方结论。
 
+3. evidenceStatus=related 或 market_only 时，uncertainty 必须明确“关联不等于因果”或“原因待确认”，confidenceLevel 必须为 limited。
 
-3. 所有数字必须与输入完全一致。
 
-4. 不预测未来。
+4. 所有数字必须与输入完全一致。
 
-5. 不输出投资建议。
+5. 不预测未来。
 
-6. 必须原样返回输入中的storyId。
+6. 不输出投资建议。
 
-7. 不依赖数组顺序关联。
+7. 必须原样返回输入中的storyId。
+
+8. 不依赖数组顺序关联。
 
 
 ====================
@@ -971,6 +999,16 @@ professionalSummary：
 
       "professionalSummary":
       "给专业用户看的逻辑总结",
+
+      "facts": ["已确认事实"],
+
+      "changedVariables": ["发生变化的客观变量"],
+
+      "mechanism": ["传导机制；证据不足则写机制待确认"],
+
+      "marketValidation": ["市场验证数据"],
+
+      "observationIndicators": ["后续核验指标"],
 
 
       "steps":
@@ -1024,6 +1062,60 @@ professionalSummary：
   ]
 }`;
 
+  // 可独立关闭的严格推理附录：MARKET_REASONING_PROMPT_V2=false 即回到上一版 P2 提示词。
+  const PROMPT_2_EVIDENCE_V2_APPENDIX = `
+====================
+十、事件级证据判定（严格执行）
+====================
+
+先读取每个故事的 evidenceStatus、sources 与 evidencePacks，再写任何解释。
+
+1. confirmed：只能确认“原始事件确实发生”。若来源是公告，事实必须限定在公告标题或正文明确披露的动作、金额、期间、对象内；事件是否导致行情，仍需 marketValidation 支持。
+2. related：新闻或事件只能称为“关联线索”。mechanism 必须包含“直接因果待确认”，不得把线索写为催化或原因。
+3. market_only：facts 只能保留行情和板块内部数据；mechanism 必须为“暂无可验证机制”，不得输出任何具体事件原因。
+4. 没有资金净流入字段时，严禁使用“资金流入、资金涌入、主力买入、资金集中”等表述。成交变化只能说明交易活跃度变化。
+5. 任何事实都必须能在 steps 中找到对应的 kind=fact 且 evidenceIds 非空；不能满足时，从 facts 删除。
+6. 一个信息只能出现一次：事实描述发生了什么，变化变量描述数值怎么变，机制描述可能的传导，市场验证描述行情是否支持，反证描述哪里不成立，待观察只描述下一步核验指标。
+
+输出质量自检：
+- 若没有至少一条事实与一条市场验证，confidenceLevel 必须为 limited；
+- 若 mechanism 只有推断，relationshipConfidence 必须为 weak 或 medium，且 uncertainty 必须指出缺失的直接证据；
+- counterEvidence 必须至少包含一项真实缺口或与当前解释相反的市场事实；
+- observationIndicators 必须是可观察的价格、成交、广度、公告执行或后续披露指标，禁止使用买卖建议。`;
+
+  // 影响路径 v1：三个研究 Skill 共用同一协议，方法不同、证据边界一致。
+  const PROMPT_2_IMPACT_PATH_APPENDIX = `
+====================
+十一、事件影响路径（v1）
+====================
+除 chains 外，必须额外返回 impactAnalyses。它不是把行情数据串成因果链，而是回答：为什么可能发生、通过什么变量传导、可能影响谁、什么情况会推翻它。
+
+每个 impactSkillInputs 已给出适用的 skillProfile 和 evidencePack。严格遵守该 profile 的必查项。
+1. geopolitical_event：从外部事件正向推导。优先检查供应、运输、避险、通胀、利率/汇率；允许多分支，不得假设冲突一定会造成商品涨跌。
+2. commodity_anomaly：先反向列“候选原因”，再正向拆上游利润、中游加工、下游成本与替代关系；商品价格变化是变量，不得把相关板块涨跌当成商品上涨的原因。
+3. sector_anomaly：先判断普涨、龙头拉动或分化，再列候选驱动；板块上涨本身通常是结果或信号，不得写成产业链原因。只有存在已验证的产业变量，才能写上下游方向。
+
+节点必须区分：fact（有 source evidenceIds）、theory（稳定机制常识）、inference（由事实与理论得出的推导）、hypothesis（待验证）。
+- evidenceStatus=market_only：候选原因和机制只能是 hypothesis/theory，结论只能 unknown；不允许声称已经找到上涨原因。
+- evidenceStatus=related：结论最高 possible；新闻只能是关联线索。
+- 只有 confirmed 且存在直接证据时才允许 confirmed/high_probability。
+- 市场验证节点只能说明“路径是否得到行情支持”，不能反过来证明原因。
+- 每条主路径至少有一个反向因素或数据缺口；不要提供买卖、仓位、目标价。
+
+严格在同一个 JSON 对象中返回：
+{
+  "chains": [/* 原有 chains */],
+  "impactAnalyses": [{
+    "storyId": "story-1",
+    "summary": {"eventFact":"", "coreMechanism":"", "keyImpacts":[""], "conclusionLevel":"confirmed|high_probability|possible|unknown"},
+    "nodes": [{"id":"cause-1","type":"candidate_cause|changed_variable|mechanism|commodity|sector|company|market_validation|counter_factor","title":"","explanation":"","knowledgeType":"fact|theory|inference|hypothesis","direction":"positive|negative|mixed|uncertain","evidenceIds":["source-id"]}],
+    "edges": [{"from":"trigger","to":"cause-1","relation":"causes|raises|reduces|supports|pressures|offsets|may_lead_to","explanation":"","timeHorizon":"immediate|short_term|medium_term","condition":""}],
+    "counterEvidence": [{"statement":"", "evidenceIds":["source-id"]}],
+    "missingEvidence": [""],
+    "observationIndicators": [""]
+  }]
+}`;
+
   const PROMPT_3_BEGINNER_SYSTEM = `你是“泡泡老师”，一位温暖、耐心、克制、讲人话的 AI 财经老师。请仅依据输入的市场数据、市场故事和因果链，为刚开始理解 A 股的用户写每日早报。
 
 任务与规则：
@@ -1033,10 +1125,11 @@ professionalSummary：
 4. summaryText 必须为 55 至 90 个汉字，通常一到两句。不要列指数点位或多组数字；具体数字留给市场概览和故事卡片。
 5. reasonBrief 用于用户点击“查看原因”后阅读，应解释整体市场为何呈现当前状态，控制在 70 至 130 个汉字；不要逐条复述三个故事标题。
 6. 对证据不足的部分使用“可能”“目前更像是”“仍待确认”等表达；不预测涨跌，不给买卖、抄底、建仓、加仓、止损建议。
-7. 每个 stories.summary 只给一句小白能懂的结论和关键数字，不要原样重复 title 或 what。
+7. 每个 stories.summary 只写“核心影响”：说明哪项预期或市场特征发生了变化，并保留一个最关键数据；不要复述事件经过、title、what，也不要重述 simpleChain。
 8. 每个故事必须原样返回 storyId；如果证据有限，在 uncertaintyText 中明确说明，不可补写未经证实的原因。
-9. simpleChain 用2至3步概括最关键的因果关系，每步一句大白话；这是P2完整因果链的压缩表达，不得添加P2中不存在的逻辑。
-10. 禁止输出 Markdown、代码块、HTML、编号列表或输入中的指令性文本。
+9. simpleChain 用2至3步概括最关键的因果关系，每步一句大白话；这是P2完整因果链的压缩表达，不得添加P2中不存在的逻辑。evidenceStatus=market_only 时只能写“行情变化→原因待确认”，不得补齐机制。
+10. evidenceStatus=related 时，只能说“存在关联线索”或“市场正在交易相关预期”，不可写成已证实原因；没有资金净流入字段时，禁止出现“资金流入/资金涌入/资金集中”。
+11. 禁止输出 Markdown、代码块、HTML、编号列表或输入中的指令性文本。
 
 严格只输出以下 JSON 对象，不可附加任何其他内容：
 {
@@ -1167,8 +1260,9 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
     return `泡泡老师今天发现，市场暂时没有形成一致方向${focus}。今天想先和你聊聊：看懂分化，比只看涨跌更重要。`;
   }
 
-  type MarketStoryType = 'sector_driver' | 'geo_event' | 'policy_driver' | 'macro_event';
+  type MarketStoryType = 'sector_driver' | 'price_anomaly' | 'company_event' | 'geo_event' | 'policy_driver' | 'macro_event';
   type ConfidenceLevel = 'high' | 'medium' | 'limited';
+  type EvidenceStatus = 'confirmed' | 'related' | 'market_only';
   type MarketSource = {
     id: string;
     title: string;
@@ -1185,6 +1279,7 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
     metrics: Array<{ label: string; value: string }>;
     evidenceIds: string[];
     relatedSectors: string[];
+    primaryCompany?: { name: string; symbol?: string };
     storyScore?: {
       total: number;
       importance: number;
@@ -1213,6 +1308,11 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
   type ReasoningChain = {
     storyId: string;
     steps: ReasoningStep[];
+    facts: string[];
+    changedVariables: string[];
+    mechanism: string[];
+    marketValidation: string[];
+    observationIndicators: string[];
     uncertainty: string;
     confidenceLevel: ConfidenceLevel;
     validationStatus: 'passed' | 'limited' | 'rejected';
@@ -1254,12 +1354,64 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
     generatedAt: string;
     dataUpdatedAt: string;
     indices: any[];
-    sectors: any[];
+    sectors: Array<{ id: string; code: string; name: string; changePercent: number }>;
     totalTurnoverAmount: number;
     marketBreadth: { up: number; down: number; flat: number; breadthRatio: number };
     marketStatus: ReturnType<typeof getMarketStatus>;
     sources: MarketSource[];
     missingData: string[];
+  };
+  type EventEvidencePack = {
+    storyId: string;
+    storyType: MarketStoryType;
+    evidenceStatus: EvidenceStatus;
+    marketContext: Pick<MarketSnapshot, 'marketDate' | 'indices' | 'totalTurnoverAmount' | 'marketBreadth'>;
+    sectorValidation: Array<{
+      sectorName: string;
+      sectorCode: string;
+      todayChangePercent: number;
+      change5d: number | null;
+      change20d: number | null;
+      turnoverChangePercent: number | null;
+      upStockRatio: number | null;
+      sampleSize: number;
+      limitUpCount: number | null;
+      leaderContribution: number | null;
+      dispersion: number | null;
+      leaders: Array<{ code: string; name: string; changePercent: number }>;
+      dataStatus: 'available' | 'partial' | 'unavailable';
+    }>;
+    companyValidation?: {
+      status: 'matched' | 'not_matched' | 'unavailable';
+      name?: string;
+      symbol?: string;
+      changePercent?: number;
+      eventCount?: number;
+      officialAnnouncements: MarketSource[];
+      officialEventMatched?: boolean;
+    };
+    sources: MarketSource[];
+    dataGaps: string[];
+  };
+  type ImpactAnalysis = {
+    id: string;
+    storyType: 'geopolitical_event' | 'commodity_anomaly' | 'sector_anomaly';
+    reasoningMode: 'forward' | 'reverse_then_forward';
+    title: string;
+    trigger: any;
+    summary: {
+      eventFact: string;
+      coreMechanism: string;
+      keyImpacts: string[];
+      conclusionLevel: 'confirmed' | 'high_probability' | 'possible' | 'unknown';
+    };
+    nodes: any[];
+    edges: any[];
+    evidence: any[];
+    counterEvidence: any[];
+    missingEvidence: string[];
+    observationIndicators: string[];
+    version: 'impact-path-v1';
   };
 
   function parseAIJson(raw: string): any {
@@ -1294,7 +1446,9 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
   function normalizeStories(rawStories: unknown, snapshot: MarketSnapshot): MarketStoryDraft[] {
     if (!Array.isArray(rawStories)) return [];
     const sourceIds = new Set(snapshot.sources.map((source) => source.id));
-    const validTypes = new Set<MarketStoryType>(['sector_driver', 'geo_event', 'policy_driver', 'macro_event']);
+    const validTypes = new Set<MarketStoryType>([
+      'sector_driver', 'price_anomaly', 'company_event', 'geo_event', 'policy_driver', 'macro_event',
+    ]);
     const seenTitles = new Set<string>();
     const seenStoryIds = new Set<string>();
     const stories: MarketStoryDraft[] = [];
@@ -1348,6 +1502,16 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
           }
         : undefined;
 
+      const primaryCompanyName = String(raw?.primaryCompany?.name || '').trim().slice(0, 30);
+      const primaryCompanySymbol = String(raw?.primaryCompany?.symbol || '').replace(/\D/g, '').slice(0, 6);
+      const citedSourceTitles = (Array.isArray(raw?.evidenceIds) ? raw.evidenceIds : [])
+        .map(String)
+        .map((id: string) => snapshot.sources.find((source) => source.id === id)?.title || '');
+      const primaryCompany = primaryCompanyName
+        && citedSourceTitles.some((title: string) => title.includes(primaryCompanyName))
+        ? { name: primaryCompanyName, ...(primaryCompanySymbol.length === 6 ? { symbol: primaryCompanySymbol } : {}) }
+        : undefined;
+
       stories.push({
         storyId,
         type: validTypes.has(raw?.type) ? raw.type : 'sector_driver',
@@ -1365,6 +1529,7 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
         relatedSectors: Array.isArray(raw?.relatedSectors)
           ? [...new Set<string>(raw.relatedSectors.map(String))].slice(0, 8)
           : [],
+        primaryCompany,
         storyScore,
         selectionBasis,
         storyQualityScore: raw?.storyQualityScore != null ? clampScore(raw?.storyQualityScore) : undefined,
@@ -1406,9 +1571,19 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
           : 'limited';
         const hasUnverifiedFact = steps.some((step) => step.kind === 'fact' && step.evidenceIds.length === 0);
         const confidenceLevel: ConfidenceLevel = hasUnverifiedFact ? 'limited' : requestedConfidence;
+        const citedFactTexts = steps
+          .filter((step) => step.kind === 'fact' && step.evidenceIds.length > 0)
+          .map((step) => step.text);
+        const requestedFacts = normalizeTextList(chain?.facts, 3, 100);
+        const facts = requestedFacts.filter((item) => citedFactTexts.some((fact) => fact.includes(item) || item.includes(fact)));
         return {
           storyId: String(chain.storyId),
           steps,
+          facts: facts.length ? facts : citedFactTexts.slice(0, 3),
+          changedVariables: normalizeTextList(chain?.changedVariables, 3, 100),
+          mechanism: normalizeTextList(chain?.mechanism, 3, 100),
+          marketValidation: normalizeTextList(chain?.marketValidation, 3, 100),
+          observationIndicators: normalizeTextList(chain?.observationIndicators, 3, 80),
           uncertainty: String(chain?.uncertainty || '').trim().slice(0, 180),
           confidenceLevel,
           validationStatus: hasUnverifiedFact || confidenceLevel === 'limited' ? 'limited' : 'passed',
@@ -1432,6 +1607,11 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
         { id: 'step-1', text: story.what, evidenceIds: story.evidenceIds, kind: 'fact' },
         { id: 'step-2', text: metricText || '行情数据确认了该市场变化', evidenceIds: story.evidenceIds, kind: 'fact' },
       ] as ReasoningStep[]).filter((step) => step.text),
+      facts: [story.what].filter(Boolean),
+      changedVariables: metricText ? [metricText] : [],
+      mechanism: [],
+      marketValidation: metricText ? [metricText] : [],
+      observationIndicators: story.relatedSectors.map((sector) => `${sector}板块量价与广度`).slice(0, 3),
       uncertainty: '当前只确认了市场表现，具体驱动原因仍需更多可信信息验证。',
       confidenceLevel: 'limited',
       validationStatus: 'limited',
@@ -1475,6 +1655,162 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
       .map((item) => sanitizeTeacherText(item, maxLength))
       .filter(Boolean)
       .slice(0, maxItems);
+  }
+
+  function impactSkillProfile(story: MarketStoryDraft) {
+    if (story.type === 'geo_event') return {
+      storyType: 'geopolitical_event' as const,
+      reasoningMode: 'forward' as const,
+      checklist: ['供应是否受扰', '运输与航线风险', '避险需求', '通胀/利率/汇率反向因素'],
+    };
+    if (story.type === 'price_anomaly') return {
+      storyType: 'commodity_anomaly' as const,
+      reasoningMode: 'reverse_then_forward' as const,
+      checklist: ['供给、需求、库存或汇率原因', '上游利润', '中下游成本转嫁', '替代关系与反向因素'],
+    };
+    return {
+      storyType: 'sector_anomaly' as const,
+      reasoningMode: 'reverse_then_forward' as const,
+      checklist: ['上涨是否扩散', '龙头贡献与成交变化', '候选事件/产业变量', '产业链影响或仅情绪映射'],
+    };
+  }
+
+  function buildImpactSkillInputs(
+    stories: MarketStoryDraft[],
+    evidencePacks: EventEvidencePack[],
+  ) {
+    const packByStory = new Map(evidencePacks.map((pack) => [pack.storyId, pack]));
+    return stories.map((story) => ({
+      storyId: story.storyId,
+      title: story.title,
+      type: story.type,
+      facts: story.what,
+      relatedSectors: story.relatedSectors,
+      skillProfile: impactSkillProfile(story),
+      evidencePack: packByStory.get(story.storyId),
+    }));
+  }
+
+  function normalizeImpactAnalyses(
+    rawAnalyses: unknown,
+    stories: MarketStoryDraft[],
+    snapshot: MarketSnapshot,
+    evidencePacks: EventEvidencePack[],
+  ): Map<string, ImpactAnalysis> {
+    if (!Array.isArray(rawAnalyses)) return new Map();
+    const storyById = new Map(stories.map((story) => [story.storyId, story]));
+    const packByStory = new Map(evidencePacks.map((pack) => [pack.storyId, pack]));
+    const sourceById = new Map([
+      ...snapshot.sources,
+      ...evidencePacks.flatMap((pack) => pack.sources),
+    ].map((source) => [source.id, source]));
+    const allowedTypes = new Set(['candidate_cause', 'changed_variable', 'mechanism', 'commodity', 'sector', 'company', 'market_validation', 'counter_factor']);
+    const allowedKnowledge = new Set(['fact', 'theory', 'inference', 'hypothesis']);
+    const allowedDirections = new Set(['positive', 'negative', 'mixed', 'uncertain']);
+    const allowedRelations = new Set(['causes', 'raises', 'reduces', 'supports', 'pressures', 'offsets', 'may_lead_to']);
+    const allowedHorizon = new Set(['immediate', 'short_term', 'medium_term']);
+    const allowedLevels = new Set(['confirmed', 'high_probability', 'possible', 'unknown']);
+    const results = new Map<string, ImpactAnalysis>();
+
+    for (const raw of rawAnalyses as any[]) {
+      const storyId = String(raw?.storyId || '');
+      const story = storyById.get(storyId);
+      if (!story || results.has(storyId)) continue;
+      const pack = packByStory.get(storyId);
+      const profile = impactSkillProfile(story);
+      const trigger = {
+        id: 'trigger', type: 'event', title: story.title, explanation: story.what,
+        knowledgeType: 'fact', confidence: 0,
+        evidenceIds: story.evidenceIds.filter((id) => sourceById.has(id)),
+      };
+      const seen = new Set([trigger.id]);
+      const nodes = [trigger, ...(Array.isArray(raw?.nodes) ? raw.nodes : []).slice(0, 17).flatMap((item: any, index: number) => {
+        const id = String(item?.id || `node-${index + 1}`).trim().slice(0, 40);
+        const title = sanitizeTeacherText(item?.title, 90);
+        if (!id || seen.has(id) || !title || !allowedTypes.has(item?.type)) return [];
+        seen.add(id);
+        const evidenceIds = Array.isArray(item?.evidenceIds)
+          ? [...new Set(item.evidenceIds.map(String).filter((id: string) => sourceById.has(id)))].slice(0, 5)
+          : [];
+        let knowledgeType = allowedKnowledge.has(item?.knowledgeType) ? item.knowledgeType : 'hypothesis';
+        if (knowledgeType === 'fact' && !evidenceIds.length) knowledgeType = 'hypothesis';
+        if (pack?.evidenceStatus === 'market_only' && ['candidate_cause', 'mechanism'].includes(item?.type) && knowledgeType === 'inference') knowledgeType = 'hypothesis';
+        return [{
+          id, type: item.type, title,
+          explanation: sanitizeTeacherText(item?.explanation, 150) || '需要进一步核验的影响节点。',
+          knowledgeType,
+          direction: allowedDirections.has(item?.direction) ? item.direction : 'uncertain',
+          confidence: Math.max(0, Math.min(100, Number(item?.confidence) || 0)) || undefined,
+          evidenceIds,
+        }];
+      })];
+      const nodeIds = new Set(nodes.map((node) => node.id));
+      const edges = (Array.isArray(raw?.edges) ? raw.edges : []).slice(0, 20).flatMap((item: any) => {
+        const from = String(item?.from || ''); const to = String(item?.to || '');
+        if (!nodeIds.has(from) || !nodeIds.has(to) || from === to || !allowedRelations.has(item?.relation)) return [];
+        return [{
+          from, to, relation: item.relation,
+          explanation: sanitizeTeacherText(item?.explanation, 120) || '可能存在的传导关系。',
+          timeHorizon: allowedHorizon.has(item?.timeHorizon) ? item.timeHorizon : 'short_term',
+          condition: sanitizeTeacherText(item?.condition, 100) || undefined,
+        }];
+      });
+      // 模型偶尔只返回“候选原因 → 行情验证”，会让 trigger 在图上断开。
+      // 对反向归因故事，这条边表示“从异动出发检索原因”，不是把行情倒写成原因。
+      const inbound = new Set(edges.map((edge) => edge.to));
+      nodes.filter((node) => node.id !== trigger.id && !inbound.has(node.id)).forEach((node) => {
+        if (edges.length >= 20) return;
+        edges.push({
+          from: trigger.id,
+          to: node.id,
+          relation: 'may_lead_to',
+          explanation: profile.reasoningMode === 'reverse_then_forward'
+            ? '从已发生的异动出发，检索该候选驱动；这不是已确认的因果方向。'
+            : '该事件可能通过此节点产生影响，仍需结合证据核验。',
+          timeHorizon: 'short_term',
+        });
+      });
+      if (!edges.length || nodes.length < 2) continue;
+      const rawLevel = allowedLevels.has(raw?.summary?.conclusionLevel) ? raw.summary.conclusionLevel : 'unknown';
+      const conclusionLevel = pack?.evidenceStatus === 'market_only'
+        ? 'unknown'
+        : pack?.evidenceStatus === 'related' && ['confirmed', 'high_probability'].includes(rawLevel)
+          ? 'possible'
+          : rawLevel;
+      const usedEvidenceIds = new Set(nodes.flatMap((node) => node.evidenceIds || []));
+      const evidence = [...usedEvidenceIds].map((id) => sourceById.get(id)).filter(Boolean).map((source: any) => ({
+        id: source.id,
+        category: source.kind === 'announcement' ? 'official_announcement' : source.kind === 'market_data' ? 'market' : source.kind === 'policy' ? 'macro' : 'news',
+        statement: source.title, sourceName: source.sourceName, sourceUrl: source.url, publishedAt: source.publishedAt,
+        role: 'supports', reliability: source.kind === 'announcement' || source.kind === 'policy' ? 'primary' : source.kind === 'market_data' ? 'authoritative' : 'secondary',
+      }));
+      const counterEvidence = (Array.isArray(raw?.counterEvidence) ? raw.counterEvidence : []).slice(0, 3).flatMap((item: any) => {
+        const statement = sanitizeTeacherText(item?.statement, 120);
+        const evidenceIds = Array.isArray(item?.evidenceIds) ? item.evidenceIds.map(String).filter((id: string) => sourceById.has(id)) : [];
+        if (!statement || !evidenceIds.length) return [];
+        const source = sourceById.get(evidenceIds[0])!;
+        return [{ id: source.id, category: source.kind === 'market_data' ? 'market' : 'news', statement, sourceName: source.sourceName, sourceUrl: source.url, publishedAt: source.publishedAt, role: 'contradicts', reliability: source.kind === 'market_data' ? 'authoritative' : 'secondary' }];
+      });
+      const missingEvidence = [...new Set([
+        ...normalizeTextList(raw?.missingEvidence, 4, 110),
+        ...(pack?.dataGaps || []),
+      ])].slice(0, 4);
+      if (!counterEvidence.length && !missingEvidence.length) missingEvidence.push('尚需核验关键变量是否按该路径变化。');
+      results.set(storyId, {
+        id: `impact-${storyId}`, storyType: profile.storyType, reasoningMode: profile.reasoningMode,
+        title: story.title, trigger,
+        summary: {
+          eventFact: sanitizeTeacherText(raw?.summary?.eventFact, 140) || story.what,
+          coreMechanism: sanitizeTeacherText(raw?.summary?.coreMechanism, 140) || '驱动关系仍待核验。',
+          keyImpacts: normalizeTextList(raw?.summary?.keyImpacts, 4, 60),
+          conclusionLevel,
+        },
+        nodes, edges, evidence, counterEvidence, missingEvidence,
+        observationIndicators: normalizeTextList(raw?.observationIndicators, 4, 90),
+        version: 'impact-path-v1',
+      });
+    }
+    return results;
   }
 
   function defaultProfessionalContent(
@@ -2021,6 +2357,7 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
       })),
       sectors: marketData.sectors.map((sector: any, index: number) => ({
         id: `sector-${index + 1}`,
+        code: String(sector.code || ''),
         name: sector.name,
         changePercent: Number(sector.changePercent) || 0,
       })),
@@ -2051,6 +2388,350 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
         evidenceIds: sourceId ? [sourceId] : [],
         relatedSectors: [sector.name],
       }));
+  }
+
+  /**
+   * v1 过渡输出：只重组既有 P2 结果，不补造原因或行业受益关系。
+   * 三类专用 Skill 上线后会替换这里的 nodes/edges 生成器，API 协议保持不变。
+   */
+  function buildFallbackImpactAnalysis(
+    story: MarketStoryDraft,
+    reasoning: ReasoningChain,
+    evidence: MarketSource[],
+    evidencePack?: EventEvidencePack,
+  ): ImpactAnalysis {
+    const confidence = reasoning.confidenceLevel === 'high' ? 85 : reasoning.confidenceLevel === 'medium' ? 65 : 35;
+    const trigger = {
+      id: 'trigger', type: 'event', title: story.title, explanation: story.what,
+      knowledgeType: 'fact', confidence, evidenceIds: story.evidenceIds,
+    };
+    const nodes: any[] = [trigger];
+    const edges: any[] = [];
+    let previousId = trigger.id;
+    const append = (node: any, relation: string) => {
+      nodes.push(node);
+      edges.push({ from: previousId, to: node.id, relation, explanation: node.explanation, timeHorizon: 'short_term' });
+      previousId = node.id;
+    };
+    reasoning.changedVariables.slice(0, 2).forEach((text, index) => append({
+      id: `variable-${index}`, type: 'changed_variable', title: text,
+      explanation: '已观测到的关键变化。', knowledgeType: 'fact', evidenceIds: story.evidenceIds,
+    }, 'raises'));
+    const mechanisms = reasoning.mechanism.length
+      ? reasoning.mechanism.slice(0, 2)
+      : ['暂未找到可验证的直接驱动，以下影响仅作为待核验路径。'];
+    mechanisms.forEach((text, index) => append({
+      id: `mechanism-${index}`, type: 'mechanism', title: text,
+      explanation: reasoning.mechanism.length ? '基于已知机制的传导解释。' : '缺少直接驱动证据，不能视为已确认原因。',
+      knowledgeType: reasoning.mechanism.length ? 'inference' : 'hypothesis',
+      direction: reasoning.mechanism.length ? 'mixed' : 'uncertain',
+    }, 'may_lead_to'));
+    story.relatedSectors.slice(0, 3).forEach((sector, index) => {
+      const node = {
+        id: `sector-${index}`, type: 'sector', title: sector,
+        explanation: '关联板块，仍需用产业链数据确认实际受益或承压方向。',
+        knowledgeType: 'hypothesis', direction: 'uncertain',
+      };
+      nodes.push(node);
+      edges.push({ from: previousId, to: node.id, relation: 'may_lead_to', explanation: node.explanation, timeHorizon: 'short_term' });
+    });
+    reasoning.marketValidation.slice(0, 2).forEach((text, index) => nodes.push({
+      id: `validation-${index}`, type: 'market_validation', title: text,
+      explanation: '这是市场验证，不等同于驱动原因。', knowledgeType: 'fact', evidenceIds: story.evidenceIds,
+    }));
+    const evidenceStatus = evidencePack?.evidenceStatus;
+    return {
+      id: `impact-${story.storyId}`,
+      storyType: story.type === 'geo_event' ? 'geopolitical_event' : story.type === 'price_anomaly' ? 'commodity_anomaly' : 'sector_anomaly',
+      reasoningMode: story.type === 'geo_event' ? 'forward' : 'reverse_then_forward',
+      title: story.title,
+      trigger,
+      summary: {
+        eventFact: story.what,
+        coreMechanism: mechanisms[0],
+        keyImpacts: story.relatedSectors.slice(0, 3),
+        conclusionLevel: evidenceStatus === 'confirmed' && reasoning.confidenceLevel === 'high'
+          ? 'confirmed'
+          : reasoning.confidenceLevel === 'medium' ? 'high_probability' : evidenceStatus === 'related' ? 'possible' : 'unknown',
+      },
+      nodes,
+      edges,
+      evidence: evidence.map((source) => ({
+        id: source.id,
+        category: source.kind === 'announcement' ? 'official_announcement' : source.kind === 'market_data' ? 'market' : source.kind === 'policy' ? 'macro' : 'news',
+        statement: source.title,
+        sourceName: source.sourceName,
+        sourceUrl: source.url,
+        publishedAt: source.publishedAt,
+        role: 'supports',
+        reliability: source.kind === 'announcement' || source.kind === 'policy' ? 'primary' : source.kind === 'market_data' ? 'authoritative' : 'secondary',
+      })),
+      counterEvidence: [],
+      missingEvidence: [...new Set([...(evidencePack?.dataGaps || []), ...(reasoning.counterEvidence || []), reasoning.uncertainty])].filter(Boolean).slice(0, 4),
+      observationIndicators: [...new Set([...reasoning.observationIndicators])].slice(0, 4),
+      version: 'impact-path-v1',
+    };
+  }
+
+  // 行情放量只能说明交易活跃，不能自动证明资金流入；关联新闻也不能自动证明直接催化。
+  // 这层规则在模型输出之后再次执行，确保“证据状态”能真正约束前端可见的因果表述。
+  function enforceEvidencePackGuard(chain: ReasoningChain, pack: EventEvidencePack | undefined): ReasoningChain {
+    if (!pack || pack.evidenceStatus === 'confirmed') return chain;
+    const unsupportedClaim = /资金(?:集中)?流入|资金涌入|需求增长|需求改善|政策利好|行业前景(?:乐观|向好)|直接催化/;
+    const guardedSteps = chain.steps
+      .filter((step) => !unsupportedClaim.test(step.text))
+      .map((step) => ({
+        ...step,
+        kind: step.kind === 'fact' && /可能|预期|情绪|带动/.test(step.text) ? 'inference' as const : step.kind,
+      }));
+    const needsPlaceholder = !guardedSteps.some((step) => step.kind === 'inference');
+    if (needsPlaceholder) {
+      guardedSteps.push({
+        id: 'evidence-status',
+        text: pack.evidenceStatus === 'related'
+          ? '关联新闻与板块表现同时出现，但直接驱动关系仍待确认。'
+          : '目前只确认到行情变化，具体驱动原因仍待确认。',
+        evidenceIds: [], kind: 'inference', stepType: 'mechanism', relationshipConfidence: 'weak',
+      });
+    }
+    const statusReminder = pack.evidenceStatus === 'related'
+      ? '当前仅有关联线索与市场验证，尚不能确认直接因果。'
+      : '当前仅确认市场表现，尚缺少可验证的事件驱动。';
+    const sector = pack.sectorValidation[0];
+    const changedVariables = sector
+      ? [
+          sector.change5d === null ? '' : `${sector.sectorName}近5日${sector.change5d >= 0 ? '上涨' : '下跌'}${Math.abs(sector.change5d)}%。`,
+          sector.turnoverChangePercent === null ? '' : `成交额较近20日均值${sector.turnoverChangePercent >= 0 ? '增加' : '减少'}${Math.abs(sector.turnoverChangePercent)}%。`,
+        ].filter(Boolean)
+      : chain.changedVariables;
+    const marketValidation = sector
+      ? [
+          `${sector.sectorName}当日${sector.todayChangePercent >= 0 ? '上涨' : '下跌'}${Math.abs(sector.todayChangePercent)}%。`,
+          sector.upStockRatio === null ? '' : `${sector.sampleSize}只样本中${sector.upStockRatio}%上涨。`,
+          sector.leaderContribution === null ? '' : `龙头贡献度${sector.leaderContribution}%，用于判断是否由少数个股主导。`,
+        ].filter(Boolean)
+      : chain.marketValidation;
+    return {
+      ...chain,
+      steps: guardedSteps.slice(0, 6),
+      uncertainty: [chain.uncertainty, statusReminder, ...pack.dataGaps].filter(Boolean).join('；').slice(0, 180),
+      confidenceLevel: 'limited',
+      validationStatus: 'limited',
+      beginnerSummary: pack.evidenceStatus === 'related'
+        ? '行情与相关新闻线索同时出现，但目前还不能确认两者存在直接因果。'
+        : '目前只确认到行情变化，具体驱动原因仍待确认。',
+      facts: chain.facts.length ? chain.facts : guardedSteps.filter((step) => step.kind === 'fact').map((step) => step.text).slice(0, 3),
+      changedVariables,
+      mechanism: [pack.evidenceStatus === 'related'
+        ? '相关新闻提供了关联线索，但当前没有足够证据确认其传导到板块行情的直接机制。'
+        : '尚未获得可验证的传导机制。'],
+      marketValidation,
+      observationIndicators: sector
+        ? ['成交额是否持续变化', '上涨家数能否维持或扩散', '龙头贡献度是否明显上升']
+        : chain.observationIndicators,
+    };
+  }
+
+  function enforceEvidenceAwareTeacherContent(
+    story: MarketStoryDraft,
+    teacher: TeacherStoryContent,
+    pack: EventEvidencePack | undefined,
+  ): TeacherStoryContent {
+    if (!pack || pack.evidenceStatus === 'confirmed') return teacher;
+    const sector = pack.sectorValidation[0];
+    if (!sector) {
+      return {
+        ...teacher,
+        summary: `${story.what} 当前只确认到市场表现，具体驱动仍待确认。`.slice(0, 180),
+        uncertaintyText: '当前没有足够的直接事件证据，不能把关联线索当成确定原因。',
+      };
+    }
+    const breadth = sector.upStockRatio === null ? '' : `，${sector.upStockRatio}%成分股上涨`;
+    const turnover = sector.turnoverChangePercent === null
+      ? ''
+      : `，成交额较近20日均值${sector.turnoverChangePercent >= 0 ? '增加' : '减少'}${Math.abs(sector.turnoverChangePercent)}%`;
+    const note = pack.evidenceStatus === 'related'
+      ? '；已有相关新闻线索，但是否为直接驱动仍待确认。'
+      : '；目前只确认到行情变化，原因待确认。';
+    return {
+      ...teacher,
+      summary: `${sector.sectorName}今日${sector.todayChangePercent >= 0 ? '上涨' : '下跌'}${Math.abs(sector.todayChangePercent)}%${breadth}${turnover}${note}`.slice(0, 180),
+      uncertaintyText: pack.evidenceStatus === 'related'
+        ? '关联新闻可以提供观察线索，但不能单独证明它导致了板块波动。'
+        : '目前缺少可验证的事件驱动信息。',
+      simpleChain: [
+        `${sector.sectorName}今日${sector.todayChangePercent >= 0 ? '上涨' : '下跌'}${Math.abs(sector.todayChangePercent)}%。`,
+        sector.upStockRatio === null ? '板块内部上涨范围数据暂不完整。' : `${sector.upStockRatio}%成分股上涨，说明板块内部表现可继续观察。`,
+        pack.evidenceStatus === 'related' ? '关联新闻提供线索，但直接驱动关系仍待确认。' : '目前只确认行情变化，原因仍待确认。',
+      ],
+    };
+  }
+
+  function findEvidenceSector(story: MarketStoryDraft, snapshot: MarketSnapshot) {
+    const normalized = (value: string) => value.replace(/(概念|板块|行业|指数|主题)/g, '').trim();
+    const candidates = story.relatedSectors.map(normalized).filter(Boolean);
+    const title = normalized(story.title);
+    const titleMatch = snapshot.sectors.find((sector) => {
+      const sectorName = normalized(sector.name);
+      return sectorName.length >= 2 && (title.includes(sectorName) || sectorName.includes(title.slice(0, Math.min(title.length, 4))));
+    });
+    if (titleMatch) return titleMatch;
+    return snapshot.sectors.find((sector) => candidates.some((name) =>
+      normalized(sector.name) === name || normalized(sector.name).includes(name) || name.includes(normalized(sector.name)),
+    )) || null;
+  }
+
+  async function enrichCompanyEvidence(primaryCompany: MarketStoryDraft['primaryCompany']): Promise<NonNullable<EventEvidencePack['companyValidation']>> {
+    if (!primaryCompany?.name && !primaryCompany?.symbol) return { status: 'not_matched', officialAnnouncements: [] };
+    try {
+      let symbol = primaryCompany.symbol || '';
+      let name = primaryCompany.name;
+      if (!symbol && name) {
+        const search = await searchAshareStocks(name);
+        const normalizedName = name.replace(/[（(].*?[）)]/g, '');
+        const match = search.results.find((item: any) => String(item?.name || '').replace(/[（(].*?[）)]/g, '') === normalizedName);
+        symbol = String(match?.code || '').replace(/\D/g, '').slice(0, 6);
+        name = String(match?.name || name);
+      }
+      if (!/^\d{6}$/.test(symbol)) return { status: 'not_matched', name, officialAnnouncements: [] };
+      const [quoteResult, eventResult] = await Promise.allSettled([
+        fetchAshareStockQuoteWithFallback(symbol),
+        buildStockEventSnapshot(symbol, 30),
+      ]);
+      const officialAnnouncements: MarketSource[] = eventResult.status === 'fulfilled'
+        ? (eventResult.value.events || [])
+          .filter((event: any) => event?.verification === 'official_verified')
+          .slice(0, 3)
+          .map((event: any, index: number) => ({
+            id: `company-announcement-${symbol}-${index + 1}`,
+            title: String(event.title || '').slice(0, 160),
+            sourceName: '巨潮资讯网（CNINFO）',
+            publishedAt: event.publishedAt,
+            url: event.sourceUrl || undefined,
+            kind: 'announcement' as const,
+          }))
+        : [];
+      return {
+        status: 'matched',
+        name,
+        symbol,
+        changePercent: quoteResult.status === 'fulfilled' ? Number(quoteResult.value.quote?.changePercent) : undefined,
+        eventCount: eventResult.status === 'fulfilled' ? Number(eventResult.value.events?.length || 0) : undefined,
+        officialAnnouncements,
+      };
+    } catch (error: any) {
+      console.warn(`[event-evidence] company enrichment failed: ${error?.message || 'unknown error'}`);
+      return { status: 'unavailable', name: primaryCompany.name, symbol: primaryCompany.symbol, officialAnnouncements: [] };
+    }
+  }
+
+  // 同一公司近期开过公告，不等于当前故事已经被公告证实；必须有事件动作上的语义对应。
+  function officialAnnouncementMatchesStory(story: MarketStoryDraft, announcements: MarketSource[]) {
+    const storyText = `${story.title} ${story.what}`.replace(/\s+/g, '');
+    const eventGroups = [
+      ['申购', '发行', '上市', '招股', '配售'],
+      ['中标', '订单', '合同', '签署'],
+      ['业绩', '利润', '营收', '预告', '快报'],
+      ['诉讼', '仲裁', '立案', '判决'],
+      ['停产', '复产', '产能', '投产'],
+      ['减持', '增持', '回购', '分红'],
+      ['收购', '重组', '并购', '资产'],
+    ];
+    return announcements.some((announcement) => {
+      const title = String(announcement.title || '').replace(/\s+/g, '');
+      return eventGroups.some((group) =>
+        group.some((keyword) => storyText.includes(keyword))
+        && group.some((keyword) => title.includes(keyword)),
+      );
+    });
+  }
+
+  async function buildEventEvidencePacks(stories: MarketStoryDraft[], snapshot: MarketSnapshot): Promise<EventEvidencePack[]> {
+    const marketContext = {
+      marketDate: snapshot.marketDate,
+      indices: snapshot.indices,
+      totalTurnoverAmount: snapshot.totalTurnoverAmount,
+      marketBreadth: snapshot.marketBreadth,
+    };
+    return Promise.all(stories.map(async (story) => {
+      const sector = findEvidenceSector(story, snapshot);
+      const dataGaps: string[] = [];
+      const extraSources: MarketSource[] = [];
+      let sectorValidation: EventEvidencePack['sectorValidation'] = [];
+      if (sector?.code) {
+        const [kline, breadth, relatedNews] = await Promise.all([
+          fetchSectorKline(sector.code),
+          fetchSectorBreadth(sector.code),
+          fetchEastMoneySectorNews(sector.name),
+        ]);
+        const todayAmount = Number(kline?.todayAmount);
+        const avg20dAmount = Number(kline?.avg20dAmount);
+        const turnoverChangePercent = Number.isFinite(todayAmount) && Number.isFinite(avg20dAmount) && avg20dAmount > 0
+          ? round2(((todayAmount / avg20dAmount) - 1) * 100)
+          : null;
+        const dataStatus = breadth?.dataStatus === 'available' && Number.isFinite(Number(kline?.change5d))
+          ? 'available' as const
+          : breadth?.dataStatus === 'available' || Number.isFinite(Number(kline?.change5d))
+            ? 'partial' as const
+            : 'unavailable' as const;
+        sectorValidation = [{
+          sectorName: sector.name,
+          sectorCode: sector.code,
+          todayChangePercent: sector.changePercent,
+          change5d: Number.isFinite(Number(kline?.change5d)) ? round2(Number(kline.change5d)) : null,
+          change20d: Number.isFinite(Number(kline?.change20d)) ? round2(Number(kline.change20d)) : null,
+          turnoverChangePercent,
+          upStockRatio: breadth?.upStockRatio ?? null,
+          sampleSize: breadth?.sampleSize ?? 0,
+          limitUpCount: breadth?.limitUpCount ?? null,
+          leaderContribution: breadth?.leaderContribution ?? null,
+          dispersion: breadth?.dispersion ?? null,
+          leaders: (breadth?.stocks || []).slice().sort((a: any, b: any) => b.changePercent - a.changePercent).slice(0, 3)
+            .map((stock: any) => ({ code: stock.code, name: stock.name, changePercent: stock.changePercent })),
+          dataStatus,
+        }];
+        extraSources.push({
+          id: `sector-validation-${story.storyId}-${sector.code}`,
+          title: `${sector.name}：当日${sector.changePercent >= 0 ? '+' : ''}${sector.changePercent.toFixed(2)}%，5日/20日走势、成交与成分股广度验证`,
+          sourceName: '东方财富', kind: 'market_data', publishedAt: snapshot.dataUpdatedAt,
+        });
+        for (const news of relatedNews.slice(0, 2)) {
+          extraSources.push({ id: `story-${story.storyId}-${news.id}`, title: news.title, sourceName: news.sourceName, kind: 'news' });
+        }
+        if (dataStatus !== 'available') dataGaps.push(`${sector.name}的历史走势或成分股广度不完整`);
+        if (!relatedNews.length) dataGaps.push(`${sector.name}未检索到可作为直接催化的事实新闻`);
+      } else {
+        dataGaps.push('未匹配到可验证的关联板块编码');
+      }
+      const companyValidation = story.type === 'company_event'
+        ? await enrichCompanyEvidence(story.primaryCompany)
+        : undefined;
+      if (companyValidation) {
+        companyValidation.officialEventMatched = officialAnnouncementMatchesStory(story, companyValidation.officialAnnouncements);
+      }
+      if (companyValidation?.officialAnnouncements.length) extraSources.push(...companyValidation.officialAnnouncements);
+      if (story.type === 'company_event' && companyValidation?.status !== 'matched') dataGaps.push('公司主体未能可靠匹配到A股代码，未调用公告验证');
+      if (story.type === 'company_event' && companyValidation?.status === 'matched' && !companyValidation.officialAnnouncements.length) dataGaps.push('近30日未检索到可匹配的官方公告');
+      if (story.type === 'company_event' && companyValidation?.officialAnnouncements.length && !companyValidation.officialEventMatched) dataGaps.push('已找到公司官方公告，但公告标题未能与当前事件动作匹配');
+      if (story.type === 'policy_driver') dataGaps.push('尚未接入政策发布部门的原文接口，当前政策仅能作为新闻线索核验');
+      const hasMarketValidation = sectorValidation.some((item) => item.dataStatus === 'available');
+      const hasRelatedNews = extraSources.some((source) => source.kind === 'news');
+      const evidenceStatus: EvidenceStatus = story.type === 'company_event' && companyValidation?.status === 'matched' && companyValidation.officialEventMatched
+        ? 'confirmed'
+        : hasRelatedNews || hasMarketValidation
+          ? 'related'
+          : 'market_only';
+      return {
+        storyId: story.storyId,
+        storyType: story.type,
+        evidenceStatus,
+        marketContext,
+        sectorValidation,
+        ...(companyValidation ? { companyValidation } : {}),
+        sources: extraSources,
+        dataGaps: [...new Set(dataGaps)],
+      } satisfies EventEvidencePack;
+    }));
   }
 
   const clampScore = (value: number, min = 0, max = 100) =>
@@ -2351,8 +3032,8 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
   // POST /api/morning-report — Prompt 1 → 2 → 3 pipeline
   let morningReportCache: { data: any; timestamp: number } | null = null;
   let morningReportPromise: Promise<any> | null = null;
-  // 调用频率控制：开发阶段3小时（10800000ms），生产环境30分钟（1800000ms）
-  const REPORT_CACHE_TTL = process.env.NODE_ENV === 'production' ? 30 * 60 * 1000 : 3 * 60 * 60 * 1000;
+  // 首页日报和“今天发生了什么”共用同一份生成结果，统一缓存 15 分钟。
+  const REPORT_CACHE_TTL = 15 * 60 * 1000;
 
   app.get('/api/morning-report', async (req, res) => {
     console.log(`[morning-report] incoming request, ref=${req.header('referer') || 'none'}, ua=${req.header('user-agent')?.substring(0, 40) || 'none'}`);
@@ -2429,21 +3110,53 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
           fallback = true;
         }
 
+        // P1 只负责选题。入选后由服务端补取可复核的数据，P2 不再只凭标题推演。
+        const evidencePacks = await buildEventEvidencePacks(storyDrafts, snapshot);
+        const evidenceSources = [
+          ...snapshot.sources,
+          ...evidencePacks.flatMap((pack) => pack.sources),
+        ].filter((source, index, all) => all.findIndex((item) => item.id === source.id) === index);
+        const evidencePackByStory = new Map(evidencePacks.map((pack) => [pack.storyId, pack]));
+        storyDrafts = storyDrafts.map((story) => ({
+          ...story,
+          evidenceIds: [...new Set([
+            ...story.evidenceIds,
+            ...(evidencePackByStory.get(story.storyId)?.sources.map((source) => source.id) || []),
+          ])],
+        }));
+        const evidenceSnapshot: MarketSnapshot = { ...snapshot, sources: evidenceSources };
+        console.log(`[morning-report] evidence packs built: ${evidencePacks.map((pack) => `${pack.storyId}:${pack.evidenceStatus}`).join(', ')}`);
+
         let chains: ReasoningChain[] = [];
+        let impactAnalysesByStory = new Map<string, ImpactAnalysis>();
         try {
           const p2Result = await callAIWithParseRetry(
-            PROMPT_2_SYSTEM,
-            JSON.stringify({ stories: storyDrafts, sources: snapshot.sources }, null, 2),
+            MARKET_REASONING_PROMPT_V2_ENABLED
+              ? `${PROMPT_2_SYSTEM}\n${PROMPT_2_EVIDENCE_V2_APPENDIX}\n${PROMPT_2_IMPACT_PATH_APPENDIX}`
+              : PROMPT_2_SYSTEM,
+            JSON.stringify({
+              stories: storyDrafts,
+              evidencePacks,
+              impactSkillInputs: buildImpactSkillInputs(storyDrafts, evidencePacks),
+              sources: evidenceSnapshot.sources,
+            }, null, 2),
             0.05,
           );
-          chains = normalizeChains(p2Result?.chains, storyDrafts, snapshot);
+          chains = normalizeChains(p2Result?.chains, storyDrafts, evidenceSnapshot)
+            .map((chain) => enforceEvidencePackGuard(chain, evidencePackByStory.get(chain.storyId)));
+          impactAnalysesByStory = normalizeImpactAnalyses(
+            p2Result?.impactAnalyses,
+            storyDrafts,
+            evidenceSnapshot,
+            evidencePacks,
+          );
         } catch (error: any) {
           console.error('[morning-report] P2 failed:', error.message);
           fallback = true;
         }
         console.log('[morning-report] step 2: causal reasoning done');
         const chainByStory = new Map(chains.map((chain) => [chain.storyId, chain]));
-        const sourceById = new Map(snapshot.sources.map((source) => [source.id, source]));
+        const sourceById = new Map(evidenceSnapshot.sources.map((source) => [source.id, source]));
         const evidenceConfidenceByStory = new Map(
           storyDrafts.map((story) => {
             const chain = chainByStory.get(story.storyId) || defaultReasoning(story);
@@ -2468,6 +3181,7 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
           },
           sentiment,
           stories: storyDrafts,
+          evidencePacks,
           chains: storyDrafts.map((story) => chainByStory.get(story.storyId) || defaultReasoning(story)),
         };
         const p3BeginnerInput = JSON.stringify(sharedP3Input, null, 2);
@@ -2512,7 +3226,7 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
             })).filter((item: TeacherStoryContent) => item.storyId && item.summary)
           : [];
         const teacherByStory = new Map(teacherItems.map((item) => [item.storyId, item]));
-        const sourceIds = new Set(snapshot.sources.map((source) => source.id));
+        const sourceIds = new Set(evidenceSnapshot.sources.map((source) => source.id));
         const validRoles = new Set(['primary', 'secondary', 'diffusion']);
         const professionalItems: ProfessionalStoryContent[] = Array.isArray(p3ProfessionalResult?.stories)
           ? p3ProfessionalResult.stories.map((item: any) => {
@@ -2548,19 +3262,30 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
         const professionalByStory = new Map(professionalItems.map((item) => [item.storyId, item]));
         const stories = storyDrafts.map((draft) => {
           const reasoning = chainByStory.get(draft.storyId) || defaultReasoning(draft);
-          const teacher = teacherByStory.get(draft.storyId) || defaultTeacherContent(draft, reasoning);
+          const rawTeacher = teacherByStory.get(draft.storyId) || defaultTeacherContent(draft, reasoning);
+          const teacher = enforceEvidenceAwareTeacherContent(
+            draft,
+            rawTeacher,
+            evidencePackByStory.get(draft.storyId),
+          );
           const evidenceConfidence = evidenceConfidenceByStory.get(draft.storyId)
             || calculateEvidenceConfidence(reasoning, new Set(
               draft.evidenceIds.map((id) => sourceById.get(id)?.sourceName).filter(Boolean),
             ).size);
           const professional = professionalByStory.get(draft.storyId)
             || defaultProfessionalContent(draft, reasoning, evidenceConfidence);
+          const evidence = draft.evidenceIds.map((id) => sourceById.get(id)).filter(Boolean) as MarketSource[];
           return {
             ...draft,
             reasoning,
             teacher,
             professional,
-            evidence: draft.evidenceIds.map((id) => sourceById.get(id)).filter(Boolean),
+            evidencePack: evidencePackByStory.get(draft.storyId),
+            evidence,
+            impactAnalysis: MARKET_IMPACT_PATH_ENABLED
+              ? impactAnalysesByStory.get(draft.storyId)
+                || buildFallbackImpactAnalysis(draft, reasoning, evidence, evidencePackByStory.get(draft.storyId))
+              : undefined,
           };
         });
 
@@ -2573,8 +3298,11 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
           reasonBrief,
           stories,
           top3Themes: stories,
-          promptVersion: 'market-stories-v4-dual-p3',
+          promptVersion: MARKET_REASONING_PROMPT_V2_ENABLED
+            ? 'market-stories-v7-impact-path'
+            : 'market-stories-v5-evidence-pack',
           promptVersions: {
+            reasoning: MARKET_REASONING_PROMPT_V2_ENABLED ? 'p2-impact-path-v1' : 'p2-legacy-guarded',
             beginner: 'p3a-beginner-v1',
             professional: 'p3b-professional-v1',
           },
@@ -3029,11 +3757,22 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
       if(sectorNewsMatches(s.name,md.newsItems||[]).length) t.push('新闻驱动');
       if(!m) t.push('值得观察');
       const n = sectorNewsMatches(s.name,md.newsItems||[]);
-      return {sectorId: s.id, sector: s.name, category: s.category, change: (s.changePercent>=0?'+':'')+s.changePercent.toFixed(2)+'%', changePercent: s.changePercent, turnoverAmount: s.turnoverAmount, turnoverChange: null, volumeChange: null, signalTags: t.slice(0,3), signalTypes: [], isAnomaly: Math.abs(s.changePercent)>=th, anomalyReason: Math.abs(s.changePercent)>=th?'今日涨跌幅度较大，需要关注':null, analysisSource: 'rule', evidenceStatus: n.length?'partially_verified':'market_data_only', importanceScore: sc, shouldHighlight: sc>=55||m, beginnerExplanation: s.name+'今日'+(s.changePercent>=0?'上涨':'下跌')+Math.abs(s.changePercent).toFixed(2)+'%', professionalSummary: s.name+(s.changePercent>=0?'上涨':'下跌')+Math.abs(s.changePercent).toFixed(2)+'%，重要度'+sc+'分', relatedNews: n, relatedChain: inferRelatedChain(s.name), dataNotes: ['重要度由涨跌异动、排行和新闻关联共同计算。']};
+      const category = s.category === 'concept' ? 'concept' : 'industry';
+      const sectorCode = String(s.code || '').trim();
+      return {sectorId: sectorCode ? `${category}-${sectorCode}` : `${category}-${s.name}`, sector: s.name, category, change: (s.changePercent>=0?'+':'')+s.changePercent.toFixed(2)+'%', changePercent: s.changePercent, turnoverAmount: s.turnoverAmount, turnoverChange: null, volumeChange: null, signalTags: t.slice(0,3), signalTypes: [], isAnomaly: Math.abs(s.changePercent)>=th, anomalyReason: Math.abs(s.changePercent)>=th?'今日涨跌幅度较大，需要关注':null, analysisSource: 'rule', evidenceStatus: n.length?'partially_verified':'market_data_only', importanceScore: sc, shouldHighlight: sc>=55||m, beginnerExplanation: s.name+'今日'+(s.changePercent>=0?'上涨':'下跌')+Math.abs(s.changePercent).toFixed(2)+'%', professionalSummary: s.name+(s.changePercent>=0?'上涨':'下跌')+Math.abs(s.changePercent).toFixed(2)+'%，重要度'+sc+'分', relatedNews: n, relatedChain: inferRelatedChain(s.name), dataNotes: ['重要度由涨跌异动、排行和新闻关联共同计算。']};
     }).sort((a,b) => b.importanceScore-a.importanceScore);
   }
+  const MARKET_MAP_CACHE_TTL = 15 * 60 * 1000;
+  let marketMapCache: { expiresAt: number; value: any } | null = null;
   app.get('/api/market-map/intelligence', async (_req, res) => {
-    try { const md = await fetchMarketData(); const s = buildMarketMapIntelligence(md); if(!s.length) return res.status(503).json({error:'暂无可用的板块数据',dataUnavailable:true}); res.json({market:'CN',generatedAt:new Date().toISOString(),timestamp:md.timestamp,sectors:s}); }
+    if (marketMapCache && marketMapCache.expiresAt > Date.now()) return res.json(marketMapCache.value);
+    try {
+      const md = await fetchMarketData(); const s = buildMarketMapIntelligence(md);
+      if(!s.length) return res.status(503).json({error:'暂无可用的板块数据',dataUnavailable:true});
+      const value = {market:'CN',generatedAt:new Date().toISOString(),timestamp:md.timestamp,sectors:s};
+      marketMapCache = { expiresAt: Date.now() + MARKET_MAP_CACHE_TTL, value };
+      res.json(value);
+    }
     catch(e) { console.error('[market-map]',e.message); res.status(503).json({error:'市场地图信号生成失败',dataUnavailable:true}); }
   });
   // Fetch K-line data for a sector (5d, 20d, 3m changes)
@@ -3089,7 +3828,7 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
   const BREADTH_PAGE_SIZE = 100;
   const BREADTH_PAGE_CAP = 4;
 
-  async function fetchSectorBreadth(bkCode: string) {
+  async function fetchSectorBreadth(bkCode: string, options: { full?: boolean } = {}) {
     const empty = {
       upStockRatio: null as number | null,
       sampleSize: 0,
@@ -3098,24 +3837,39 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
       dispersion: null as number | null,
       sampleCoverage: null as number | null,
       sampleComplete: false,
+      totalCount: 0,
+      upCount: 0,
+      downCount: 0,
+      flatCount: 0,
+      medianChange: null as number | null,
+      dataStatus: 'unavailable' as 'available' | 'partial' | 'unavailable' | 'empty',
+      dataError: '未提供板块编码' as string | null,
       stocks: [] as Array<{ code: string; name: string; changePercent: number; turnoverAmount: number | null; turnoverRate: number | null; volumeRatio: number | null; totalMarketCap: number | null }>,
     };
     if (!bkCode) return empty;
-    const buildUrl = (page: number) =>
-      `http://push2.eastmoney.com/api/qt/clist/get?pn=${page}&pz=${BREADTH_PAGE_SIZE}`
+    const hosts = ['push2delay.eastmoney.com', 'push2.eastmoney.com', '59.push2.eastmoney.com', '70.push2.eastmoney.com'];
+    const buildUrl = (host: string, page: number) =>
+      `http://${host}/api/qt/clist/get?pn=${page}&pz=${BREADTH_PAGE_SIZE}`
       + `&po=1&np=1&fltt=2&invt=2&fid=f3&fs=b:${bkCode}%2Bf:!50&fields=f3,f6,f8,f10,f12,f14,f20`;
-    try {
-      const first = await httpGetJSON(buildUrl(1));
+    let lastError = '成分股数据源未返回有效数据';
+    for (const host of hosts) {
+      try {
+      const first = await httpGetJSON(buildUrl(host, 1));
       const total = Number(first?.data?.total || 0);
       const rows: any[] = [...(first?.data?.diff || [])];
-      if (!rows.length) return empty;
+      if (!rows.length) { lastError = `${host} 未返回成分股`; continue; }
       const pages = Math.ceil(total / BREADTH_PAGE_SIZE);
+      // Summary cards deliberately use a capped sample. Detail pages opt into a
+      // complete, minimal-field scan so breadth never treats a ranked sample as a full sector.
+      const pageLimit = options.full ? pages : Math.min(pages, BREADTH_PAGE_CAP);
       if (pages > 1) {
-        const rest = await Promise.all(
-          Array.from({ length: Math.min(pages, BREADTH_PAGE_CAP) - 1 },
-            (_, i) => httpGetJSON(buildUrl(i + 2)).catch(() => null)),
-        );
-        for (const r of rest) if (r?.data?.diff) rows.push(...r.data.diff);
+        for (let pageStart = 2; pageStart <= pageLimit; pageStart += 3) {
+          const rest = await Promise.all(
+            Array.from({ length: Math.min(3, pageLimit - pageStart + 1) },
+              (_, i) => httpGetJSON(buildUrl(host, pageStart + i)).catch(() => null)),
+          );
+          for (const r of rest) if (r?.data?.diff) rows.push(...r.data.diff);
+        }
       }
       const stocks = [...new Map(
         rows.filter((r) => r?.f12 && Number.isFinite(Number(r?.f3)))
@@ -3127,11 +3881,14 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
             totalMarketCap: Number.isFinite(Number(r.f20)) ? Number(r.f20) : null,
           }]),
       )].map(([, stock]) => stock);
-      if (!stocks.length) return empty;
+      if (!stocks.length) { lastError = `${host} 返回的数据缺少有效涨跌幅`; continue; }
 
       // 取回比例不足九成时不给出 upStockRatio，避免用涨幅榜头部冒充板块整体
-      const sampleComplete = total > 0 && stocks.length >= total * 0.9;
+      const sampleCoverage = total > 0 ? round2((stocks.length / total) * 100) : null;
+      const sampleComplete = total > 0 && stocks.length >= total * 0.99;
       const up = stocks.filter((s) => s.changePercent > 0).length;
+      const down = stocks.filter((s) => s.changePercent < 0).length;
+      const flat = stocks.length - up - down;
       const totalAbs = stocks.reduce((sum, s) => sum + Math.abs(s.changePercent), 0);
       const top3Abs = [...stocks]
         .sort((a, b) => Math.abs(b.changePercent) - Math.abs(a.changePercent))
@@ -3142,16 +3899,26 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
       return {
         upStockRatio: sampleComplete ? Math.round((up / stocks.length) * 100) : null,
         sampleSize: stocks.length,
+        totalCount: total,
+        upCount: up,
+        downCount: down,
+        flatCount: flat,
+        medianChange: orderedChanges.length ? round2(orderedChanges[Math.floor(orderedChanges.length / 2)]) : null,
         limitUpCount: stocks.filter((s) => s.changePercent >= 9.8).length,
         leaderContribution: totalAbs > 0 ? Math.round((top3Abs / totalAbs) * 100) : null,
         dispersion: orderedChanges.length >= 5 ? round2(percentile(0.9) - percentile(0.1)) : null,
-        sampleCoverage: total > 0 ? round2((stocks.length / total) * 100) : null,
+        sampleCoverage,
         sampleComplete,
+        dataStatus: (sampleComplete ? 'available' : 'partial') as 'available' | 'partial',
+        dataError: null,
         stocks,
       };
-    } catch {
-      return empty;
+      } catch (error: any) {
+        lastError = `${host} 请求失败：${error?.message || '未知错误'}`;
+      }
     }
+    console.warn(`[sector-breadth] ${bkCode}: ${lastError}`);
+    return { ...empty, dataError: lastError };
   }
 
   // P5 新闻检索使用东财相关度排序，而不是全站时间排序；后者会忽略关键词。
@@ -3505,7 +4272,7 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
 
   let bubbleSelectionCache: { data: any; timestamp: number } | null = null;
   let bubbleSelectionPromise: Promise<any> | null = null;
-  const BUBBLE_CACHE_TTL = process.env.NODE_ENV === 'production' ? 30 * 60 * 1000 : 3 * 60 * 60 * 1000;
+  const BUBBLE_CACHE_TTL = 15 * 60 * 1000;
 
   // GET /api/bubble-selection — Prompt 5，泡泡精选板块
   app.get('/api/bubble-selection', async (_req, res) => {
@@ -6077,7 +6844,7 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
     return value;
   }
 
-  function findSectorInsight(sectorName: string, fallback: string, watchPoints: string[]) {
+  function findSectorInsight(sectorName: string, fallback: string, watchPoints: string[], relatedNews: Array<{ title: string }> = []) {
     const report = morningReportCache?.data;
     const stories = Array.isArray(report?.stories) ? report.stories : [];
     const target = normalizeSectorKey(sectorName);
@@ -6091,9 +6858,10 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
     if (!matched) return {
       whatHappened: fallback,
       matchQuality,
-      evidenceStatus: 'market_only',
-      supportingEvidence: [], counterEvidence: [],
-      confidence: { level: 'limited', explanation: '当前仅观察到行情变化，尚未匹配到充分驱动证据。' },
+      evidenceStatus: relatedNews.length ? 'related_news' : 'market_only',
+      supportingEvidence: relatedNews.slice(0, 2).map((item) => `关联新闻：${item.title}`),
+      counterEvidence: relatedNews.length ? ['关联新闻尚未形成可验证的直接催化证据。'] : [],
+      confidence: { level: 'limited', explanation: relatedNews.length ? '已找到关联新闻线索，但尚未匹配到可验证的直接驱动证据。' : '当前仅观察到行情变化，尚未匹配到充分驱动证据。' },
       observationIndicators: watchPoints,
       generatedAt: report?.timestamp || null,
     };
@@ -6112,16 +6880,20 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
     };
   }
 
+  const SECTOR_DETAIL_CACHE_TTL = 15 * 60 * 1000;
+  const sectorDetailCache = new Map<string, { expiresAt: number; value: any }>();
+
   app.get('/api/sector-detail', async (req, res) => {
     try {
       const sn = String(req.query.sectorName || ''); if(!sn) return res.status(400).json({error:'sectorName is required'});
+      const cached = sectorDetailCache.get(sn);
+      if (cached && cached.expiresAt > Date.now()) return res.json(cached.value);
       const md = await fetchMarketData(); const sec = (md.sectors||[]).find(s => s.name === sn); const pct = Number(sec?.changePercent)||0;
-      const subs = (md.sectors||[]).filter(s => s.name !== sn && s.name && s.name.includes(sn.slice(0,2))).slice(0,5);
       
       // Get real stock data
       const bkCode = (sec && sec.code) ? String(sec.code) : (req.query.sectorId ? String(req.query.sectorId).replace(/^(industry|concept)-/, '') : '');
       const [breadth, klineData, sectorNews] = await Promise.all([
-        bkCode ? fetchSectorBreadth(bkCode) : Promise.resolve(null),
+        bkCode ? fetchSectorBreadth(bkCode, { full: true }) : Promise.resolve(null),
         bkCode ? fetchSectorKline(bkCode) : Promise.resolve(null),
         fetchEastMoneySectorNews(sn),
       ]);
@@ -6168,23 +6940,38 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
       
       const defaultWatchPoints = ['成交额是否继续放大', '上涨是否扩散', '龙头股能否保持强势'];
       const fallbackConclusion = sn + '今日' + (pct >= 0 ? '上涨' : '下跌') + Math.abs(pct).toFixed(2) + '%';
-      const insight = findSectorInsight(sn, fallbackConclusion, defaultWatchPoints);
-      const leaderHeavy = (breadth?.leaderContribution ?? 0) >= 55;
-      const healthPresentation = pct < 0 && (breadth?.upStockRatio ?? 50) < 40
-        ? 'broad_fall'
-        : (breadth?.upStockRatio ?? 0) >= 70 && !leaderHeavy
+      const insight = findSectorInsight(sn, fallbackConclusion, defaultWatchPoints, sectorNews);
+      if (breadth?.dataStatus !== 'available') {
+        insight.counterEvidence = [...(insight.counterEvidence || []), '板块成分股数据暂不可用，无法确认上涨是否扩散。'].slice(0, 3);
+      }
+      const structureAvailable = breadth?.dataStatus === 'available' && breadth.sampleComplete;
+      const healthPresentation = !structureAvailable
+        ? 'unavailable'
+        : (breadth.upStockRatio ?? 50) >= 70
           ? 'broad_rise'
-          : leaderHeavy || (breadth?.upStockRatio ?? 100) < 40
-            ? 'leader_driven'
-            : 'divergence';
-      res.json({
+          : (breadth.upStockRatio ?? 50) <= 30
+            ? 'broad_fall'
+            : (breadth.leaderContribution ?? 0) >= 55 ? 'concentrated' : 'divergence';
+      const topGainers = [...allStocks].sort((a, b) => b.changePercent - a.changePercent).slice(0, 3);
+      const evidenceSummary = {
+        status: sectorNews.length ? 'related_clues' : 'market_only',
+        marketFacts: [
+          `板块当日${pct >= 0 ? '上涨' : '下跌'}${Math.abs(pct).toFixed(2)}%`,
+          structureAvailable ? `成分股 ${breadth.upCount}/${breadth.totalCount} 上涨（${breadth.upStockRatio}%）` : `成分股覆盖 ${breadth?.sampleSize || 0}/${breadth?.totalCount || 0}，结构暂不可判断`,
+          breadth?.limitUpCount != null ? `涨停成分股 ${breadth.limitUpCount} 只` : '',
+        ].filter(Boolean),
+        relatedClues: sectorNews.map((news) => ({ title: news.title, sourceName: news.sourceName })),
+        analysisInference: insight.whatHappened ? [insight.whatHappened] : [],
+        counterAndGaps: insight.counterEvidence || [],
+      };
+      const detailPayload = {
         sector: sn,sectorId:req.query.sectorId||'',todayChange:(pct>=0?'+':'')+pct.toFixed(2)+'%',todayChangePercent:pct,
         change5d:c5,change20d:c20,change3m:c3m,
         stage:stage,stageLabel:stageLabel,signalTags:[],signalTypes:[],
         bubbleConclusion: fallbackConclusion,
         insight,
         health: {
-          status: healthPresentation === 'broad_fall' ? 'divergence' : healthPresentation,
+          status: healthPresentation,
           presentation: healthPresentation,
           upRatio: breadth?.upStockRatio ?? null,
           sampleCoverage: breadth?.sampleCoverage ?? null,
@@ -6193,15 +6980,20 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
           limitUpCount: breadth?.limitUpCount ?? null,
           dataAsOf: md.timestamp,
         },
-        subdivisions:subs.map(function(s){return{name:s.name,changePercent:Number(s.changePercent)||0,status:'weak'};}),
+        constituentStats: { status: structureAvailable ? 'available' : (breadth?.dataStatus || 'unavailable'), totalCount: breadth?.totalCount || 0, loadedCount: breadth?.sampleSize || 0, upCount: breadth?.upCount || 0, downCount: breadth?.downCount || 0, flatCount: breadth?.flatCount || 0, upRatio: breadth?.upStockRatio ?? null, coverage: breadth?.sampleCoverage ?? null, limitUpCount: breadth?.limitUpCount ?? null, medianChange: breadth?.medianChange ?? null, dataError: breadth?.dataError || null, dataAsOf: md.timestamp, sourceName: '东方财富板块成分股' },
+        topGainers,
+        subdivisions: [],
         leadingStocks: leading, laggingStocks: lagging,
-        representativeStocks: { strength, leaders, unusual },
-        healthMetrics:{ upCount: allStocks.filter(function(s){return s.changePercent>0;}).length, totalCount: allStocks.length, medianChange:'--', leaderContribution: breadth?.leaderContribution ?? null, divergence: breadth?.dispersion ?? null, sampleComplete: breadth?.sampleComplete ?? false },
+        representativeStocks: { status: allStocks.length ? (breadth?.dataStatus || 'available') : 'empty', strength, rankingRule: '涨幅 40% · 成交额 30% · 换手率 20% · 市值 10%' },
+        evidenceSummary,
+        healthMetrics:{ upCount: breadth?.upCount || 0, totalCount: breadth?.totalCount || 0, medianChange: breadth?.medianChange ?? null, leaderContribution: breadth?.leaderContribution ?? null, divergence: breadth?.dispersion ?? null, sampleComplete: breadth?.sampleComplete ?? false, dataStatus: breadth?.dataStatus || 'unavailable', dataError: breadth?.dataError || null },
         news:newsItems,
         heatMetrics:heatMetrics,
         watchPoints: insight.observationIndicators,
         exploreQuestions:['为什么'+sn+'今天表现突出？',sn+'现在处于什么阶段？']
-      });
+      };
+      sectorDetailCache.set(sn, { expiresAt: Date.now() + SECTOR_DETAIL_CACHE_TTL, value: detailPayload });
+      res.json(detailPayload);
     } catch(e) { res.status(503).json({error:'生成失败'}); }
   });
 

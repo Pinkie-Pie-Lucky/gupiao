@@ -11,13 +11,19 @@ import { AiTeacherTab } from './components/AiTeacherTab';
 import { MineTab } from './components/MineTab';
 import { StockResearchTab } from './components/StockResearchTab';
 import { StockResearchEmptyState } from './components/StockResearchEmptyState';
+import { LoginScreen } from './components/LoginScreen';
+import { getActiveAccount, getStoredAccount, registerLocalAccount, signInLocalAccount, signOutLocalAccount, updateLocalNickname, type LocalAccount } from './lib/localAccount';
 import { Home, Compass, Star, MessageSquare, User, BarChart3 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { StockItem } from './types';
 
 type TabId = 'home' | 'market-map' | 'watchlist' | 'ai-teacher' | 'mine' | 'stock-research';
 
+// 暂停个人中心与本机体验登录；恢复时改为 true 即可，无需重写账号相关代码。
+const ACCOUNT_FEATURE_ENABLED = false;
+
 export default function App() {
+  const [account, setAccount] = useState<LocalAccount | null>(() => getActiveAccount());
   const [activeTab, setActiveTab] = useState<TabId>('home');
   const [selectedSectorId, setSelectedSectorId] = useState<string | null>(null);
   const [prefilledStock, setPrefilledStock] = useState<{ name: string; code: string } | null>(null);
@@ -95,6 +101,31 @@ export default function App() {
     setActiveTab('stock-research');
   };
 
+  const handleRegister = (phone: string, nickname: string) => {
+    setAccount(registerLocalAccount({ phone, nickname }));
+  };
+
+  const handleSignIn = (phone: string) => {
+    const signedInAccount = signInLocalAccount(phone);
+    if (signedInAccount) setAccount(signedInAccount);
+    return Boolean(signedInAccount);
+  };
+
+  const handleUpdateNickname = (nickname: string) => {
+    const updatedAccount = updateLocalNickname(nickname);
+    if (updatedAccount) setAccount(updatedAccount);
+  };
+
+  const handleSignOut = () => {
+    signOutLocalAccount();
+    setAccount(null);
+    setActiveTab('home');
+  };
+
+  if (ACCOUNT_FEATURE_ENABLED && !account) {
+    return <LoginScreen existingPhone={getStoredAccount()?.phone || null} onRegister={handleRegister} onSignIn={handleSignIn} />;
+  }
+
   return (
     <div id="app-root-container" className="min-h-screen bg-[#F8FAFC] text-gray-900 font-sans flex justify-center">
       {/* Centered Mobile Frame container to match design and prevent layout stretching on large screens */}
@@ -149,11 +180,11 @@ export default function App() {
                   onConsumePendingPrompt={handleConsumePendingPrompt}
                 />
               )}
-              {activeTab === 'mine' && (
+              {ACCOUNT_FEATURE_ENABLED && activeTab === 'mine' && account && (
                 <MineTab
-                  followedStocks={followedStocks}
-                  onAskTeacherAboutStock={handleAskTeacherAboutStock}
-                  onNavigateToTab={(tabId) => setActiveTab(tabId as TabId)}
+                  account={account}
+                  onUpdateNickname={handleUpdateNickname}
+                  onSignOut={handleSignOut}
                 />
               )}
             </motion.div>
@@ -167,7 +198,7 @@ export default function App() {
           <button
             id="tab-btn-home"
             onClick={() => setActiveTab('home')}
-            className={`flex flex-col items-center justify-center flex-1 py-1 transition-all relative ${
+              className={`order-1 flex flex-col items-center justify-center flex-1 py-1 transition-all relative ${
               activeTab === 'home' ? 'text-indigo-600 scale-105 font-semibold' : 'text-slate-400 hover:text-slate-600'
             }`}
           >
@@ -182,7 +213,7 @@ export default function App() {
           <button
             id="tab-btn-market-map"
             onClick={() => setActiveTab('market-map')}
-            className={`flex flex-col items-center justify-center flex-1 py-1 transition-all relative ${
+              className={`order-2 flex flex-col items-center justify-center flex-1 py-1 transition-all relative ${
               activeTab === 'market-map' ? 'text-indigo-600 scale-105 font-semibold' : 'text-slate-400 hover:text-slate-600'
             }`}
           >
@@ -197,7 +228,7 @@ export default function App() {
           <button
             id="tab-btn-watchlist"
             onClick={() => setActiveTab('watchlist')}
-            className={`flex flex-col items-center justify-center flex-1 py-1 transition-all relative ${
+              className={`order-4 flex flex-col items-center justify-center flex-1 py-1 transition-all relative ${
               activeTab === 'watchlist' ? 'text-indigo-600 scale-105 font-semibold' : 'text-slate-400 hover:text-slate-600'
             }`}
           >
@@ -212,7 +243,7 @@ export default function App() {
           <button
             id="tab-btn-stock-research"
             onClick={handleOpenResearchEntry}
-            className={`flex flex-col items-center justify-center flex-1 py-1 transition-all relative ${
+              className={`order-3 flex flex-col items-center justify-center flex-1 py-1 transition-all relative ${
               activeTab === 'stock-research' ? 'text-indigo-600 scale-105 font-semibold' : 'text-slate-400 hover:text-slate-600'
             }`}
             aria-label="打开个股分析"
@@ -228,7 +259,7 @@ export default function App() {
           <button
             id="tab-btn-ai-teacher"
             onClick={() => setActiveTab('ai-teacher')}
-            className={`flex flex-col items-center justify-center flex-1 py-1 transition-all relative ${
+              className={`order-5 flex flex-col items-center justify-center flex-1 py-1 transition-all relative ${
               activeTab === 'ai-teacher' ? 'text-indigo-600 scale-105 font-semibold' : 'text-slate-400 hover:text-slate-600'
             }`}
           >
@@ -239,11 +270,11 @@ export default function App() {
             )}
           </button>
 
-          {/* Tab: 个人中心 */}
-          <button
+          {/* 暂停个人中心入口；恢复时将 ACCOUNT_FEATURE_ENABLED 改为 true。 */}
+          {ACCOUNT_FEATURE_ENABLED && <button
             id="tab-btn-mine"
             onClick={() => setActiveTab('mine')}
-            className={`flex flex-col items-center justify-center flex-1 py-1 transition-all relative ${
+            className={`order-6 flex flex-col items-center justify-center flex-1 py-1 transition-all relative ${
               activeTab === 'mine' ? 'text-indigo-600 scale-105 font-semibold' : 'text-slate-400 hover:text-slate-600'
             }`}
           >
@@ -252,7 +283,7 @@ export default function App() {
             {activeTab === 'mine' && (
               <motion.div layoutId="activeTabDot" className="absolute -bottom-1 w-1 h-1 bg-indigo-600 rounded-full" />
             )}
-          </button>
+          </button>}
         </nav>
       </div>
     </div>

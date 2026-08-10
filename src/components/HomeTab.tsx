@@ -11,6 +11,13 @@ import { formatChineseDate, initialSectors, initialAlerts } from '../data';
 import { InteractiveChart } from './InteractiveChart';
 import { FeedbackModal } from './FeedbackModal';
 import { BubbleAvatar } from './BubbleAvatar';
+import { ImpactAnalysisModal } from './ImpactAnalysisModal';
+import { buildFallbackImpactAnalysis } from '../lib/impactAnalysis';
+
+const IMPACT_PATH_ENABLED = (import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env?.VITE_IMPACT_PATH_ENABLED !== 'false';
+// 保留旧模式切换与卡片内展开逻辑，后续需要时将两个开关改为 true 即可恢复。
+const SHOW_STORY_MODE_SWITCH = false;
+const SHOW_LEGACY_INLINE_REASONING = false;
 
 const LEARNING_KNOWLEDGE = [
   {
@@ -300,7 +307,10 @@ export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStoc
   ];
 
   const [expandedStories, setExpandedStories] = useState<Set<string>>(new Set());
+  // 暂时固定为小白模式：首页负责快速理解，完整研究放入“影响路径”弹窗。
+  // 保留 state 与旧 JSX 的类型关系，SHOW_STORY_MODE_SWITCH=false 时用户无法切换。
   const [storyMode, setStoryMode] = useState<'beginner' | 'professional'>('beginner');
+  const [impactStoryId, setImpactStoryId] = useState<string | null>(null);
 
   // 反馈状态
   const [feedbackTarget, setFeedbackTarget] = useState<{
@@ -361,6 +371,8 @@ export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStoc
 
   const TYPE_LABELS: Record<string, string> = {
     'sector_driver': '市场热点',
+    'price_anomaly': '行情异动',
+    'company_event': '公司公告',
     'geo_event': '地缘事件',
     'policy_driver': '政策驱动',
     'macro_event': '宏观事件',
@@ -377,6 +389,12 @@ export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStoc
     const withoutRepeatedOpening = steps.filter((step, index) => !(index === 0 && step.kind === 'fact'));
     return withoutRepeatedOpening.length > 0 ? withoutRepeatedOpening : steps;
   };
+  const impactStory = impactStoryId
+    ? morningReport.stories.find((story) => story.storyId === impactStoryId) || null
+    : null;
+  const impactAnalysis = impactStory
+    ? impactStory.impactAnalysis || buildFallbackImpactAnalysis(impactStory)
+    : null;
 
   // 初始化金句
   useEffect(() => {
@@ -806,9 +824,9 @@ export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStoc
         <div className="flex items-center justify-between gap-3">
           <h3 id="events-heading" className="text-base font-bold text-slate-950 flex items-center gap-2">
             <Activity className="w-4 h-4 text-indigo-600" />
-            今天发生了什么
+            今日市场动态
           </h3>
-          <div className="flex items-center rounded-xl bg-slate-100 p-1" role="group" aria-label="故事阅读模式">
+          {SHOW_STORY_MODE_SWITCH && <div className="flex items-center rounded-xl bg-slate-100 p-1" role="group" aria-label="故事阅读模式">
             {([
               ['beginner', '小白模式'],
               ['professional', '专业模式'],
@@ -830,12 +848,10 @@ export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStoc
                 {label}
               </button>
             ))}
-          </div>
+          </div>}
         </div>
         <p className="text-[10px] leading-4 text-slate-500">
-          {storyMode === 'beginner'
-            ? '用一屏看懂事件和最短逻辑'
-            : '查看数据验证、多因素驱动和反向条件'}
+          用一屏看懂事件和核心影响；想深究时可查看影响路径。
         </p>
 
         {morningReport.stories.length > 0 ? morningReport.stories.map((story) => {
@@ -872,12 +888,9 @@ export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStoc
 
               <div>
                 <h4 className="text-sm font-bold text-slate-950">{story.title}</h4>
-                {story.whySelected && (
-                  <p className="mt-1 text-[11px] leading-5 text-slate-600 flex items-start gap-1">
-                    <span className="text-indigo-600 font-bold shrink-0">为什么选中：</span>
-                    <span>{story.whySelected}</span>
-                  </p>
-                )}
+                <p className="mt-1 text-[11px] leading-5 text-slate-600">
+                  <span className="font-bold text-slate-700">事件事实：</span>{story.what}
+                </p>
                 {story.metrics.length > 0 && (
                   <div className="mt-2">
                     {storyMode === 'professional' && (
@@ -894,46 +907,27 @@ export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStoc
                 )}
               </div>
 
-              {storyMode === 'beginner' ? (
-                <div className="flex gap-2 bg-indigo-50/60 rounded-2xl p-3 border border-indigo-100/70">
-                  <BubbleAvatar size="sm" />
-                  <p className="text-xs leading-5 text-slate-700">
-                    <strong className="text-indigo-800">泡泡解读：</strong>
-                    {story.teacher.summary}
-                  </p>
-                </div>
-              ) : (
-                <>
-                  <div className="rounded-xl bg-indigo-50/60 p-3">
-                    <p className="text-[9px] font-bold text-indigo-500 mb-1">事件结论</p>
-                    <p className="text-xs leading-5 font-medium text-slate-800">{professional.conclusion}</p>
-                  </div>
-                  {professional.drivers.length > 0 && (
-                    <div className="space-y-2">
-                      <p className="text-[9px] font-bold text-slate-400">核心驱动因素</p>
-                      {professional.drivers.map((driver, index) => (
-                        <div key={`${driver.role}-${index}`} className="flex items-start gap-2">
-                          <span className={`mt-0.5 shrink-0 rounded-md px-1.5 py-0.5 text-[9px] font-bold ${
-                            driver.role === 'primary'
-                              ? 'bg-indigo-100 text-indigo-700'
-                              : driver.role === 'secondary'
-                                ? 'bg-sky-100 text-sky-700'
-                                : 'bg-violet-100 text-violet-700'
-                          }`}>
-                            {driverLabels[driver.role]}
-                          </span>
-                          <div className="min-w-0">
-                            <p className="text-[11px] font-bold text-slate-800">{driver.title}</p>
-                            <p className="text-[10px] leading-4 text-slate-600 mt-0.5">{driver.explanation}</p>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </>
+              <div className="flex gap-2 bg-indigo-50/60 rounded-2xl p-3 border border-indigo-100/70">
+                <BubbleAvatar size="sm" />
+                <p className="text-xs leading-5 text-slate-700">
+                  <strong className="text-indigo-800">{storyMode === 'beginner' ? '核心影响：' : '研究结论：'}</strong>
+                  {storyMode === 'beginner' ? story.teacher.summary : professional.conclusion}
+                </p>
+              </div>
+
+              {IMPACT_PATH_ENABLED && (
+                <button
+                  type="button"
+                  onClick={() => setImpactStoryId(story.storyId)}
+                  className="w-full flex items-center justify-between rounded-xl border border-indigo-100 bg-white px-3 py-2.5 text-[11px] font-bold text-indigo-700 transition-colors hover:bg-indigo-50"
+                >
+                  <span>查看具体影响路径</span>
+                  <ChevronRight className="h-4 w-4" />
+                </button>
               )}
 
-              {reasoningSteps.length > 0 && (
+              {/* 暂时隐藏“三步看懂 / 证据与完整逻辑”，保留代码以便随时恢复。 */}
+              {SHOW_LEGACY_INLINE_REASONING && reasoningSteps.length > 0 && (
                 <div>
                   <button
                     type="button"
@@ -941,10 +935,83 @@ export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStoc
                     aria-expanded={expanded}
                     className="w-full flex items-center justify-between text-[11px] font-bold text-slate-700 bg-slate-50 px-3 py-2.5 rounded-xl"
                   >
-                    <span>{storyMode === 'beginner' ? '为什么会这样？' : '查看完整逻辑'}</span>
+                    <span>{storyMode === 'beginner' ? '三步看懂' : '证据与完整逻辑'}</span>
                     <ChevronDown className={`w-4 h-4 transition-transform ${expanded ? 'rotate-180' : ''}`} />
                   </button>
-                  {expanded && (
+                  {expanded && storyMode === 'beginner' && (
+                    <div className="mt-2 rounded-2xl bg-slate-50 border border-slate-100 p-3 space-y-3">
+                      <p className="text-[9px] font-bold text-indigo-600">三步看懂</p>
+                      {reasoningSteps.slice(0, 3).map((step, index) => (
+                        <div key={step.id} className="flex gap-2">
+                          <div className="flex flex-col items-center">
+                            <span className="w-5 h-5 rounded-full bg-white border border-indigo-200 text-[9px] font-bold text-indigo-700 flex items-center justify-center">{index + 1}</span>
+                            {index < Math.min(reasoningSteps.length, 3) - 1 && <span className="w-px h-5 bg-indigo-200" />}
+                          </div>
+                          <p className="min-w-0 flex-1 pb-2 text-[11px] leading-5 text-slate-700">{step.text}</p>
+                        </div>
+                      ))}
+                      <p className="text-[10px] leading-4 text-amber-800 border-t border-amber-200/60 pt-2">
+                        💭 {story.teacher.uncertaintyText || story.reasoning.uncertainty}
+                      </p>
+                    </div>
+                  )}
+                  {expanded && storyMode === 'professional' && (
+                    <div className="mt-2 rounded-2xl bg-slate-50 border border-slate-100 p-3 space-y-3">
+                      {story.evidencePack?.evidenceStatus !== 'confirmed' && (
+                        <p className="text-[10px] leading-4 text-amber-800 bg-amber-50 border border-amber-100 rounded-xl px-3 py-2">
+                          当前先确认行情与关联线索；驱动关系仍待验证。
+                        </p>
+                      )}
+                      {story.reasoning.steps.length > 0 && (
+                        <div className="rounded-xl bg-white border border-slate-200 px-3 py-2.5">
+                          <p className="text-[9px] font-bold text-indigo-600 mb-1">完整因果链</p>
+                          <p className="text-[11px] leading-5 text-slate-700">
+                            {story.reasoning.steps.map((step) => step.text).join(' → ')}
+                          </p>
+                        </div>
+                      )}
+                      {[
+                        { title: '事实', items: story.reasoning.facts.length ? story.reasoning.facts : [story.what], tone: 'text-slate-800' },
+                        { title: '变化变量', items: story.reasoning.changedVariables, tone: 'text-sky-800' },
+                        { title: '传导机制', items: story.reasoning.mechanism, tone: 'text-indigo-800' },
+                        { title: '市场验证', items: story.reasoning.marketValidation, tone: 'text-emerald-800' },
+                      ].filter((section) => section.items.length > 0).map((section) => (
+                        <div key={section.title}>
+                          <p className={`text-[9px] font-bold ${section.tone}`}>{section.title}</p>
+                          <ul className="mt-1 space-y-1">
+                            {section.items.map((item) => <li key={item} className="text-[10px] leading-4 text-slate-600">• {item}</li>)}
+                          </ul>
+                        </div>
+                      ))}
+                      <div className="border-t border-slate-200 pt-3">
+                        <p className="text-[9px] font-bold text-rose-700">反证与缺口</p>
+                        <ul className="mt-1 space-y-1">
+                          {[...new Set([
+                            ...(story.reasoning.counterEvidence || []),
+                            ...(story.evidencePack?.dataGaps || []),
+                            story.reasoning.uncertainty,
+                          ])].filter(Boolean).slice(0, 3).map((item) => (
+                            <li key={item} className="text-[10px] leading-4 text-slate-600">• {item}</li>
+                          ))}
+                        </ul>
+                      </div>
+                      {(() => {
+                        const observations = [...new Set([
+                          ...story.reasoning.observationIndicators,
+                          ...professional.observationIndicators,
+                        ])].filter(Boolean).slice(0, 3);
+                        return observations.length > 0 ? (
+                          <div>
+                            <p className="text-[9px] font-bold text-indigo-700">待观察</p>
+                            <div className="flex flex-wrap gap-1.5 mt-1.5">
+                              {observations.map((item) => <span key={item} className="text-[9px] leading-4 bg-white border border-slate-200 text-slate-600 px-2 py-1 rounded-lg">{item}</span>)}
+                            </div>
+                          </div>
+                        ) : null;
+                      })()}
+                    </div>
+                  )}
+                  {false && expanded && (
                     <div className="mt-2 rounded-2xl bg-slate-50 border border-slate-100 p-3 space-y-3">
                       {(storyMode === 'beginner' ? story.reasoning.beginnerSummary : story.reasoning.professionalSummary) && (
                         <p className="text-[11px] leading-5 text-slate-700 bg-white rounded-xl px-3 py-2.5 border border-slate-100">
@@ -1114,7 +1181,8 @@ export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStoc
       </section>
 
       {/* 下方区域: 市场地图入口 */}
-      <div id="market-map-entrance-section" className="space-y-3 px-4">
+      {/* 暂时隐藏首页市场地图入口，保留代码，后续可直接恢复。 */}
+      {false && <div id="market-map-entrance-section" className="space-y-3 px-4">
 
         <div className="flex justify-between items-baseline">
           <h3 className="text-base font-bold text-gray-950">全景市场地图</h3>
@@ -1152,7 +1220,7 @@ export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStoc
             );
           })}
         </div>
-      </div>
+      </div>}
 
       {/* 今日一句话成长 */}
       <div id="growth-quote-card" className="mx-4 px-5 py-4 bg-gradient-to-r from-indigo-50 to-purple-50 border border-indigo-100 rounded-3xl shadow-sm">
@@ -1278,6 +1346,12 @@ export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStoc
           }}
         />
       )}
+
+      <ImpactAnalysisModal
+        open={IMPACT_PATH_ENABLED && Boolean(impactAnalysis)}
+        analysis={impactAnalysis}
+        onClose={() => setImpactStoryId(null)}
+      />
 
       {/* Interactive Modal Sheet for AI Morning Report Reasons */}
       <AnimatePresence>

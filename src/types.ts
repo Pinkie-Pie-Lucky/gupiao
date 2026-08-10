@@ -63,7 +63,8 @@ export interface UserProfile {
   virtualBalance: number;
 }
 
-export type MarketStoryType = 'sector_driver' | 'geo_event' | 'policy_driver' | 'macro_event';
+export type MarketStoryType = 'sector_driver' | 'price_anomaly' | 'company_event' | 'geo_event' | 'policy_driver' | 'macro_event';
+export type EvidenceStatus = 'confirmed' | 'related' | 'market_only';
 export type ReasoningStepKind = 'fact' | 'knowledge' | 'inference';
 export type ConfidenceLevel = 'high' | 'medium' | 'limited';
 
@@ -105,6 +106,7 @@ export interface MarketStoryDraft {
   metrics: MarketMetric[];
   evidenceIds: string[];
   relatedSectors: string[];
+  primaryCompany?: { name: string; symbol?: string };
   storyScore?: StoryScore;
   selectionBasis?: StorySelectionBasis;
   storyQualityScore?: number;
@@ -123,6 +125,11 @@ export interface ReasoningStep {
 export interface ReasoningChain {
   storyId: string;
   steps: ReasoningStep[];
+  facts: string[];
+  changedVariables: string[];
+  mechanism: string[];
+  marketValidation: string[];
+  observationIndicators: string[];
   uncertainty: string;
   confidenceLevel: ConfidenceLevel;
   validationStatus: 'passed' | 'limited' | 'rejected';
@@ -167,6 +174,116 @@ export interface MarketStory extends MarketStoryDraft {
   teacher: TeacherStoryContent;
   professional: ProfessionalStoryContent;
   evidence: MarketSource[];
+  evidencePack?: EventEvidencePack;
+  /**
+   * 新一代“事件影响路径”。保留 reasoning 以便通过功能开关随时回退。
+   */
+  impactAnalysis?: ImpactAnalysis;
+}
+
+export interface EventEvidencePack {
+  storyId: string;
+  storyType: MarketStoryType;
+  evidenceStatus: EvidenceStatus;
+  marketContext: {
+    marketDate: string;
+    indices: unknown[];
+    totalTurnoverAmount: number;
+    marketBreadth: { up: number; down: number; flat: number; breadthRatio: number };
+  };
+  sectorValidation: Array<{
+    sectorName: string;
+    sectorCode: string;
+    todayChangePercent: number;
+    change5d: number | null;
+    change20d: number | null;
+    turnoverChangePercent: number | null;
+    upStockRatio: number | null;
+    sampleSize: number;
+    limitUpCount: number | null;
+    leaderContribution: number | null;
+    dispersion: number | null;
+    leaders: Array<{ code: string; name: string; changePercent: number }>;
+    dataStatus: 'available' | 'partial' | 'unavailable';
+  }>;
+  companyValidation?: {
+    status: 'matched' | 'not_matched' | 'unavailable';
+    name?: string;
+    symbol?: string;
+    changePercent?: number;
+    eventCount?: number;
+    officialAnnouncements: MarketSource[];
+    officialEventMatched?: boolean;
+  };
+  sources: MarketSource[];
+  dataGaps: string[];
+}
+
+export type ImpactStoryType = 'geopolitical_event' | 'commodity_anomaly' | 'sector_anomaly';
+export type ImpactReasoningMode = 'forward' | 'reverse_then_forward';
+export type ImpactNodeType =
+  | 'event'
+  | 'candidate_cause'
+  | 'changed_variable'
+  | 'mechanism'
+  | 'commodity'
+  | 'sector'
+  | 'company'
+  | 'market_validation'
+  | 'counter_factor';
+export type ImpactKnowledgeType = 'fact' | 'theory' | 'inference' | 'hypothesis';
+export type ImpactDirection = 'positive' | 'negative' | 'mixed' | 'uncertain';
+
+export interface ImpactNode {
+  id: string;
+  type: ImpactNodeType;
+  title: string;
+  explanation: string;
+  knowledgeType: ImpactKnowledgeType;
+  direction?: ImpactDirection;
+  confidence?: number;
+  evidenceIds?: string[];
+}
+
+export interface ImpactEdge {
+  from: string;
+  to: string;
+  relation: 'causes' | 'raises' | 'reduces' | 'supports' | 'pressures' | 'offsets' | 'may_lead_to';
+  explanation: string;
+  timeHorizon?: 'immediate' | 'short_term' | 'medium_term';
+  condition?: string;
+}
+
+export interface ImpactEvidence {
+  id: string;
+  category: 'news' | 'official_announcement' | 'market' | 'commodity' | 'macro' | 'industry' | 'company';
+  statement: string;
+  sourceName: string;
+  sourceUrl?: string;
+  publishedAt?: string;
+  role: 'supports' | 'contradicts' | 'context';
+  reliability: 'primary' | 'authoritative' | 'secondary';
+}
+
+export interface ImpactAnalysis {
+  id: string;
+  storyType: ImpactStoryType;
+  reasoningMode: ImpactReasoningMode;
+  title: string;
+  trigger: ImpactNode;
+  summary: {
+    eventFact: string;
+    coreMechanism: string;
+    keyImpacts: string[];
+    conclusionLevel: 'confirmed' | 'high_probability' | 'possible' | 'unknown';
+  };
+  nodes: ImpactNode[];
+  edges: ImpactEdge[];
+  evidence: ImpactEvidence[];
+  counterEvidence: ImpactEvidence[];
+  missingEvidence: string[];
+  observationIndicators: string[];
+  version: 'impact-path-v1';
 }
 
 export type BubbleSignalType = 'trend_start' | 'trend_continue' | 'leader_driven' | 'event_driven' | 'price_only';

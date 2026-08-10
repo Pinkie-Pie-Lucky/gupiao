@@ -17,6 +17,9 @@ interface WatchlistTabProps {
   onOpenResearch: (stock: StockItem) => void;
 }
 
+// 暂时隐藏 AI 盯盘预警，保留原有展示代码，后续改为 true 即可恢复。
+const SHOW_AI_ALERTS = false;
+
 export function WatchlistTab({
   followedStocks,
   setFollowedStocks,
@@ -37,11 +40,8 @@ export function WatchlistTab({
       <div id="watchlist-header" className="px-4 pt-2">
         <h2 id="watchlist-title" className="text-2xl font-bold text-gray-950 flex items-center gap-2">
           <Star className="w-6 h-6 text-indigo-600 fill-indigo-100" />
-          我的自选盯盘
+          我的关注
         </h2>
-        <p id="watchlist-subtitle" className="text-xs text-gray-400 mt-1">
-          实时监控自选板块个股波动，AI泡泡为您专属盯盘
-        </p>
       </div>
 
       {/* Followed Stocks List */}
@@ -145,7 +145,7 @@ export function WatchlistTab({
       </div>
 
       {/* AI Smart Monitor Alerts */}
-      <div id="ai-alerts-section" className="px-4 space-y-3">
+      {SHOW_AI_ALERTS && <div id="ai-alerts-section" className="px-4 space-y-3">
         <h4 className="text-xs font-bold text-gray-400 flex items-center gap-1">
           <Bell className="w-3.5 h-3.5 text-indigo-600" />
           AI智能盯盘预警
@@ -193,7 +193,7 @@ export function WatchlistTab({
             );
           })}
         </div>
-      </div>
+      </div>}
 
       {/* Advisory Modal Panel */}
       <AnimatePresence>
