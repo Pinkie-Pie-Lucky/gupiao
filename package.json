@@ -8,6 +8,7 @@
     "build": "vite build && esbuild server.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/server.cjs",
     "start": "node dist/server.cjs",
     "test:technical-market": "node --test scripts/technical-market-agent.test.mjs",
+    "test:industry-chain-agent": "tsx --test scripts/industry-chain-agent.test.ts",
     "test:event-rules": "tsx --test scripts/event-rules.test.ts",
     "test:event-agent": "tsx --test scripts/event-agent.test.ts",
     "test:stock-sentiment": "tsx --test scripts/stock-sentiment.test.ts",

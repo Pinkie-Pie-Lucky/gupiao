@@ -2812,6 +2812,42 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
     }
   });
 
+  // GET /api/stock-industry-chain-mapping — 业务到上下游与景气指标的可审计映射；不包含实时价格事实。
+  app.get('/api/stock-industry-chain-mapping', async (req, res) => {
+    try {
+      const symbol = String(req.query.symbol || '');
+      if (!symbol) return res.status(400).json({ error: 'symbol is required' });
+      res.json(await buildIndustryChainMapping(symbol));
+    } catch (error: any) {
+      console.error('[industry-chain-mapping] query failed:', error.message);
+      res.status(503).json({ error: '产业链业务映射暂不可用', detail: safeRuntimeDataGap(error.message), dataUnavailable: true });
+    }
+  });
+
+  // GET /api/industry-chain-indicators — 已标准化的产业链指标；仅允许规则库中的行业链条。
+  app.get('/api/industry-chain-indicators', async (req, res) => {
+    try {
+      const ruleId = String(req.query.ruleId || '');
+      if (!INDUSTRY_CHAIN_RULES.some((rule) => rule.id === ruleId)) return res.status(400).json({ error: 'unknown industry-chain ruleId' });
+      res.json(await fetchIndustryChainIndicators(ruleId));
+    } catch (error: any) {
+      console.error('[industry-chain-indicators] query failed:', error.message);
+      res.status(503).json({ error: '产业链指标暂不可用', detail: safeRuntimeDataGap(error.message), dataUnavailable: true });
+    }
+  });
+
+  // GET /api/stock-agents/industry-chain — 行业与产业链 Agent；AI 只解释冻结快照。
+  app.get('/api/stock-agents/industry-chain', async (req, res) => {
+    try {
+      const symbol = String(req.query.symbol || '');
+      if (!symbol) return res.status(400).json({ error: 'symbol is required' });
+      res.json(await runIndustryChainAgent(symbol, String(req.query.refresh || '') === '1'));
+    } catch (error: any) {
+      console.error('[industry-chain-agent] query failed:', error.message);
+      res.status(503).json({ error: '行业与产业链 Agent 暂不可用', detail: safeRuntimeDataGap(error.message), dataUnavailable: true });
+    }
+  });
+
   // GET /api/stock-relative-strength — 个股相对上证指数与所属行业的同期超额收益
   app.get('/api/stock-relative-strength', async (req, res) => {
     try {
@@ -3800,6 +3836,70 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
 
   const stockEventSnapshotCache = new Map<string, { expiresAt: number; value: any }>();
 
+  async function buildIndustryEventContext(symbol: string, companyName: string) {
+    const [profileResult, industryResult] = await Promise.allSettled([fetchXueqiuProfile(symbol), fetchStockIndustryBenchmark(symbol)]);
+    const profile: any = profileResult.status === 'fulfilled' ? profileResult.value?.profile || {} : {};
+    const industry: any = industryResult.status === 'fulfilled' ? industryResult.value?.industry || null : null;
+    const contextText = [companyName, profile.main_operation_business, profile.industry, industry?.name].filter(Boolean).join(' ').toLowerCase();
+    const rules = INDUSTRY_CHAIN_RULES.filter((rule) => rule.keywords.some((keyword) => contextText.includes(keyword.toLowerCase())));
+    const terms = [...new Set([
+      String(industry?.name || '').replace(/^I\d+/, '').trim(),
+      ...rules.flatMap((rule) => rule.keywords),
+    ].filter((term) => term.length >= 3 && term !== companyName))];
+    const dataGaps = [
+      ...(industryResult.status === 'rejected' ? ['行业归属不可用，行业/政策事件仅按已匹配业务术语过滤。'] : []),
+      ...(terms.length ? [] : ['未形成可审计的行业或业务关键词集合，未接入行业/政策事件。']),
+    ];
+    return { industry, ruleIds: rules.map((rule) => rule.id), terms, dataGaps };
+  }
+
+  function buildIndustryPolicyEvents(symbol: string, newsItems: any[], context: any, companyName: string, start: Date, end: Date) {
+    const events: any[] = [];
+    const evidence: any[] = [];
+    const clusters = new Map<string, any>();
+    const policyPattern = /(政策|通知|意见|规划|条例|办法|国务院|工信部|发改委|财政部|监管)/;
+    const normalizedCompanyName = companyName.replace(/[（(].*?[）)]/g, '').trim();
+    for (const news of newsItems) {
+      const title = String(news?.title || '').trim().slice(0, 180);
+      if (!title || (normalizedCompanyName && title.includes(normalizedCompanyName)) || title.includes(symbol)) continue;
+      const matchedTerms = (context.terms || []).filter((term: string) => title.toLowerCase().includes(term.toLowerCase()));
+      if (!matchedTerms.length) continue;
+      const publishedAt = eventDate(news?.publishedAt) || null;
+      if (publishedAt && (Date.parse(publishedAt) < start.getTime() || Date.parse(publishedAt) > end.getTime() + 86_400_000)) continue;
+      const impactScope = policyPattern.test(title) ? 'policy' : 'industry';
+      // 同一主题的多条转载/跟进报道只保留一个事件簇；每条原始报道仍保留为可追溯证据。
+      const topicKey = `${impactScope}_${normalizedEventKey(title, null)}`;
+      const sourceKey = `${topicKey}_${publishedAt?.slice(0, 10) || 'current'}`;
+      const category = eventCategory(title);
+      const sourceEvidenceId = makeEvidenceId(symbol, 'industry_event_source', sourceKey, publishedAt?.slice(0, 10) || 'current');
+      const eventClusterId = makeEvidenceId(symbol, 'industry_event_cluster', topicKey, 'current');
+      const direction = eventDirection(title, category);
+      const sourceEvidence = { evidenceId: sourceEvidenceId, type: impactScope === 'policy' ? 'policy_event' : 'industry_event', title, value: JSON.stringify({ impactScope, matchedTerms, mappedRuleIds: context.ruleIds || [], eventClusterId }), period: publishedAt?.slice(0, 10), source: news?.sourceName || 'wallstreetcn', sourceUrl: news?.url || undefined, publishedAt: publishedAt || undefined, fetchedAt: new Date().toISOString(), freshness: 'delayed', verification: 'third_party' };
+      evidence.push(sourceEvidence);
+      const existing = clusters.get(eventClusterId);
+      if (existing) {
+        existing.clusterSize += 1;
+        existing.evidenceIds.push(sourceEvidenceId);
+        existing.matchedTerms = [...new Set([...existing.matchedTerms, ...matchedTerms])];
+        if (String(publishedAt || '') > String(existing.publishedAt || '')) {
+          existing.title = title;
+          existing.publishedAt = publishedAt;
+          existing.source = news?.sourceName || 'wallstreetcn';
+          existing.sourceUrl = String(news?.url || '');
+          existing.direction = direction;
+          existing.category = category;
+          existing.impactHorizon = eventImpactHorizon(category);
+          existing.status = eventStatus(title, publishedAt, category);
+        }
+        continue;
+      }
+      const item = { eventId: eventClusterId, eventClusterId, category, title, publishedAt, source: news?.sourceName || 'wallstreetcn', sourceUrl: String(news?.url || ''), verification: 'third_party', direction, impactScope, eventLayer: impactScope === 'policy' ? 'policy' : 'industry', impactHorizon: eventImpactHorizon(category), status: eventStatus(title, publishedAt, category), matchedTerms, mappedRuleIds: context.ruleIds || [], relevance: 'mapped_industry_or_business', clusterSize: 1, evidenceIds: [sourceEvidenceId] };
+      clusters.set(eventClusterId, item);
+    }
+    events.push(...clusters.values());
+    return { events, evidence };
+  }
+
   async function buildStockEventSnapshot(input: string, days = 180) {
     const symbol = normalizeAshareSymbol(input).code;
     const cacheKey = `${symbol}:${days}`;
@@ -3859,11 +3959,16 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
       if (!title.includes(symbol) && (!normalizedCompanyName || !title.includes(normalizedCompanyName))) continue;
       addEvent(news, 'news', { source: news.sourceName || 'wallstreetcn', fetchedAt: marketData.timestamp || new Date().toISOString(), freshness: 'delayed' });
     }
+    const industryContext = await buildIndustryEventContext(symbol, companyName).catch((error: any) => ({ industry: null, ruleIds: [], terms: [], dataGaps: [`行业/政策事件上下文不可用：${error.message || '未知原因'}`] }));
+    dataGaps.push(...(industryContext.dataGaps || []).map(String));
+    const industryPolicy = buildIndustryPolicyEvents(symbol, newsItems, industryContext, companyName, start, end);
+    events.push(...industryPolicy.events);
+    evidence.push(...industryPolicy.evidence);
     events.sort((left, right) => String(right.publishedAt || '').localeCompare(String(left.publishedAt || '')));
     const value = {
       symbol, period: { start: `${startDate.slice(0, 4)}-${startDate.slice(4, 6)}-${startDate.slice(6, 8)}`, end: `${endDate.slice(0, 4)}-${endDate.slice(4, 6)}-${endDate.slice(6, 8)}` },
-      events: events.slice(0, 100), evidence: evidence.slice(0, 100), metrics: { candidateEventCount: announcements.length + newsItems.length, duplicateEventCount, uniqueEventCount: events.length }, dataGaps: [...new Set(dataGaps)],
-      sourceMeta: { announcements: announcementResult.status === 'fulfilled' ? announcementResult.value.sourceMeta : null, news: marketData?.sourceMeta || null },
+      events: events.slice(0, 100), evidence: evidence.slice(0, 100), metrics: { candidateEventCount: announcements.length + newsItems.length, duplicateEventCount, uniqueEventCount: events.length, companyEventCount: events.filter((item) => item.impactScope === 'company').length, industryEventCount: industryPolicy.events.filter((item) => item.impactScope === 'industry').length, policyEventCount: industryPolicy.events.filter((item) => item.impactScope === 'policy').length }, dataGaps: [...new Set(dataGaps)],
+      sourceMeta: { announcements: announcementResult.status === 'fulfilled' ? announcementResult.value.sourceMeta : null, news: marketData?.sourceMeta || null, industryContext: { industry: industryContext.industry?.name || null, mappedRuleIds: industryContext.ruleIds || [] } },
       snapshotMeta: { generatedAt: new Date().toISOString(), source: 'live', freshness: events.length ? 'delayed' : 'stale', evidenceCount: evidence.length, eventVersion: 'stock-event-v1' },
     };
     stockEventSnapshotCache.set(cacheKey, { expiresAt: Date.now() + 5 * 60_000, value });
@@ -4121,19 +4226,22 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
     const symbol = normalizeAshareSymbol(input).code;
     const cached = stockValuationSnapshotCache.get(symbol);
     if (cached && cached.expiresAt > Date.now()) return { ...cached.value, snapshotMeta: { ...cached.value.snapshotMeta, source: 'cache', freshness: 'stale' } };
-    const [marketResult, factResult, comparisonResult] = await Promise.allSettled([
+    const [marketResult, factResult, comparisonResult, industryFinancialResult] = await Promise.allSettled([
       fetchStockValuationData(symbol),
       buildStockFactSnapshot(symbol),
       fetchStockValuationComparison(symbol),
+      buildIndustryFinancialPercentiles(symbol),
     ]);
     const dataGaps: string[] = [];
     const evidence: any[] = [];
     const marketData: any = marketResult.status === 'fulfilled' ? marketResult.value : null;
     const factSnapshot: any = factResult.status === 'fulfilled' ? factResult.value : null;
     const comparisonData: any = comparisonResult.status === 'fulfilled' ? comparisonResult.value : null;
+    const industryFinancial = buildIndustryFinancialComparison(symbol, industryFinancialResult.status === 'fulfilled' ? industryFinancialResult.value : null);
     if (!marketData) dataGaps.push(`市场估值数据不可用：${marketResult.status === 'rejected' ? marketResult.reason?.message || '未知原因' : '未知原因'}`);
     if (!factSnapshot) dataGaps.push(`财务分母数据不可用：${factResult.status === 'rejected' ? factResult.reason?.message || '未知原因' : '未知原因'}`);
     if (!comparisonData) dataGaps.push(`历史/行业估值数据不可用：${comparisonResult.status === 'rejected' ? comparisonResult.reason?.message || '未知原因' : '未知原因'}`);
+    if (industryFinancialResult.status === 'rejected') dataGaps.push(`行业财务横向比较不可用：${industryFinancialResult.reason?.message || '未知原因'}`);
 
     const market = marketData?.valuation || {};
     const latestReport = factSnapshot?.facts?.financialReports?.[0] || null;
@@ -4179,6 +4287,9 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
         evidence.push({ evidenceId, type: 'valuation_comparison', title: `行业可比分位 ${metric}`, value: peerItem.peerPercentile, period: comparisonData.sourceMeta?.fetchedAt, source: comparisonData.sourceMeta?.source || 'akshare_valuation_comparison', fetchedAt: comparisonData.sourceMeta?.fetchedAt || new Date().toISOString(), freshness: 'delayed', verification: 'third_party' });
       }
     }
+    const industryFinancialEvidenceIds = industryFinancial.evidence.map((item: any) => item.evidenceId);
+    evidence.push(...industryFinancial.evidence);
+    dataGaps.push(...industryFinancial.dataGaps.map(String));
     const comparisonStatus = Object.values(historyComparison).some((item: any) => item?.percentile !== null && item?.percentile !== undefined) || Object.values(peerComparison).some((item: any) => item?.peerPercentile !== null && item?.peerPercentile !== undefined) ? 'available' : 'unavailable';
     if (comparisonStatus === 'unavailable') dataGaps.push('历史估值分位和行业可比样本不足，不能输出相对高低判断。');
     dataGaps.push(...(comparisonData?.dataGaps || []).map(String));
@@ -4196,14 +4307,14 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
         ? { template: 'bank', preferredMultiples: ['pb', 'peDynamic'], interpretationInputs: { roeApprox, creditImpairmentToRevenue: calculationMetrics.creditImpairmentToRevenue ?? null, interestNetIncomeYoY: calculationMetrics.interestNetIncomeYoY ?? null }, excludedMultiples: ['ps', 'evEbitda', 'freeCashFlowYield'], reason: '银行优先使用 PB 与 ROE；普通企业现金流和 EV/EBITDA 口径不适用。' }
         : { template: 'non_financial', preferredMultiples: ['peDynamic', 'pb'], interpretationInputs: { revenue: financialMetrics.revenue ?? null, netProfit, adjustedNetProfit: financialMetrics.adjustedNetProfit ?? null, operatingCashFlow: financialMetrics.operatingCashFlow ?? null }, excludedMultiples: ['bank_pb_roe_framework'], reason: '普通企业首期使用 PE 与 PB；PS、EV/EBITDA、现金流收益率待取得一致口径后接入。' },
       scenarioModel,
-      comparison: { historyPercentile: historyComparison, peerComparison, status: comparisonStatus, industry: comparisonData?.industry || null, reason: comparisonStatus === 'available' ? '已提供历史/同行分位数据，但仍需结合企业类型和数据口径解释。' : '历史估值分位和行业可比样本不足。' },
+      comparison: { historyPercentile: historyComparison, peerComparison, financialIndustry: industryFinancial, status: comparisonStatus, industry: comparisonData?.industry || industryFinancial.industry || null, reason: comparisonStatus === 'available' ? '已提供历史/同行估值分位数据，但仍需结合企业类型和数据口径解释。' : '历史估值分位和行业可比估值样本不足。' },
       evidence,
-      evidenceIds: [...new Set([...marketEvidenceIds, ...financialEvidenceIds, ...comparisonEvidenceIds])],
+      evidenceIds: [...new Set([...marketEvidenceIds, ...financialEvidenceIds, ...comparisonEvidenceIds, ...industryFinancialEvidenceIds])],
       dataGaps: [...new Set(dataGaps)],
       sourceMeta: { marketValuation: marketData?.sourceMeta || null, financialBasis: factSnapshot?.snapshotMeta || null, comparison: comparisonData?.sourceMeta || null },
       snapshotMeta: { generatedAt: new Date().toISOString(), source: 'live', freshness: marketData || comparisonData ? 'delayed' : 'stale', evidenceCount: evidence.length, valuationVersion: 'stock-valuation-v3' },
     };
-    stockValuationSnapshotCache.set(symbol, { expiresAt: Date.now() + 5 * 60_000, value });
+    stockValuationSnapshotCache.set(symbol, { expiresAt: Date.now() + (industryFinancial.status === 'warming' ? 30_000 : 5 * 60_000), value });
     return value;
   }
 
@@ -4247,7 +4358,7 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
     if (snapshot.valuationStatus === 'unavailable' || !input.evidenceIds.size) {
       const opinion = fallbackValuationOpinion(snapshot, input, snapshot.valuationStatus === 'unavailable' ? '估值事实来源不可用。' : '没有可引用的估值证据，不调用 AI。');
       const value = { symbol, valuationSnapshot: snapshot, deterministicValuation: { valuationStatus: snapshot.valuationStatus, valuationFramework: snapshot.valuationFramework, multiples: snapshot.multiples, market: snapshot.market, financialBasis: snapshot.financialBasis, scenarioModel: snapshot.scenarioModel, comparison: snapshot.comparison }, opinion, agentMeta: { generatedAt: new Date().toISOString(), source: 'live', aiStatus: 'not_requested', promptVersion: 'valuation-v1', snapshotGeneratedAt: snapshot.snapshotMeta.generatedAt, valuationVersion: snapshot.snapshotMeta.valuationVersion } };
-      valuationAgentCache.set(symbol, { expiresAt: Date.now() + 15 * 60_000, value });
+      valuationAgentCache.set(symbol, { expiresAt: Date.now() + (snapshot.comparison?.financialIndustry?.status === 'warming' ? 30_000 : 15 * 60_000), value });
       return value;
     }
     let opinion: any;
@@ -4284,7 +4395,7 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
       opinion,
       agentMeta: { generatedAt: new Date().toISOString(), source: 'live', aiStatus, promptVersion: 'valuation-v1', snapshotGeneratedAt: snapshot.snapshotMeta.generatedAt, valuationVersion: snapshot.snapshotMeta.valuationVersion },
     };
-    valuationAgentCache.set(symbol, { expiresAt: Date.now() + 15 * 60_000, value });
+    valuationAgentCache.set(symbol, { expiresAt: Date.now() + (snapshot.comparison?.financialIndustry?.status === 'warming' ? 30_000 : 15 * 60_000), value });
     return value;
   }
 
@@ -4347,8 +4458,10 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
     if (eventSnapshot) {
       const activeEvents = (Array.isArray(eventSnapshot.events) ? eventSnapshot.events : []).filter((event: any) => event.status !== 'expired');
       for (const event of activeEvents.filter((item: any) => item.direction === 'negative')) {
+        const indirectIndustryOrPolicy = ['industry', 'policy'].includes(String(event.impactScope));
         const hardVeto = event.verification === 'official_verified' && ['regulatory', 'litigation'].includes(event.category);
-        risks.push(riskSnapshotItem('event', hardVeto ? 'high' : 'medium', 'triggered', event.title, hardVeto ? '官方核验的负面监管或诉讼事件。' : '活动事件被程序标记为负面。', '等待后续官方公告、执行进展或明确澄清以重新评估影响。', event.evidenceIds || [], hardVeto ? 'veto' : 'downgrade'));
+        const disposition = hardVeto ? 'veto' : indirectIndustryOrPolicy && event.verification !== 'official_verified' ? 'watch' : 'downgrade';
+        risks.push(riskSnapshotItem('event', hardVeto ? 'high' : indirectIndustryOrPolicy ? 'low' : 'medium', disposition === 'watch' ? 'watch' : 'triggered', event.title, hardVeto ? '官方核验的负面监管或诉讼事件。' : indirectIndustryOrPolicy ? '已匹配到行业或政策层负面事件，但当前为第三方来源，不能直接归因于公司。' : '活动事件被程序标记为负面。', '等待后续官方公告、执行进展或明确澄清以重新评估影响。', event.evidenceIds || [], disposition));
       }
       for (const event of activeEvents.filter((item: any) => item.status === 'unconfirmed' || item.direction === 'unknown' || item.direction === 'mixed')) {
         risks.push(riskSnapshotItem('event', 'low', 'watch', event.title, '事件尚未完全核验或方向不明确。', '获得官方核验或更明确的事件方向后重新评估。', event.evidenceIds || [], 'watch'));
@@ -4413,13 +4526,14 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
     const symbol = normalizeAshareSymbol(input).code;
     const cached = stockManagerSnapshotCache.get(symbol);
     if (cached && cached.expiresAt > Date.now()) return { ...cached.value, snapshotMeta: { ...cached.value.snapshotMeta, source: 'cache', freshness: 'stale' } };
-    const [factResult, technicalResult, eventResult, sentimentResult, valuationResult, riskResult] = await Promise.allSettled([
+    const [factResult, technicalResult, eventResult, sentimentResult, valuationResult, riskResult, industryResult] = await Promise.allSettled([
       buildStockFactSnapshot(symbol),
       buildTechnicalMarketSignals(symbol),
       buildStockEventSnapshot(symbol, 180),
       buildStockSentimentSnapshot(symbol, 30),
       buildStockValuationSnapshot(symbol),
       buildStockRiskSnapshot(symbol),
+      buildIndustryChainSnapshot(symbol),
     ]);
     const fact: any = factResult.status === 'fulfilled' ? factResult.value : null;
     const technical: any = technicalResult.status === 'fulfilled' ? technicalResult.value : null;
@@ -4427,6 +4541,7 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
     const sentiment: any = sentimentResult.status === 'fulfilled' ? sentimentResult.value : null;
     const valuation: any = valuationResult.status === 'fulfilled' ? valuationResult.value : null;
     const risk: any = riskResult.status === 'fulfilled' ? riskResult.value : null;
+    const industryChain: any = industryResult.status === 'fulfilled' ? industryResult.value : null;
     const dataGaps: string[] = [];
     const evidence: any[] = [];
     const pushSnapshot = (snapshot: any, result: PromiseSettledResult<any>, label: string) => {
@@ -4440,6 +4555,7 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
     pushSnapshot(sentiment, sentimentResult, '舆情');
     pushSnapshot(valuation, valuationResult, '估值');
     pushSnapshot(risk, riskResult, '风险');
+    pushSnapshot(industryChain, industryResult, '行业与产业链');
 
     const fundamental = fact ? buildFundamentalSignals(fact) : null;
     const positiveFundamental = (fundamental?.signals || []).filter((item: any) => ['positive', 'stable'].includes(item.status));
@@ -4449,6 +4565,7 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
     const activeEvents = (eventSnapshot?.events || []).filter((item: any) => item.status !== 'expired');
     const positiveEvents = activeEvents.filter((item: any) => item.direction === 'positive');
     const negativeEvents = activeEvents.filter((item: any) => item.direction === 'negative');
+    const industryPolicyEvents = activeEvents.filter((item: any) => ['industry', 'policy'].includes(String(item.impactScope)));
     const conflicts: any[] = [];
     if (positiveFundamental.length && triggeredStructure.length) conflicts.push(managerConflict('fundamental_technical_conflict', ['fundamental', 'technical'], 'high', '基本面存在正向/稳定信号，但技术结构失效规则已触发。', '技术结构失效条件解除，且后续交易日重新确认。', [...positiveFundamental.flatMap((item: any) => item.evidenceIds || []), ...triggeredStructure.flatMap((item: any) => item.evidenceIds || [])]));
     if (positiveEvents.length && sentiment?.eventReaction === 'divergent_reaction') conflicts.push(managerConflict('event_sentiment_reaction_conflict', ['event', 'sentiment', 'market'], 'medium', '事件证据方向为正面，但事件后行情反应出现背离。', '获得新的事件证据或后续行情窗口，确认反应是否持续背离。', [...positiveEvents.flatMap((item: any) => item.evidenceIds || []), ...(sentiment.eventReactions || []).flatMap((item: any) => item.evidenceIds || [])]));
@@ -4456,6 +4573,13 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
     const vetoes = risk?.vetoes || [];
     const watchConditions = risk?.watchConditions || [];
     const requiredConditions = [...watchConditions.map((item: any) => ({ text: item.resolutionCondition, evidenceIds: item.evidenceIds || [] }))];
+    const unverifiedIndustryPolicy = industryPolicyEvents.filter((item: any) => item.verification !== 'official_verified');
+    if (unverifiedIndustryPolicy.length) {
+      requiredConditions.push({
+        text: '行业/政策事件目前仅为第三方匹配；需以正式政策文件、公司公告或业绩披露核验传导路径后再调整公司结论。',
+        evidenceIds: unverifiedIndustryPolicy.flatMap((item: any) => item.evidenceIds || []),
+      });
+    }
     if (valuation?.comparison?.status !== 'available') requiredConditions.push({ text: '补充足够的历史估值分位或行业可比样本后，再讨论估值相对位置。', evidenceIds: valuation?.evidenceIds || [] });
     if (sentiment?.communityViewpointDisagreement === 'unavailable') requiredConditions.push({ text: '接入社区帖子/评论立场数据后，才能评估社区观点分歧。', evidenceIds: [] });
     const allCoreAvailable = Boolean(fact && technical && eventSnapshot && sentiment && valuation && risk);
@@ -4489,7 +4613,8 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
       agentOutputs: {
         fundamental: fundamental ? { signals: fundamental.signals, vetoes: fundamental.vetoes, reports: fact?.facts?.financialReports || [], financialCalculations: fact?.facts?.financialCalculations || null, businessSegments: fact?.facts?.businessSegments || null, sourceMeta: fact?.facts?.financialMeta?.sourceMeta || null, template: fundamental.template, aiStatus: 'not_requested' } : null,
         technical: technical ? { signals: technical.signals, keyLevels: technical.keyLevels, chartBars: technical.chartBars || [], structureInvalidation: technical.structureInvalidation, riskThresholds: technical.ruleSet?.riskThresholds || null, sourceMeta: technical.inputMeta?.technical?.sourceMeta || technical.snapshotMeta || null, aiStatus: 'not_requested' } : null,
-        events: eventSnapshot ? { events: activeEvents, sourceMeta: eventSnapshot.snapshotMeta || null, aiStatus: 'not_requested' } : null,
+        events: eventSnapshot ? { events: activeEvents, industryPolicyEvents, sourceMeta: eventSnapshot.snapshotMeta || null, aiStatus: 'not_requested' } : null,
+        industry: industryChain ? { status: industryChain.status, industry: industryChain.industry, financialPosition: industryChain.financialPosition, chain: industryChain.chain, events: industryChain.events, dataQuality: industryChain.dataQuality, sourceMeta: industryChain.snapshotMeta || null, aiStatus: 'not_requested' } : null,
         sentiment: sentiment ? { attention: sentiment.attention, tone: sentiment.tone, disagreement: sentiment.disagreement, eventReaction: sentiment.eventReaction, propagationQuality: sentiment.propagationQuality, sourceQuality: sentiment.sourceQuality, sourceMeta: sentiment.snapshotMeta || null, aiStatus: 'not_requested' } : null,
         valuation: valuation ? { valuationStatus: valuation.valuationStatus, multiples: valuation.multiples, comparison: valuation.comparison, scenarioModel: valuation.scenarioModel, market: valuation.market || null, financialBasis: valuation.financialBasis || null, valuationFramework: valuation.valuationFramework || null, sourceMeta: valuation.snapshotMeta || null, aiStatus: 'not_requested' } : null,
         risk: risk ? { riskLevel: risk.riskLevel, decision: risk.decision, vetoes: risk.vetoes, risks: risk.risks, watchConditions: risk.watchConditions, sourceMeta: risk.snapshotMeta || null, aiStatus: 'not_requested' } : null,
@@ -4591,7 +4716,7 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
   }
 
   function normalizeCioModuleExplanations(items: unknown, evidenceSet: Set<string>) {
-    const validModules = new Set(['fundamental', 'technical', 'events', 'sentiment', 'valuation', 'risk']);
+    const validModules = new Set(['fundamental', 'technical', 'events', 'sentiment', 'valuation', 'risk', 'industry']);
     if (!Array.isArray(items)) return {};
     const result: Record<string, any> = {};
     for (const item of items.slice(0, 6)) {
@@ -5179,8 +5304,11 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
 
   let marketEnvironmentCache: { expiresAt: number; value: any } | null = null;
   const stockIndustryBenchmarkCache = new Map<string, { expiresAt: number; value: any }>();
-  type IndustryFinancialJob = { startedAt: string; total: number; processed: number; failed: number; status: 'warming' | 'ready' | 'failed'; records: any[]; result?: any; error?: string; promise?: Promise<void> };
+  type IndustryFinancialRecord = { symbol: string; name: string; template: 'bank' | 'non_financial'; reports: any[]; source: string };
+  type IndustryFinancialJob = { startedAt: string; expiresAt: number; total: number; processed: number; failed: number; status: 'warming' | 'ready' | 'failed'; target: any; records: IndustryFinancialRecord[]; result?: any; error?: string; promise?: Promise<void> };
   const industryFinancialJobs = new Map<string, IndustryFinancialJob>();
+  const industryMemberFinancialCache = new Map<string, { expiresAt: number; value: any }>();
+  const INDUSTRY_FINANCIAL_CACHE_TTL_MS = 24 * 60 * 60_000;
 
   function percentile(values: number[], value: number) {
     if (!values.length) return null;
@@ -5195,50 +5323,74 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
     return lower === upper ? ordered[lower] : ordered[lower] + (ordered[upper] - ordered[lower]) * (position - lower);
   }
 
+  function calculateFinancialMetricsForPeriod(financial: any, period: string | null) {
+    if (!period || !Array.isArray(financial?.reports)) return null;
+    const selected = financial.reports.find((report: any) => report?.period === period);
+    if (!selected) return null;
+    const reports = [selected, ...financial.reports.filter((report: any) => report !== selected)];
+    return calculateFinancialMetrics(reports, financial.template === 'bank' ? 'bank' : 'non_financial', financial.sourceMeta?.source || 'ths_financial_statements');
+  }
+
   function buildIndustryFinancialResult(symbol: string, industry: any, target: any, job: IndustryFinancialJob) {
     const targetTemplate = target?.template === 'bank' ? 'bank' : 'non_financial';
     const targetPeriod = target?.reports?.[0]?.period || null;
-    const peers = job.records.filter((record) => record.symbol !== symbol && record.template === targetTemplate && record.period === targetPeriod);
-    const metrics = target?.calculations?.metrics || {};
-    const definitions: Record<string, { label: string; value: any }> = {
-      revenueYoY: { label: '营收同比', value: metrics.revenueYoY }, netMargin: { label: '净利率', value: metrics.netMargin },
-      roeApprox: { label: 'ROE（近似）', value: metrics.roeApprox }, assetLiabilityRatio: { label: '资产负债率', value: metrics.assetLiabilityRatio },
-      cashConversion: { label: '经营现金流/净利润', value: metrics.cashConversion },
-    };
+    const targetCalculation = calculateFinancialMetricsForPeriod(target, targetPeriod);
+    const aligned = job.records.map((record) => ({ record, calculation: calculateFinancialMetricsForPeriod(record, targetPeriod) }));
+    const peers = aligned.filter(({ record, calculation }) => record.symbol !== symbol && record.template === targetTemplate && calculation);
+    const metrics: Record<string, any> = targetCalculation?.metrics || {};
+    const definitions: Record<string, { label: string; value: any; rankDirection: 'higher_better' | 'lower_better' | 'neutral' }> = targetTemplate === 'bank'
+      ? {
+        revenueYoY: { label: '营业收入同比', value: metrics.revenueYoY, rankDirection: 'higher_better' }, netProfitYoY: { label: '净利润同比', value: metrics.netProfitYoY, rankDirection: 'higher_better' },
+        roeApprox: { label: 'ROE（近似）', value: metrics.roeApprox, rankDirection: 'higher_better' }, assetYoY: { label: '资产同比', value: metrics.assetYoY, rankDirection: 'higher_better' },
+        loanYoY: { label: '贷款同比', value: metrics.loanYoY, rankDirection: 'higher_better' }, depositYoY: { label: '存款同比', value: metrics.depositYoY, rankDirection: 'higher_better' },
+        creditImpairmentToRevenue: { label: '信用减值/营业收入', value: metrics.creditImpairmentToRevenue, rankDirection: 'lower_better' },
+      }
+      : {
+        revenueYoY: { label: '营收同比', value: metrics.revenueYoY, rankDirection: 'higher_better' }, netProfitYoY: { label: '净利润同比', value: metrics.netProfitYoY, rankDirection: 'higher_better' },
+        grossMargin: { label: '毛利率', value: metrics.grossMargin, rankDirection: 'higher_better' }, netMargin: { label: '净利率', value: metrics.netMargin, rankDirection: 'higher_better' },
+        roeApprox: { label: 'ROE（近似）', value: metrics.roeApprox, rankDirection: 'higher_better' }, roic: { label: 'ROIC（近似）', value: metrics.roic, rankDirection: 'higher_better' },
+        assetLiabilityRatio: { label: '资产负债率', value: metrics.assetLiabilityRatio, rankDirection: 'lower_better' }, cashConversion: { label: '经营现金流/净利润', value: metrics.cashConversion, rankDirection: 'higher_better' },
+        accountsReceivableDays: { label: '应收周转天数', value: metrics.accountsReceivableDays, rankDirection: 'lower_better' }, inventoryDays: { label: '存货周转天数', value: metrics.inventoryDays, rankDirection: 'lower_better' },
+        interestCoverage: { label: '利息保障倍数', value: metrics.interestCoverage, rankDirection: 'higher_better' }, freeCashFlow: { label: '自由现金流', value: metrics.freeCashFlow, rankDirection: 'higher_better' },
+      };
     const output: any[] = [];
-    const exclusions: Record<string, number> = { missing_report: job.failed, different_template: job.records.filter((record) => record.template !== targetTemplate).length, different_period: job.records.filter((record) => record.template === targetTemplate && record.period !== targetPeriod).length, outlier: 0 };
+    const exclusions: Record<string, number> = { fetch_failed: job.failed, different_template: job.records.filter((record) => record.template !== targetTemplate).length, missing_target_period: aligned.filter(({ record, calculation }) => record.template === targetTemplate && !calculation).length, outlier: 0 };
     for (const [key, definition] of Object.entries(definitions)) {
       const targetValue = finiteNumber(definition.value);
-      const raw = peers.map((record) => finiteNumber(record.metrics?.[key])).filter((value): value is number => value !== null);
+      const raw = peers.map(({ calculation }) => finiteNumber(calculation?.metrics?.[key])).filter((value): value is number => value !== null);
       const q1 = quartile(raw, 0.25); const q3 = quartile(raw, 0.75); const iqr = q1 !== null && q3 !== null ? q3 - q1 : null;
       const values = iqr !== null ? raw.filter((value) => value >= q1! - 3 * iqr && value <= q3! + 3 * iqr) : raw;
       exclusions.outlier += raw.length - values.length;
-      output.push({ key, label: definition.label, value: targetValue, median: quartile(values, 0.5), percentile: targetValue === null || values.length < 10 ? null : percentile(values, targetValue), sampleSize: values.length, status: targetValue === null || values.length < 10 ? 'data_insufficient' : 'available' });
+      output.push({ key, label: definition.label, value: targetValue, median: quartile(values, 0.5), percentile: targetValue === null || values.length < 10 ? null : percentile(values, targetValue), rankDirection: definition.rankDirection, sampleSize: values.length, excludedOutliers: raw.length - values.length, status: targetValue === null || values.length < 10 ? 'data_insufficient' : 'available' });
     }
-    return { symbol, industry: { name: industry.name, code: industry.code, classification: industry.classification, memberCount: industry.memberCount }, period: targetPeriod, template: targetTemplate, metrics: output, coverage: { totalMembers: job.total, processed: job.processed, successful: job.records.length, failed: job.failed, comparable: peers.length, exclusions }, status: 'ready', dataGaps: output.some((item) => item.status !== 'available') ? ['行业可比样本不足 10 家、报告期未对齐或指标缺失时，不显示分位数。'] : [], snapshotMeta: { generatedAt: new Date().toISOString(), source: 'ths_financial_statements', freshness: 'delayed', confidence: 'market' } };
+    const membershipSource = industry.classification === '同花顺行业' ? 'ths_industry_members' : 'baostock_industry_members';
+    return { symbol, industry: { name: industry.name, code: industry.code, classification: industry.classification, memberCount: industry.memberCount }, period: targetPeriod, template: targetTemplate, metrics: output, coverage: { totalMembers: job.total, processed: job.processed, successful: job.records.length, failed: job.failed, comparable: peers.length, exclusions }, status: 'ready', dataGaps: [...new Set([...(targetCalculation ? [] : ['目标股票缺少当前报告期的可比财务数据。']), ...(output.some((item) => item.status !== 'available') ? ['行业可比样本不足 10 家、报告期未对齐或指标缺失时，不显示分位数。'] : [])])], snapshotMeta: { generatedAt: new Date().toISOString(), source: `ths_financial_statements + ${membershipSource}`, freshness: 'delayed', confidence: 'market', membershipAsOf: industry.asOf || null, cacheExpiresAt: new Date(job.expiresAt).toISOString() } };
   }
 
-  function startIndustryFinancialWarmup(industry: any) {
+  function startIndustryFinancialWarmup(industry: any, target: any) {
     const key = String(industry?.code || industry?.name || 'unknown');
     const existing = industryFinancialJobs.get(key);
-    if (existing && existing.status !== 'failed') return existing;
+    if (existing && existing.status !== 'failed' && existing.expiresAt > Date.now()) return existing;
     const members = Array.isArray(industry?.members) ? industry.members : [];
-    const job: IndustryFinancialJob = { startedAt: new Date().toISOString(), total: members.length, processed: 0, failed: 0, status: 'warming', records: [] };
+    const job: IndustryFinancialJob = { startedAt: new Date().toISOString(), expiresAt: Date.now() + INDUSTRY_FINANCIAL_CACHE_TTL_MS, total: members.length, processed: 0, failed: 0, status: 'warming', target, records: [] };
     job.promise = (async () => {
       let cursor = 0;
       const worker = async () => {
         while (cursor < members.length) {
           const member = members[cursor++];
           try {
-            const financial = await fetchFinancialDataWithFallback(String(member.symbol));
+            const memberSymbol = String(member.symbol);
+            const cached = industryMemberFinancialCache.get(memberSymbol);
+            const financial = cached && cached.expiresAt > Date.now() ? cached.value : await fetchFinancialDataWithFallback(memberSymbol);
+            if (!cached || cached.expiresAt <= Date.now()) industryMemberFinancialCache.set(memberSymbol, { expiresAt: Date.now() + INDUSTRY_FINANCIAL_CACHE_TTL_MS, value: financial });
             const latest = financial?.reports?.[0];
             if (!latest?.period) throw new Error('missing latest report');
-            job.records.push({ symbol: String(member.symbol), name: member.name, template: financial.template, period: latest.period, metrics: financial.calculations?.metrics || {} });
+            job.records.push({ symbol: memberSymbol, name: member.name, template: financial.template === 'bank' ? 'bank' : 'non_financial', reports: financial.reports, source: financial.sourceMeta?.source || 'unknown' });
           } catch { job.failed += 1; }
           finally { job.processed += 1; }
         }
       };
-      await Promise.all([worker(), worker()]);
+      await Promise.all([worker(), worker(), worker()]);
       job.status = 'ready';
     })().catch((error: any) => { job.status = 'failed'; job.error = error?.message || 'industry financial warmup failed'; });
     industryFinancialJobs.set(key, job);
@@ -5247,13 +5399,40 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
 
   async function buildIndustryFinancialPercentiles(input: string) {
     const symbol = normalizeAshareSymbol(input).code;
-    const [industrySnapshot, target] = await Promise.all([fetchStockIndustryBenchmark(symbol), fetchFinancialDataWithFallback(symbol)]);
+    const industrySnapshot = await fetchStockIndustryBenchmark(symbol);
     if (!industrySnapshot.industry?.code || !Array.isArray(industrySnapshot.industry?.members) || !industrySnapshot.industry.members.length) {
-      return { symbol, industry: { name: industrySnapshot.industry?.name || '未分类', code: industrySnapshot.industry?.code || null, memberCount: industrySnapshot.industry?.memberCount || 0 }, status: 'unavailable', period: target?.reports?.[0]?.period || null, coverage: { totalMembers: 0, processed: 0, successful: 0, failed: 0 }, metrics: [], dataGaps: ['当前未获取到同花顺全量行业成员快照；不会用证监会行业名称或空样本计算行业分位。'], snapshotMeta: { generatedAt: new Date().toISOString(), source: industrySnapshot.snapshotMeta?.source || 'unknown', freshness: 'delayed', confidence: 'limited' } };
+      return { symbol, industry: { name: industrySnapshot.industry?.name || '未分类', code: industrySnapshot.industry?.code || null, classification: industrySnapshot.industry?.classification || null, memberCount: industrySnapshot.industry?.memberCount || 0 }, status: 'unavailable', period: null, coverage: { totalMembers: 0, processed: 0, successful: 0, failed: 0 }, metrics: [], dataGaps: ['当前未获取到同一行业口径的全量成员快照；不会用空样本或混合行业口径计算行业分位。'], snapshotMeta: { generatedAt: new Date().toISOString(), source: industrySnapshot.sourceMeta?.mappingSource || 'unknown', freshness: 'delayed', confidence: 'limited' } };
     }
-    const job = startIndustryFinancialWarmup(industrySnapshot.industry);
-    if (job.status === 'ready') return job.result = buildIndustryFinancialResult(symbol, industrySnapshot.industry, target, job);
-    return { symbol, industry: { name: industrySnapshot.industry.name, code: industrySnapshot.industry.code, memberCount: industrySnapshot.industry.memberCount }, status: job.status, period: target?.reports?.[0]?.period || null, coverage: { totalMembers: job.total, processed: job.processed, successful: job.records.length, failed: job.failed }, metrics: [], dataGaps: ['行业成员财务快照正在后台预热；只使用完成同报告期对齐与异常值处理后的样本。'], snapshotMeta: { generatedAt: new Date().toISOString(), source: 'ths_financial_statements', freshness: 'delayed', confidence: 'market' } };
+    const jobKey = String(industrySnapshot.industry.code || industrySnapshot.industry.name || 'unknown');
+    const existing = industryFinancialJobs.get(jobKey);
+    const job = existing && existing.status !== 'failed' && existing.expiresAt > Date.now() ? existing : startIndustryFinancialWarmup(industrySnapshot.industry, await fetchFinancialDataWithFallback(symbol));
+    if (job.status === 'ready') return job.result = buildIndustryFinancialResult(symbol, industrySnapshot.industry, job.target, job);
+    return { symbol, industry: { name: industrySnapshot.industry.name, code: industrySnapshot.industry.code, classification: industrySnapshot.industry.classification, memberCount: industrySnapshot.industry.memberCount }, status: job.status, period: job.target?.reports?.[0]?.period || null, coverage: { totalMembers: job.total, processed: job.processed, successful: job.records.length, failed: job.failed }, metrics: [], dataGaps: ['行业成员财务快照正在后台预热；只使用完成同报告期对齐与异常值处理后的样本。'], snapshotMeta: { generatedAt: new Date().toISOString(), source: `ths_financial_statements + ${industrySnapshot.sourceMeta?.mappingSource || 'industry_members'}`, freshness: 'delayed', confidence: 'market' } };
+  }
+
+  function buildIndustryFinancialComparison(symbol: string, result: any) {
+    const base = {
+      status: result?.status === 'ready' ? 'available' : result?.status === 'warming' ? 'warming' : 'unavailable',
+      industry: result?.industry || null,
+      period: result?.period || null,
+      template: result?.template || null,
+      coverage: result?.coverage || null,
+      sourceMeta: result?.snapshotMeta || null,
+    };
+    if (result?.status !== 'ready') {
+      return { ...base, items: [], evidence: [], dataGaps: result?.dataGaps || ['行业财务分位暂不可用。'] };
+    }
+    const items = (Array.isArray(result.metrics) ? result.metrics : []).filter((item: any) => item?.status === 'available' && finiteNumber(item?.percentile) !== null).map((item: any) => {
+      const rawPercentile = Number(item.percentile);
+      const comparisonPercentile = item.rankDirection === 'lower_better' ? 1 - rawPercentile : rawPercentile;
+      const evidenceId = makeEvidenceId(symbol, 'industry_financial_percentile', String(item.key), result.period || 'current');
+      return { key: item.key, label: item.label, value: item.value, median: item.median, rawPercentile, comparisonPercentile, rankDirection: item.rankDirection || 'neutral', sampleSize: item.sampleSize, evidenceId };
+    });
+    const evidence = items.map((item: any) => ({ evidenceId: item.evidenceId, type: 'industry_financial_comparison', title: `行业财务分位 ${item.label}`, value: JSON.stringify({ value: item.value, median: item.median, rawPercentile: item.rawPercentile, comparisonPercentile: item.comparisonPercentile, rankDirection: item.rankDirection, sampleSize: item.sampleSize }), period: result.period, source: result.snapshotMeta?.source || 'industry_financial_percentiles', fetchedAt: result.snapshotMeta?.generatedAt || new Date().toISOString(), freshness: result.snapshotMeta?.freshness || 'delayed', verification: 'third_party' }));
+    const dataGaps = [...(result.dataGaps || [])];
+    const unavailable = (Array.isArray(result.metrics) ? result.metrics : []).filter((item: any) => item?.status !== 'available').map((item: any) => String(item.label || item.key));
+    if (unavailable.length) dataGaps.push(`行业横向比较未覆盖：${unavailable.join('、')}。`);
+    return { ...base, items, evidence, dataGaps: [...new Set(dataGaps)] };
   }
   const stockRelativeStrengthCache = new Map<string, { expiresAt: number; value: any }>();
   const technicalMarketSignalCache = new Map<string, { expiresAt: number; value: any }>();
@@ -5347,9 +5526,9 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
     ];
     if (technical) evidence.push(...['change5d', 'change20d', 'change60d', 'trend', 'macdHistogram', 'annualizedVolatility20d', 'maxDrawdown20d'].map((key) => ({ evidenceId: makeEvidenceId(symbol, 'industry_benchmark', key, period), type: 'industry', title: `${payload.industry.name} ${key}`, value: String(technical.metrics[key]), period, source: payload.sourceMeta.benchmarkSource, fetchedAt: payload.sourceMeta.fetchedAt, freshness: 'delayed', verification: 'third_party' })));
     const value = {
-      symbol, industry: payload.industry, benchmark: technical ? { technical, sourceMeta: payload.sourceMeta } : null, evidence,
+      symbol, industry: payload.industry, benchmark: technical ? { technical, sourceMeta: payload.sourceMeta } : null, sourceMeta: payload.sourceMeta || null, evidence,
       dataGaps: [...new Set([...(payload.dataGaps || []), technical ? '行业归属和基准采用同花顺行业口径；后续相对强弱计算需与个股日线同交易日对齐。' : '当前无法取得同花顺行业指数，因此不得输出相对行业强弱。'])],
-      snapshotMeta: { generatedAt: new Date().toISOString(), source: 'live', freshness: 'delayed', evidenceCount: evidence.length },
+      snapshotMeta: { generatedAt: new Date().toISOString(), source: payload.sourceMeta?.mappingSource || 'live', freshness: 'delayed', evidenceCount: evidence.length },
     };
     stockIndustryBenchmarkCache.set(symbol, { expiresAt: Date.now() + 24 * 60 * 60_000, value });
     return value;
@@ -5659,6 +5838,53 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
   }
 
   const stockFactSnapshotCache = new Map<string, { expiresAt: number; value: any }>();
+  const stockIndustryChainMappingCache = new Map<string, { expiresAt: number; value: any }>();
+  const industryChainIndicatorCache = new Map<string, { expiresAt: number; value: any }>();
+  const stockIndustryChainSnapshotCache = new Map<string, { expiresAt: number; value: any }>();
+  const industryChainAgentCache = new Map<string, { expiresAt: number; value: any }>();
+
+  const INDUSTRY_CHAIN_RULES = [
+    {
+      id: 'ai_software', label: '人工智能软件与平台', keywords: ['人工智能', '大模型', '语音', '智能交互', '开放平台', '企业 ai', '软件和信息技术服务', '科大讯飞'],
+      upstream: [{ name: 'AI 加速芯片与服务器', relation: '算力基础设施', dataIndicator: 'AI 服务器出货/算力供给' }, { name: '云计算与数据中心', relation: '模型训练与推理资源', dataIndicator: '云服务支出/数据中心资本开支' }],
+      downstream: [{ name: '教育与办公', relation: '智能化应用需求', dataIndicator: '教育信息化招投标/企业软件支出' }, { name: '医疗、汽车与公共服务', relation: '行业解决方案需求', dataIndicator: '行业数字化投资/项目落地' }],
+      indicators: [{ name: '企业 IT 与云服务支出', direction: '需求', frequency: '季度/年度' }, { name: 'AI 服务器出货与算力供给', direction: '供给与成本', frequency: '月度/季度' }, { name: '行业数字化项目中标与落地', direction: '需求验证', frequency: '事件/季度' }],
+    },
+    {
+      id: 'semiconductor', label: '半导体与芯片', keywords: ['半导体', '芯片', '集成电路', '晶圆', '存储', '光刻'],
+      upstream: [{ name: '硅片、光刻胶与电子特气', relation: '制造材料', dataIndicator: '材料价格/供给周期' }, { name: '半导体设备', relation: '产能与工艺投入', dataIndicator: '设备订单/资本开支' }],
+      downstream: [{ name: '消费电子、服务器与通信设备', relation: '芯片需求', dataIndicator: '终端出货/库存周期' }, { name: '汽车电子与工业控制', relation: '结构性需求', dataIndicator: '汽车产量/工业投资' }],
+      indicators: [{ name: '晶圆代工稼动率与库存', direction: '景气', frequency: '月度/季度' }, { name: '终端电子与服务器出货', direction: '需求', frequency: '月度/季度' }, { name: '半导体设备订单与资本开支', direction: '供给', frequency: '季度' }],
+    },
+    {
+      id: 'power_battery', label: '动力电池与储能', keywords: ['动力电池', '锂电', '储能', '电池材料', '正极', '负极'],
+      upstream: [{ name: '碳酸锂、镍、钴与石墨', relation: '关键原材料', dataIndicator: '现货/期货价格与库存' }, { name: '电解液、隔膜与铜箔', relation: '电池材料', dataIndicator: '材料价格/开工率' }],
+      downstream: [{ name: '新能源汽车', relation: '动力电池装机需求', dataIndicator: '新能源车销量/电池装机量' }, { name: '电力储能', relation: '储能电池需求', dataIndicator: '储能招标/装机量' }],
+      indicators: [{ name: '碳酸锂及材料价格', direction: '成本', frequency: '日度/周度' }, { name: '新能源车销量与装机量', direction: '需求', frequency: '月度' }, { name: '电池库存与开工率', direction: '供需', frequency: '月度' }],
+    },
+    {
+      id: 'photovoltaic', label: '光伏产业链', keywords: ['光伏', '硅料', '硅片', '电池片', '组件', '逆变器'],
+      upstream: [{ name: '多晶硅与工业硅', relation: '核心原材料', dataIndicator: '硅料/工业硅价格与库存' }, { name: '玻璃、胶膜与银浆', relation: '辅材成本', dataIndicator: '辅材价格与开工率' }],
+      downstream: [{ name: '集中式与分布式电站', relation: '组件装机需求', dataIndicator: '新增光伏装机/招标规模' }, { name: '海外市场', relation: '出口与项目需求', dataIndicator: '组件出口/海外装机' }],
+      indicators: [{ name: '硅料、硅片、组件价格', direction: '价格与利润', frequency: '周度' }, { name: '光伏新增装机', direction: '需求', frequency: '月度' }, { name: '产业链库存与开工率', direction: '供需', frequency: '周度/月度' }],
+    },
+    {
+      id: 'consumer_electronics', label: '消费电子', keywords: ['消费电子', '智能手机', '可穿戴', '显示', '面板', '智能硬件'],
+      upstream: [{ name: '面板、存储与元器件', relation: '核心零部件', dataIndicator: '面板/存储价格与库存' }, { name: '代工与模组', relation: '制造供给', dataIndicator: '开工率/订单能见度' }],
+      downstream: [{ name: '智能手机、PC 与可穿戴终端', relation: '终端需求', dataIndicator: '终端出货量/渠道库存' }],
+      indicators: [{ name: '手机、PC 与可穿戴出货', direction: '需求', frequency: '月度/季度' }, { name: '面板与存储价格', direction: '成本与库存', frequency: '周度/月度' }, { name: '渠道库存', direction: '去库进度', frequency: '月度/季度' }],
+    },
+  ] as const;
+
+  async function fetchIndustryChainIndicators(ruleId: string) {
+    const cached = industryChainIndicatorCache.get(ruleId);
+    if (cached && cached.expiresAt > Date.now()) return { ...cached.value, sourceMeta: { ...cached.value.sourceMeta, source: 'cache', freshness: 'stale' } };
+    const invocation = resolvePythonInvocation('industry_chain_indicators.py', [ruleId]);
+    const { stdout } = await execFileAsync(invocation.command, invocation.args, { timeout: 90_000, windowsHide: true, maxBuffer: 2 * 1024 * 1024, env: pythonChildEnv() });
+    const value = JSON.parse(stdout);
+    industryChainIndicatorCache.set(ruleId, { expiresAt: Date.now() + 6 * 60 * 60_000, value });
+    return value;
+  }
 
   function makeEvidenceId(symbol: string, type: string, key: string, period = 'current') {
     return `${type}:${symbol}:${key}:${period}`.replace(/[^a-zA-Z0-9:_-]/g, '_');
@@ -5751,10 +5977,147 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
     return value;
   }
 
+  async function buildIndustryChainMapping(input: string) {
+    const symbol = normalizeAshareSymbol(input).code;
+    const cached = stockIndustryChainMappingCache.get(symbol);
+    if (cached && cached.expiresAt > Date.now()) return { ...cached.value, snapshotMeta: { ...cached.value.snapshotMeta, source: 'cache', freshness: 'stale' } };
+    const snapshot = await buildStockFactSnapshot(symbol);
+    const profile = snapshot.company?.profile || {};
+    const segmentNames = (snapshot.facts?.businessSegments?.segmentSets || []).flatMap((set: any) => (set?.items || []).map((item: any) => String(item?.name || ''))).filter(Boolean);
+    const businessText = [snapshot.company?.name, profile.main_operation_business, profile.industry, profile.org_name_cn, ...segmentNames].filter(Boolean).join(' ').toLowerCase();
+    const businessEvidenceIds = (snapshot.evidence || []).filter((item: any) => item?.type === 'industry' || String(item?.evidenceId || '').startsWith('business_segment:')).map((item: any) => String(item.evidenceId));
+    const matchedRules = INDUSTRY_CHAIN_RULES.filter((rule) => rule.keywords.some((keyword) => businessText.includes(keyword.toLowerCase())));
+    const evidence = matchedRules.map((rule) => ({ evidenceId: makeEvidenceId(symbol, 'industry_chain_mapping', rule.id), type: 'industry_chain_mapping', title: `产业链业务映射 ${rule.label}`, value: JSON.stringify({ ruleId: rule.id, matchedKeywords: rule.keywords.filter((keyword) => businessText.includes(keyword.toLowerCase())) }), source: 'rule_based_business_mapping', fetchedAt: new Date().toISOString(), freshness: 'delayed', verification: 'derived' }));
+    const mappings = matchedRules.map((rule) => ({ ruleId: rule.id, label: rule.label, matchedKeywords: rule.keywords.filter((keyword) => businessText.includes(keyword.toLowerCase())), upstream: rule.upstream, downstream: rule.downstream, indicators: rule.indicators, evidenceIds: [...new Set([...businessEvidenceIds, makeEvidenceId(symbol, 'industry_chain_mapping', rule.id)])] }));
+    const indicatorResults = await Promise.allSettled(mappings.map((mapping) => fetchIndustryChainIndicators(mapping.ruleId)));
+    const mappingsWithData = mappings.map((mapping, index) => {
+      const result = indicatorResults[index];
+      const chainData = result.status === 'fulfilled' ? result.value : null;
+      const indicatorEvidence = (chainData?.indicators || []).map((item: any) => ({ evidenceId: makeEvidenceId(symbol, 'industry_chain_indicator', `${mapping.ruleId}_${item.key}`, item.asOf || 'current'), type: 'industry_chain_indicator', title: `${mapping.label} ${item.label}`, value: JSON.stringify({ value: item.value, unit: item.unit, change: item.change ?? null, yoy: item.yoy ?? null, basisRate: item.basisRate ?? null }), period: item.asOf || null, source: item.source || chainData?.sourceMeta?.source || 'unknown', fetchedAt: chainData?.sourceMeta?.fetchedAt || new Date().toISOString(), freshness: chainData?.sourceMeta?.freshness || 'delayed', verification: 'third_party' }));
+      evidence.push(...indicatorEvidence);
+      return { ...mapping, chainData: { status: chainData?.status || 'unavailable', indicators: chainData?.indicators || [], dataGaps: chainData?.dataGaps || [result.status === 'rejected' ? `产业链数据请求失败：${result.reason?.message || '未知原因'}` : '产业链数据暂不可用。'], sourceMeta: chainData?.sourceMeta || null, evidenceIds: indicatorEvidence.map((item: any) => item.evidenceId) } };
+    });
+    const dataGaps = [
+      ...(businessText ? [] : ['缺少主营业务描述和可用分业务表格，无法建立产业链映射。']),
+      ...(mappings.length ? [] : ['未命中高置信业务映射规则；需人工补充公司业务标签后再关联上下游。']),
+      ...mappingsWithData.flatMap((mapping) => mapping.chainData.dataGaps || []),
+    ];
+    const value = { symbol, company: { name: snapshot.company?.name || symbol, businessContext: { mainOperation: profile.main_operation_business || null, industry: profile.industry || null, segmentNames } }, status: mappingsWithData.length ? 'mapped' : businessText ? 'partial' : 'unavailable', mappingVersion: 'industry-chain-mapping-v2', mappings: mappingsWithData, evidence, evidenceIds: evidence.map((item) => item.evidenceId), dataGaps: [...new Set(dataGaps)], snapshotMeta: { generatedAt: new Date().toISOString(), source: 'rule_based_business_mapping + akshare_public_industry_chain', freshness: 'delayed', confidence: mappingsWithData.length ? 'limited' : 'low', mappingRequiresMarketData: false } };
+    stockIndustryChainMappingCache.set(symbol, { expiresAt: Date.now() + 24 * 60 * 60_000, value });
+    return value;
+  }
+
+  function industryPercentileStatus(metric: any) {
+    const percentile = finiteNumber(metric?.percentile);
+    if (percentile === null) return 'data_insufficient';
+    if (percentile >= 0.75) return 'upper_quartile';
+    if (percentile <= 0.25) return 'lower_quartile';
+    return 'middle_range';
+  }
+
+  async function buildIndustryChainSnapshot(input: string) {
+    const symbol = normalizeAshareSymbol(input).code;
+    const cached = stockIndustryChainSnapshotCache.get(symbol);
+    if (cached && cached.expiresAt > Date.now()) return { ...cached.value, snapshotMeta: { ...cached.value.snapshotMeta, source: 'cache', freshness: 'stale' } };
+    const [benchmarkResult, financialResult, mappingResult, eventResult] = await Promise.allSettled([
+      fetchStockIndustryBenchmark(symbol),
+      buildIndustryFinancialPercentiles(symbol),
+      buildIndustryChainMapping(symbol),
+      buildStockEventSnapshot(symbol, 180),
+    ]);
+    const benchmark: any = benchmarkResult.status === 'fulfilled' ? benchmarkResult.value : null;
+    const financial: any = financialResult.status === 'fulfilled' ? financialResult.value : null;
+    const mapping: any = mappingResult.status === 'fulfilled' ? mappingResult.value : null;
+    const eventSnapshot: any = eventResult.status === 'fulfilled' ? eventResult.value : null;
+    const dataGaps: string[] = [];
+    for (const [name, result] of [['行业归属', benchmarkResult], ['行业财务分位', financialResult], ['产业链映射', mappingResult], ['行业与政策事件', eventResult]] as const) {
+      if (result.status === 'rejected') dataGaps.push(`${name}不可用：${safeRuntimeDataGap(result.reason?.message || '未知原因')}`);
+    }
+    dataGaps.push(...(financial?.dataGaps || []).map(String), ...(mapping?.dataGaps || []).map(String), ...(eventSnapshot?.dataGaps || []).map(String));
+    const financialMetrics = (financial?.metrics || []).map((metric: any) => ({ ...metric, position: industryPercentileStatus(metric) }));
+    const financialEvidence = financialMetrics.filter((metric: any) => metric.status === 'available').map((metric: any) => ({
+      evidenceId: makeEvidenceId(symbol, 'industry_financial_percentile', metric.key, financial?.period || 'current'), type: 'industry_financial_percentile', title: `${financial?.industry?.name || '行业'} ${metric.label} 分位`, value: JSON.stringify({ value: metric.value, median: metric.median, percentile: metric.percentile, sampleSize: metric.sampleSize, rankDirection: metric.rankDirection }), period: financial?.period || null, source: 'industry_financial_calculation', fetchedAt: new Date().toISOString(), freshness: 'delayed', verification: 'derived',
+    }));
+    const industryEvents = (eventSnapshot?.events || []).filter((event: any) => ['industry', 'policy'].includes(String(event.impactScope)) && event.status !== 'expired');
+    const eventEvidenceIds = new Set(industryEvents.flatMap((event: any) => event.evidenceIds || []));
+    const eventEvidence = (eventSnapshot?.evidence || []).filter((item: any) => eventEvidenceIds.has(item.evidenceId));
+    const evidence = [...(benchmark?.evidence || []), ...financialEvidence, ...(mapping?.evidence || []), ...eventEvidence];
+    const memberCount = Number(benchmark?.industry?.memberCount || financial?.industry?.memberCount || 0);
+    const availableFinancialCount = financialMetrics.filter((metric: any) => metric.status === 'available' && Number(metric.sampleSize) >= 20).length;
+    const mappedChains = mapping?.mappings || [];
+    const chainIndicators = mappedChains.flatMap((item: any) => item?.chainData?.indicators || []);
+    const dataQuality = {
+      memberSnapshot: memberCount > 0 ? 'complete' : 'unavailable',
+      financialSample: availableFinancialCount >= 3 ? 'sufficient' : availableFinancialCount ? 'thin' : 'unavailable',
+      chainData: chainIndicators.length ? 'mapped' : mappedChains.length ? 'partial' : 'unavailable',
+    };
+    const status = dataQuality.memberSnapshot === 'unavailable' && dataQuality.chainData === 'unavailable' ? 'unavailable' : dataQuality.financialSample === 'sufficient' || dataQuality.chainData === 'mapped' ? 'available' : 'limited';
+    const value = {
+      symbol,
+      status,
+      industry: benchmark?.industry || financial?.industry || null,
+      financialPosition: { period: financial?.period || null, template: financial?.template || null, metrics: financialMetrics, coverage: financial?.coverage || null },
+      chain: { status: mapping?.status || 'unavailable', mappings: mappedChains, indicatorCount: chainIndicators.length },
+      events: industryEvents,
+      dataQuality,
+      evidence,
+      evidenceIds: [...new Set(evidence.map((item: any) => String(item.evidenceId || '')).filter(Boolean))],
+      dataGaps: [...new Set(dataGaps.filter(Boolean))],
+      snapshotMeta: { generatedAt: new Date().toISOString(), source: 'industry_chain_snapshot', freshness: status === 'available' ? 'delayed' : 'stale', evidenceCount: evidence.length, version: 'industry-chain-v1', warming: financial?.status === 'warming' },
+    };
+    stockIndustryChainSnapshotCache.set(symbol, { expiresAt: Date.now() + (financial?.status === 'warming' ? 30_000 : 5 * 60_000), value });
+    return value;
+  }
+
+  function fallbackIndustryChainOpinion(snapshot: any, reason: string) {
+    const metrics = (snapshot?.financialPosition?.metrics || []).filter((item: any) => item.status === 'available');
+    const mapped = snapshot?.chain?.mappings || [];
+    const positives = metrics.filter((item: any) => item.position === 'upper_quartile').map((item: any) => ({ text: `${item.label}处于行业较高分位（样本 ${item.sampleSize} 家）。`, evidenceIds: [makeEvidenceId(snapshot.symbol, 'industry_financial_percentile', item.key, snapshot?.financialPosition?.period || 'current')] }));
+    const negatives = metrics.filter((item: any) => item.position === 'lower_quartile').map((item: any) => ({ text: `${item.label}处于行业较低分位（样本 ${item.sampleSize} 家）。`, evidenceIds: [makeEvidenceId(snapshot.symbol, 'industry_financial_percentile', item.key, snapshot?.financialPosition?.period || 'current')] }));
+    const conclusion = snapshot?.status === 'unavailable'
+      ? '行业与产业链关键输入不可用，暂不形成行业结论。'
+      : `${snapshot?.industry?.name || '所属行业'}已形成行业成员与产业链映射快照；${snapshot?.chain?.indicatorCount ? '已取得部分产业链指标。' : '产业链实时指标仍不完整。'}`;
+    return { agent: 'industry_chain', status: snapshot?.status === 'available' ? 'limited' : snapshot?.status || 'unavailable', conclusion, confidence: { score: Math.min(60, 25 + snapshot.evidenceIds.length), level: 'limited', reason: `AI 解释层不可用，保留冻结快照与规则回退：${reason}` }, positives: positives.slice(0, 4), negatives: negatives.slice(0, 4), uncertainties: (snapshot?.dataGaps || []).slice(0, 6).map((text: string) => ({ text, evidenceIds: [] })), evidenceIds: snapshot?.evidenceIds || [], dataGaps: snapshot?.dataGaps || [], mappedRules: mapped.map((item: any) => item.ruleId) };
+  }
+
+  async function runIndustryChainAgent(inputSymbol: string, refresh = false) {
+    const symbol = normalizeAshareSymbol(inputSymbol).code;
+    const cached = industryChainAgentCache.get(symbol);
+    if (!refresh && cached && cached.expiresAt > Date.now()) return { ...cached.value, agentMeta: { ...cached.value.agentMeta, source: 'cache' } };
+    const snapshot = await buildIndustryChainSnapshot(symbol);
+    const evidenceSet = new Set<string>(snapshot.evidenceIds || []);
+    let opinion: any;
+    let aiStatus: 'completed' | 'fallback' | 'not_requested' = 'completed';
+    if (!evidenceSet.size || snapshot.status === 'unavailable') {
+      aiStatus = 'not_requested';
+      opinion = fallbackIndustryChainOpinion(snapshot, '没有足够的可引用行业证据，不调用 AI。');
+    } else {
+      try {
+        const raw = await callAI(
+          '你是行业与产业链 Agent。只解释输入中的冻结行业快照和证据目录，不搜索新事实、不预测股价、不提供买卖、仓位或目标价建议。行业财务分位、样本数、产业链映射、指标状态与事件范围均由程序确定，不得改写。产业链映射或第三方行业/政策事件只能说明待核验的传导线索，不能直接写成公司事实或公司业绩结论。没有产业链实时指标时必须明确数据缺口。每项事实判断必须引用 evidenceCatalog 中已有 evidenceId；无证据只能写入 uncertainties。严格输出 JSON：{"conclusion":"","confidence":{"score":0,"level":"high|medium|limited","reason":""},"industryPosition":"","chainAssessment":"","positives":[{"text":"","evidenceIds":[]}],"negatives":[{"text":"","evidenceIds":[]}],"uncertainties":[{"text":"","evidenceIds":[]}]}' ,
+          JSON.stringify({ symbol, snapshot, evidenceCatalog: snapshot.evidence }), 0.1, 3_500,
+        );
+        const parsed = parseAIJson(raw);
+        const normalizeItems = (items: unknown) => Array.isArray(items) ? items.slice(0, 5).map((item: any) => ({ text: sanitizeTeacherText(item?.text, 220), evidenceIds: Array.isArray(item?.evidenceIds) ? [...new Set(item.evidenceIds.map(String).filter((id: string) => evidenceSet.has(id)))].slice(0, 8) : [] })).filter((item: any) => item.text && item.evidenceIds.length) : [];
+        const positives = normalizeItems(parsed?.positives); const negatives = normalizeItems(parsed?.negatives); const uncertainties = normalizeItems(parsed?.uncertainties);
+        const citedIds = [...new Set([...positives, ...negatives, ...uncertainties].flatMap((item: any) => item.evidenceIds))];
+        const requestedLevel = ['high', 'medium', 'limited'].includes(parsed?.confidence?.level) ? parsed.confidence.level : 'limited';
+        opinion = { agent: 'industry_chain', status: snapshot.dataGaps.length || !citedIds.length ? 'limited' : 'completed', conclusion: sanitizeTeacherText(parsed?.conclusion, 280) || fallbackIndustryChainOpinion(snapshot, 'AI 未返回结论。').conclusion, industryPosition: sanitizeTeacherText(parsed?.industryPosition, 220), chainAssessment: sanitizeTeacherText(parsed?.chainAssessment, 220), confidence: { score: Math.max(0, Math.min(snapshot.dataGaps.length ? 65 : 85, Number(parsed?.confidence?.score) || 0)), level: snapshot.dataGaps.length ? 'limited' : requestedLevel === 'high' ? 'medium' : requestedLevel, reason: sanitizeTeacherText(parsed?.confidence?.reason, 180) || '置信度受成员样本、产业链指标覆盖和事件核验状态共同约束。' }, positives, negatives, uncertainties, evidenceIds: citedIds, dataGaps: snapshot.dataGaps || [] };
+      } catch (error: any) {
+        aiStatus = 'fallback';
+        console.warn(`[industry-chain-agent] AI fallback for ${symbol}:`, error.message);
+        opinion = fallbackIndustryChainOpinion(snapshot, error.message);
+      }
+    }
+    const value = { symbol, industrySnapshot: snapshot, deterministicIndustry: { status: snapshot.status, industry: snapshot.industry, financialPosition: snapshot.financialPosition, chain: snapshot.chain, events: snapshot.events, dataQuality: snapshot.dataQuality }, opinion, agentMeta: { generatedAt: new Date().toISOString(), source: 'live', aiStatus, promptVersion: 'industry-chain-v1', snapshotGeneratedAt: snapshot.snapshotMeta.generatedAt, industryVersion: snapshot.snapshotMeta.version } };
+    industryChainAgentCache.set(symbol, { expiresAt: Date.now() + (snapshot.snapshotMeta?.warming ? 30_000 : 15 * 60_000), value });
+    return value;
+  }
+
   type FundamentalSignalStatus = 'positive' | 'stable' | 'mixed' | 'deteriorating' | 'risk' | 'data_insufficient';
   type FundamentalSignal = {
     signalId: string;
-    dimension: 'business_model' | 'growth' | 'profit_quality' | 'cash_quality' | 'resilience' | 'risk_disclosure';
+    dimension: 'business_model' | 'growth' | 'profit_quality' | 'cash_quality' | 'resilience' | 'risk_disclosure' | 'industry_comparison';
     status: FundamentalSignalStatus;
     severity: 'low' | 'medium' | 'high';
     summary: string;
@@ -5799,7 +6162,7 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
     return 'mixed';
   }
 
-  function buildFundamentalSignals(snapshot: any) {
+  function buildFundamentalSignals(snapshot: any, industryFinancial?: any) {
     const reports = snapshot.facts?.financialReports || [];
     const calculations = snapshot.facts?.financialCalculations || {};
     const metrics = calculations.metrics || {};
@@ -5917,6 +6280,21 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
       });
     }
 
+    if (industryFinancial?.status === 'available' && Array.isArray(industryFinancial.items) && industryFinancial.items.length) {
+      const preferredKeys = template === 'bank' ? ['revenueYoY', 'netProfitYoY', 'roeApprox', 'loanYoY', 'creditImpairmentToRevenue'] : ['revenueYoY', 'netProfitYoY', 'netMargin', 'roeApprox', 'assetLiabilityRatio', 'cashConversion'];
+      const peerItems = preferredKeys.map((key) => industryFinancial.items.find((item: any) => item.key === key)).filter(Boolean).slice(0, 4);
+      const averagePosition = peerItems.length ? peerItems.reduce((sum: number, item: any) => sum + Number(item.comparisonPercentile), 0) / peerItems.length : null;
+      const peerStatus: FundamentalSignalStatus = averagePosition === null ? 'data_insufficient' : averagePosition >= 0.65 ? 'positive' : averagePosition <= 0.35 ? 'deteriorating' : 'mixed';
+      const peerSummary = peerItems.map((item: any) => `${item.label}${(Number(item.comparisonPercentile) * 100).toFixed(1)}%分位（${item.sampleSize}家，${item.rankDirection === 'lower_better' ? '已按低值优先换算' : '高值优先'}）`).join('；');
+      addSignal({
+        signalId: 'industry_financial_position', dimension: 'industry_comparison', status: peerStatus, severity: peerStatus === 'deteriorating' ? 'medium' : 'low',
+        summary: `行业横向比较（${industryFinancial.industry?.name || '未分类'}，${industryFinancial.period || '报告期未知'}）：${peerSummary}。分位仅说明同口径样本中的相对位置，不代表投资结论。`,
+        values: { averageComparisonPercentile: averagePosition, comparableSampleSize: Number(industryFinancial.coverage?.comparable || 0), itemCount: peerItems.length, period: industryFinancial.period || null }, evidenceIds: peerItems.map((item: any) => item.evidenceId),
+      });
+    } else {
+      dataGaps.push(...(industryFinancial?.dataGaps || ['行业财务横向比较尚未就绪。']));
+    }
+
     const riskAnnouncements = (snapshot.facts?.announcements || []).filter((item: any) => /(退市风险警示|终止上市)/.test(String(item.title || ''))).slice(0, 3);
     const riskEvidence = riskAnnouncements.flatMap((item: any) => (snapshot.evidence || []).filter((evidence: any) => evidence.type === 'announcement' && evidence.title === item.title).map((evidence: any) => evidence.evidenceId));
     vetoes.push({ code: 'official_listing_risk', description: `CNINFO 已检索到 ${riskAnnouncements.length} 条退市风险警示或终止上市正式公告，已触发上市风险否决项。`, triggered: riskAnnouncements.length > 0, evidenceIds: riskEvidence });
@@ -5953,10 +6331,12 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
     const symbol = normalizeAshareSymbol(inputSymbol).code;
     const cached = fundamentalAgentCache.get(symbol);
     if (!refresh && cached && cached.expiresAt > Date.now()) return { ...cached.value, agentMeta: { ...cached.value.agentMeta, source: 'cache' } };
-    const snapshot = await buildStockFactSnapshot(symbol);
-    const input = buildFundamentalSignals(snapshot);
-    const evidenceSet = new Set<string>((snapshot.evidence || []).map((item: any) => String(item.evidenceId)));
-    const evidenceCatalog = (snapshot.evidence || []).filter((item: any) => input.signals.some((signal: FundamentalSignal) => signal.evidenceIds.includes(item.evidenceId))).map((item: any) => ({ evidenceId: item.evidenceId, title: item.title, value: item.value, period: item.period, source: item.source, verification: item.verification }));
+    const [snapshot, industryFinancialResult] = await Promise.all([buildStockFactSnapshot(symbol), buildIndustryFinancialPercentiles(symbol)]);
+    const industryFinancial = buildIndustryFinancialComparison(symbol, industryFinancialResult);
+    const enrichedSnapshot = { ...snapshot, evidence: [...(snapshot.evidence || []), ...industryFinancial.evidence] };
+    const input = buildFundamentalSignals(enrichedSnapshot, industryFinancial);
+    const evidenceSet = new Set<string>((enrichedSnapshot.evidence || []).map((item: any) => String(item.evidenceId)));
+    const evidenceCatalog = (enrichedSnapshot.evidence || []).filter((item: any) => input.signals.some((signal: FundamentalSignal) => signal.evidenceIds.includes(item.evidenceId))).map((item: any) => ({ evidenceId: item.evidenceId, title: item.title, value: item.value, period: item.period, source: item.source, verification: item.verification }));
     let opinion: any;
     let aiStatus: 'completed' | 'fallback' = 'completed';
     try {
@@ -5988,10 +6368,10 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
     } catch (error: any) {
       aiStatus = 'fallback';
       console.warn(`[fundamental-agent] AI fallback for ${symbol}:`, error.message);
-      opinion = fallbackFundamentalOpinion(snapshot, input, error.message);
+      opinion = fallbackFundamentalOpinion(enrichedSnapshot, input, error.message);
     }
     const value = { symbol, company: snapshot.company, deterministicSignals: input.signals, opinion, agentMeta: { generatedAt: new Date().toISOString(), source: 'live', aiStatus, promptVersion: 'fundamental-v1', snapshotGeneratedAt: snapshot.snapshotMeta.generatedAt } };
-    fundamentalAgentCache.set(symbol, { expiresAt: Date.now() + 15 * 60_000, value });
+    fundamentalAgentCache.set(symbol, { expiresAt: Date.now() + (industryFinancial.status === 'warming' ? 30_000 : 15 * 60_000), value });
     return value;
   }
 
@@ -6082,7 +6462,14 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
     try {
       const raw = await callAI(
         '你是个股事件 Agent。只解释输入中的冻结事件、公告原文元数据和证据，不搜索新事实、不补充公告没有的数字、不预测股价、不提供买卖指令或仓位。事件的 category、direction、impactHorizon、status 和 eventId 由程序确定，不得改写。所有事实判断必须引用 evidenceCatalog 中存在的 evidenceId；没有证据只能放入 uncertainties。未经核验的传闻必须保留不确定性，不得写成已确认事实。严格输出 JSON：{"eventSummary":"","confidence":{"score":0,"level":"high|medium|limited","reason":""},"activeEvents":[{"eventId":"","conclusion":"","catalysts":[],"risks":[],"watchConditions":[],"evidenceIds":[]}],"catalysts":[{"text":"","evidenceIds":[]}],"risks":[{"text":"","evidenceIds":[]}],"uncertainties":[{"text":"","evidenceIds":[]}]}' ,
-        JSON.stringify({ symbol, period: snapshot.period, events: input.activeEvents, dataGaps, evidenceCatalog }),
+        JSON.stringify({
+          symbol,
+          period: snapshot.period,
+          events: input.activeEvents,
+          eventHandlingRule: 'impactScope 为 industry 或 policy 的事件仅代表行业/政策层线索。除非输入存在公司正式披露或官方核验的直接传导证据，不得表述为公司已发生事实，也不得单独作为否决或买卖依据。',
+          dataGaps,
+          evidenceCatalog,
+        }),
         0.1,
         3_500,
       );

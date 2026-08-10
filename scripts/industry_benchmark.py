@@ -50,7 +50,12 @@ def fetch_board_members(board, symbol):
     return members
 
 
-def fetch_baostock_industry(symbol):
+def fetch_baostock_industry_snapshot(symbol):
+    """Return the target's CSRC industry together with the full same-industry universe.
+
+    This is deliberately a separate fallback taxonomy.  It may support member-based
+    financial percentiles, but must never be combined with a THS industry index.
+    """
     exchange_symbol = f"sh.{symbol}" if symbol.startswith(("5", "6", "9")) else f"sz.{symbol}"
     with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
         login = bs.login()
@@ -58,11 +63,33 @@ def fetch_baostock_industry(symbol):
         return None
     try:
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-            result = bs.query_stock_industry(code=exchange_symbol)
-        if result.error_code != "0" or not result.next():
+            result = bs.query_stock_industry()
+        if result.error_code != "0":
             return None
-        row = dict(zip(result.fields, result.get_row_data()))
-        return {"name": row.get("industry") or "未分类", "code": None, "classification": row.get("industryClassification") or "证监会行业分类", "memberCount": None, "members": []}
+        rows = []
+        while result.next():
+            row = dict(zip(result.fields, result.get_row_data()))
+            if not row.get("industry"):
+                continue
+            rows.append(row)
+        target = next((row for row in rows if row.get("code") == exchange_symbol), None)
+        if not target:
+            return None
+        industry_name = target.get("industry") or "未分类"
+        classification = target.get("industryClassification") or "证监会行业分类"
+        members = [
+            {"symbol": str(row.get("code", "")).split(".")[-1].zfill(6), "name": row.get("code_name") or "", "isTarget": row.get("code") == exchange_symbol}
+            for row in rows
+            if row.get("industry") == industry_name and row.get("industryClassification") == classification
+        ]
+        return {
+            "name": industry_name,
+            "code": f"baostock:{classification}:{industry_name}",
+            "classification": classification,
+            "memberCount": len(members),
+            "members": members,
+            "asOf": target.get("updateDate") or None,
+        }
     finally:
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             bs.logout()
@@ -72,7 +99,7 @@ def main():
     if len(sys.argv) != 2 or not re.fullmatch(r"\d{6}", sys.argv[1]):
         raise ValueError("symbol 应为 6 位证券代码")
     symbol = sys.argv[1]
-    fallback_industry = fetch_baostock_industry(symbol)
+    fallback_industry = fetch_baostock_industry_snapshot(symbol)
     matched = None
     try:
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
@@ -94,8 +121,8 @@ def main():
             raise RuntimeError("未能取得股票行业归属")
         print(json.dumps({
             "symbol": symbol, "industry": fallback_industry, "bars": [],
-            "sourceMeta": {"mappingSource": "baostock_industry", "benchmarkSource": None, "adjust": None, "barInterval": None, "lastTradingDate": None, "fetchedAt": dt.datetime.now(dt.timezone.utc).isoformat()},
-            "dataGaps": ["未匹配到同花顺行业指数，当前仅提供 Baostock 行业归属。"],
+            "sourceMeta": {"mappingSource": "baostock_industry", "membershipAsOf": fallback_industry.get("asOf"), "benchmarkSource": None, "adjust": None, "barInterval": None, "lastTradingDate": None, "fetchedAt": dt.datetime.now(dt.timezone.utc).isoformat()},
+            "dataGaps": ["未匹配到同花顺行业指数；当前使用 Baostock 证监会行业成员快照，仅可用于同口径成员财务比较，不输出行业指数相对强弱。"],
         }, ensure_ascii=False))
         return
     members = fetch_board_members(matched, symbol)
