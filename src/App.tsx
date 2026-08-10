@@ -22,6 +22,8 @@ type TabId = 'home' | 'market-map' | 'watchlist' | 'ai-teacher' | 'mine' | 'stoc
 // 暂停个人中心与本机体验登录；恢复时改为 true 即可，无需重写账号相关代码。
 const ACCOUNT_FEATURE_ENABLED = false;
 
+const normalizeWatchlistCode = (code: string) => String(code || '').trim().toUpperCase().replace(/^(SH|SZ)/, '').replace(/\.(SH|SZ)$/, '');
+
 export default function App() {
   const [account, setAccount] = useState<LocalAccount | null>(() => getActiveAccount());
   const [activeTab, setActiveTab] = useState<TabId>('home');
@@ -59,7 +61,7 @@ export default function App() {
       if (customEvent.detail) {
         const newStock = customEvent.detail;
         setFollowedStocks((prev) => {
-          if (prev.some((s) => s.code === newStock.code)) return prev; // Avoid duplicates
+          if (prev.some((s) => normalizeWatchlistCode(s.code) === normalizeWatchlistCode(newStock.code))) return prev;
           return [newStock, ...prev];
         });
       }
@@ -93,6 +95,13 @@ export default function App() {
   const handleOpenResearch = (stock: StockItem) => {
     setResearchStock(stock);
     setActiveTab('stock-research');
+  };
+
+  const handleFollowResearchStock = (stock: StockItem) => {
+    setFollowedStocks((prev) => {
+      if (prev.some((item) => normalizeWatchlistCode(item.code) === normalizeWatchlistCode(stock.code))) return prev;
+      return [stock, ...prev];
+    });
   };
 
   const handleOpenResearchEntry = () => {
@@ -168,7 +177,7 @@ export default function App() {
                 />
               )}
               {activeTab === 'stock-research' && (researchStock ? (
-                <StockResearchTab stock={researchStock} followedStocks={followedStocks} onSelectStock={setResearchStock} onBack={() => setActiveTab('watchlist')} onAskTeacher={() => { handleAskTeacherAboutStock(researchStock.name, researchStock.code); setActiveTab('ai-teacher'); }} />
+                <StockResearchTab stock={researchStock} followedStocks={followedStocks} onSelectStock={setResearchStock} onFollowStock={handleFollowResearchStock} onBack={() => setActiveTab('watchlist')} onAskTeacher={() => { handleAskTeacherAboutStock(researchStock.name, researchStock.code); setActiveTab('ai-teacher'); }} />
               ) : (
                 <StockResearchEmptyState followedStocks={followedStocks} onSelectStock={setResearchStock} onBack={() => setActiveTab('watchlist')} />
               ))}

@@ -9,6 +9,9 @@ import { Search, TrendingUp, TrendingDown, ChevronRight, ChevronDown, X, AlertTr
 import { MarketIndex, MarketStory, StockSector } from '../types';
 import { formatChineseDate, initialSectors, initialAlerts } from '../data';
 import { InteractiveChart } from './InteractiveChart';
+
+// 首页不再提供全局搜索入口；搜索与加入自选能力仍保留在个股分析页。
+const SHOW_HOME_SEARCH_BUTTON = false;
 import { FeedbackModal } from './FeedbackModal';
 import { BubbleAvatar } from './BubbleAvatar';
 import { ImpactAnalysisModal } from './ImpactAnalysisModal';
@@ -482,13 +485,13 @@ export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStoc
               泡泡看市
               <span className="w-2 h-2 rounded-full bg-indigo-600 inline-block animate-pulse"></span>
             </h1>
-            <button
+            {SHOW_HOME_SEARCH_BUTTON && <button
               id="search-trigger-btn"
               onClick={() => setIsSearching(true)}
             className="grid h-11 w-11 place-items-center bg-gray-50 rounded-full hover:bg-gray-100 transition-all text-gray-700 hover:scale-105 active:scale-95 shadow-sm border border-gray-100"
             >
               <Search className="w-4 h-4" />
-            </button>
+            </button>}
           </>
         ) : (
           <form id="search-input-form" onSubmit={handleSearchSubmit} className="flex-grow flex items-center gap-2">

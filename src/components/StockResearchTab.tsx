@@ -21,6 +21,7 @@ interface StockResearchTabProps {
   stock: StockItem;
   followedStocks: StockItem[];
   onSelectStock: (stock: StockItem) => void;
+  onFollowStock: (stock: StockItem) => void;
   onBack: () => void;
   onAskTeacher: () => void;
 }
@@ -49,13 +50,16 @@ const visibleSectionKeys: SectionKey[] = [
   'risk',
 ];
 
+// 保留返回逻辑，恢复时改为 true；当前个股分析页不展示左上角返回按钮。
+const SHOW_RESEARCH_BACK_BUTTON = false;
+
 function FactList({ items, tone = 'slate', emptyText = '暂无可用数据' }: { items: any[]; tone?: 'slate' | 'emerald' | 'rose' | 'amber'; emptyText?: string }) {
   const colors = { slate: 'border-slate-100 bg-white', emerald: 'border-emerald-100 bg-emerald-50/60', rose: 'border-rose-100 bg-rose-50/60', amber: 'border-amber-100 bg-amber-50/60' };
   if (!items.length) return <p className="rounded-lg bg-slate-100 p-3 text-[11px] leading-relaxed text-slate-600">{emptyText}</p>;
   return <div className="space-y-2">{items.slice(0, 6).map((item, index) => <div className={`rounded-lg border p-3 ${colors[tone]}`} key={`${researchItemText(item)}-${index}`}><p className="text-[11px] font-medium leading-relaxed text-slate-800">{researchItemText(item)}</p></div>)}</div>;
 }
 
-export function StockResearchTab({ stock, followedStocks, onSelectStock, onBack, onAskTeacher }: StockResearchTabProps) {
+export function StockResearchTab({ stock, followedStocks, onSelectStock, onFollowStock, onBack, onAskTeacher }: StockResearchTabProps) {
   const [payload, setPayload] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -127,10 +131,14 @@ export function StockResearchTab({ stock, followedStocks, onSelectStock, onBack,
   const { manager, opinion, snapshot, outputs, evidence, supporting, counter, required, dataGaps } = createResearchViewModel(payload);
   const stance = manager.managerStance || snapshot.managerStance || opinion.managerStance;
   const evidenceSet = useMemo(() => new Set(snapshot.evidenceIds || []), [snapshot.evidenceIds]);
+  const isFollowed = useMemo(() => {
+    const currentCode = normalizeResearchSymbol(stock.code);
+    return followedStocks.some((item) => normalizeResearchSymbol(item.code) === currentCode);
+  }, [followedStocks, stock.code]);
   const toggle = (key: SectionKey) => setOpenSections((current) => ({ ...current, [key]: !current[key] }));
 
   return <div className="space-y-4 px-3 pb-24 pt-2">
-    <header className="flex items-center justify-between"><button onClick={onBack} aria-label="返回自选列表" className="grid h-11 w-11 place-items-center rounded-xl bg-white text-slate-600 shadow-sm hover:text-indigo-600"><ArrowLeft className="h-4 w-4" /></button><div className="text-center"><p className="text-sm font-bold text-slate-900">个股分析</p><p className="font-mono text-[10px] text-slate-500">{normalizeResearchSymbol(stock.code)}</p></div><button onClick={() => void load(true)} disabled={refreshing} aria-label="刷新研究快照" className="grid h-11 w-11 place-items-center rounded-xl bg-white text-slate-600 shadow-sm hover:text-indigo-600 disabled:opacity-50"><RefreshCw className={`h-4 w-4 ${refreshing ? 'animate-spin' : ''}`} /></button></header>
+    <header className="grid grid-cols-[44px_minmax(0,1fr)_44px] items-center gap-2"><div>{SHOW_RESEARCH_BACK_BUTTON && <button onClick={onBack} aria-label="返回自选列表" className="grid h-11 w-11 place-items-center rounded-xl bg-white text-slate-600 shadow-sm hover:text-indigo-600"><ArrowLeft className="h-4 w-4" /></button>}</div><div className="min-w-0 text-center"><p className="text-sm font-bold text-slate-900">个股分析</p><div className="mt-0.5 flex items-center justify-center gap-2"><p className="truncate font-mono text-[10px] text-slate-500">{stock.name} · {normalizeResearchSymbol(stock.code)}</p><button onClick={() => onFollowStock(stock)} disabled={isFollowed} className="min-h-7 shrink-0 rounded-md border border-indigo-200 bg-indigo-50 px-2 text-[10px] font-bold text-indigo-700 disabled:border-slate-200 disabled:bg-slate-100 disabled:text-slate-500">{isFollowed ? '已在自选' : '加入自选'}</button></div></div><button onClick={() => void load(true)} disabled={refreshing} aria-label="刷新研究快照（重新请求数据源）" className="grid h-11 w-11 place-items-center rounded-xl bg-white text-slate-600 shadow-sm hover:text-indigo-600 disabled:opacity-50"><RefreshCw className={`h-4 w-4 ${refreshing ? 'animate-spin' : ''}`} /></button></header>
     <StockResearchPicker selectedStock={stock} followedStocks={followedStocks} onSelectStock={onSelectStock} />
     <StockResearchOverview stock={stock} stance={stance} researchStatus={manager.researchStatus} riskLevel={manager.riskLevel} conclusion={opinion.conclusion} evidenceCount={evidenceSet.size} loading={loading} error={error} />
     {error && <section role="alert" className="rounded-xl border border-rose-200 bg-rose-50 p-4"><div className="flex items-start gap-3"><ShieldAlert className="mt-0.5 h-4 w-4 shrink-0 text-rose-700" /><div className="min-w-0 flex-1"><h2 className="text-xs font-bold text-rose-900">研究数据加载失败</h2><p className="mt-1 break-words text-[11px] leading-relaxed text-rose-800">{error}</p></div></div><button onClick={() => void load()} className="mt-3 min-h-11 w-full rounded-lg bg-rose-700 px-4 text-xs font-bold text-white hover:bg-rose-800 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-rose-700">重新加载</button></section>}

@@ -2301,13 +2301,13 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
   // fetchMarketData 整体缓存 + in-flight 去重：
   // 多个接口（sectors/overview/morning-report/sector-detail）共享同一份行情数据，
   // 避免每次请求都重复全量拉取指数、板块和新闻。
-  async function fetchMarketData() {
+  async function fetchMarketData(force = false) {
     const cacheState = fetchMarketData as any;
     const now = Date.now();
-    if (cacheState._dataCache && cacheState._dataCache.expiresAt > now) {
+    if (!force && cacheState._dataCache && cacheState._dataCache.expiresAt > now) {
       return cacheState._dataCache.value;
     }
-    if (cacheState._dataPromise) return cacheState._dataPromise;
+    if (!force && cacheState._dataPromise) return cacheState._dataPromise;
 
     const dataPromise = fetchMarketDataInner().then((value) => {
       cacheState._dataCache = { expiresAt: Date.now() + 15_000, value };
@@ -3452,7 +3452,9 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
     try {
       const symbol = String(req.query.symbol || '');
       if (!symbol) return res.status(400).json({ error: 'symbol is required' });
-      res.json(await runCioManagerAgent(symbol, String(req.query.refresh || '') === '1'));
+      const refresh = String(req.query.refresh || '') === '1';
+      if (refresh) invalidateStockResearchCaches(symbol);
+      res.json(await runCioManagerAgent(symbol, refresh));
     } catch (error: any) {
       console.error('[cio-manager-agent] query failed:', error.message);
       res.status(503).json({ error: 'CIO/Manager Agent 暂不可用', detail: error.message, dataUnavailable: true });
@@ -3569,7 +3571,9 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
     try {
       const symbol = String(req.query.symbol || '');
       if (!symbol) return res.status(400).json({ error: 'symbol is required' });
-      res.json(await runIndustryChainAgent(symbol, String(req.query.refresh || '') === '1'));
+      const refresh = String(req.query.refresh || '') === '1';
+      if (refresh) invalidateStockResearchCaches(symbol);
+      res.json(await runIndustryChainAgent(symbol, refresh));
     } catch (error: any) {
       console.error('[industry-chain-agent] query failed:', error.message);
       res.status(503).json({ error: '行业与产业链 Agent 暂不可用', detail: safeRuntimeDataGap(error.message), dataUnavailable: true });
@@ -4522,18 +4526,32 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
     throw new Error(`暂无 ${symbol.code} 的可用行情`);
   }
 
+  // 同一研究快照会被基本面、事件等模块同时消费；并发去重可避免对巨潮发出重复请求而触发限流。
+  const cninfoAnnouncementInFlight = new Map<string, Promise<any>>();
+
   async function fetchCninfoAnnouncements(symbol: string, startDate: string, endDate: string, category = '') {
     if (!/^\d{6}$/.test(symbol)) throw new Error('symbol 应为 6 位证券代码');
     if (!/^\d{8}$/.test(startDate) || !/^\d{8}$/.test(endDate)) throw new Error('日期应为 YYYYMMDD');
-    const { command, args } = resolvePythonInvocation('cninfo_announcements.py', [symbol, startDate, endDate, category]);
-    const { stdout } = await execFileAsync(command, args, { timeout: 45_000, windowsHide: true, maxBuffer: 2 * 1024 * 1024, env: pythonChildEnv() });
-    const payload = JSON.parse(stdout);
-    return {
-      announcements: Array.isArray(payload?.announcements) ? payload.announcements : [],
-      sourceMeta: {
-        source: 'cninfo', fetchedAt: new Date().toISOString(), freshness: 'delayed', confidence: 'official', fallbackLevel: 0,
-      },
-    };
+    const cacheKey = `${symbol}:${startDate}:${endDate}:${category}`;
+    const inFlight = cninfoAnnouncementInFlight.get(cacheKey);
+    if (inFlight) return inFlight;
+    const request = (async () => {
+      const { command, args } = resolvePythonInvocation('cninfo_announcements.py', [symbol, startDate, endDate, category]);
+      const { stdout } = await execFileAsync(command, args, { timeout: 45_000, windowsHide: true, maxBuffer: 2 * 1024 * 1024, env: pythonChildEnv() });
+      const payload = JSON.parse(stdout);
+      return {
+        announcements: Array.isArray(payload?.announcements) ? payload.announcements : [],
+        sourceMeta: {
+          source: 'cninfo', fetchedAt: new Date().toISOString(), freshness: 'delayed', confidence: 'official', fallbackLevel: 0,
+        },
+      };
+    })();
+    cninfoAnnouncementInFlight.set(cacheKey, request);
+    try {
+      return await request;
+    } finally {
+      cninfoAnnouncementInFlight.delete(cacheKey);
+    }
   }
 
   function toSearchResult(code: string, name: string, exchange?: string) {
@@ -7508,6 +7526,42 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
     };
     technicalMarketAgentCache.set(symbol, { expiresAt: Date.now() + 15 * 60_000, value });
     return value;
+  }
+
+  /**
+   * 用户主动点击个股分析页刷新时使用：仅清理会变化的行情、公告聚合、指标和 AI 快照。
+   * 已下载的公告原文/PDF 解析结果不在此处清除，原文内容不可变，保留它可避免重复下载。
+   */
+  function invalidateStockResearchCaches(inputSymbol: string) {
+    const symbol = normalizeAshareSymbol(inputSymbol).code;
+    const eventKeys = [`${symbol}:180`, `${symbol}:30`];
+    stockQuoteSnapshotCache.delete(symbol);
+    stockEventSnapshotCache.delete(`${symbol}:180`);
+    stockSentimentSnapshotCache.delete(`${symbol}:30`);
+    stockValuationSnapshotCache.delete(symbol);
+    valuationAgentCache.delete(symbol);
+    stockRiskSnapshotCache.delete(symbol);
+    stockManagerSnapshotCache.delete(symbol);
+    cioManagerAgentCache.delete(symbol);
+    stockBusinessSegmentsCache.delete(symbol);
+    xueqiuProfileCache.delete(symbol);
+    stockTechnicalCache.delete(symbol);
+    stockIndustryBenchmarkCache.delete(symbol);
+    stockRelativeStrengthCache.delete(symbol);
+    technicalMarketSignalCache.delete(symbol);
+    stockFactSnapshotCache.delete(symbol);
+    stockIndustryChainMappingCache.delete(symbol);
+    stockIndustryChainSnapshotCache.delete(symbol);
+    industryChainAgentCache.delete(symbol);
+    fundamentalAgentCache.delete(symbol);
+    riskCounterAgentCache.delete(symbol);
+    technicalMarketAgentCache.delete(symbol);
+    eventKeys.forEach((key) => eventAgentCache.delete(key));
+    eventKeys.forEach((key) => sentimentAgentCache.delete(key));
+
+    // 市场环境在个股技术与事件判断中被复用；主动刷新时也应重新请求。
+    const marketCacheState = fetchMarketData as any;
+    marketCacheState._dataCache = null;
   }
 
   function findSectorInsight(sectorName: string, fallback: string, watchPoints: string[], relatedNews: Array<{ title: string }> = []) {

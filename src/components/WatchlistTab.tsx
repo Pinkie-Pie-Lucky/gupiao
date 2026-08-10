@@ -19,6 +19,7 @@ interface WatchlistTabProps {
 
 // 暂时隐藏 AI 盯盘预警，保留原有展示代码，后续改为 true 即可恢复。
 const SHOW_AI_ALERTS = false;
+const normalizeWatchlistCode = (code: string) => String(code || '').trim().toUpperCase().replace(/^(SH|SZ)/, '').replace(/\.(SH|SZ)$/, '');
 
 export function WatchlistTab({
   followedStocks,
@@ -31,7 +32,7 @@ export function WatchlistTab({
 
   const handleRemoveStock = (code: string, e: React.MouseEvent) => {
     e.stopPropagation();
-    setFollowedStocks((prev) => prev.filter((s) => s.code !== code));
+    setFollowedStocks((prev) => prev.filter((s) => normalizeWatchlistCode(s.code) !== normalizeWatchlistCode(code)));
   };
 
   return (
