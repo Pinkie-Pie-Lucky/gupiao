@@ -14,6 +14,9 @@ import OpenAI from 'openai';
 import dotenv from 'dotenv';
 import { eventCategory, eventDate, eventDirection, eventImpactHorizon, eventStatus, normalizedEventKey } from './event-rules.js';
 import { buildManagerStance } from './src/lib/managerStance.js';
+import { createMcpServer } from './mcp/server.js';
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import { randomUUID } from 'node:crypto';
 
 dotenv.config();
 
@@ -3329,6 +3332,35 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
       morningReportPromise = null;
     }
   });
+
+  // GET /api/stock-quote — A 股个股实时行情，多源回退并显式返回来源元数据
+
+  // MCP Server（Streamable HTTP，无状态模式）——供赛事平台 tools/list 验证与调用
+  // 数据源为 Node 原生 HTTP（腾讯/新浪/东财），不依赖 Python，Vercel / Railway 均可运行。
+  {
+    const mcpServer = createMcpServer();
+    const mcpTransport = new StreamableHTTPServerTransport({
+      sessionIdGenerator: undefined, // 无状态：Vercel Serverless 每次请求独立，不维护 session
+      enableJsonResponse: true, // 直接返回 JSON（而非 SSE 流），适配 Serverless 与评测平台
+    });
+    void mcpServer.connect(mcpTransport);
+    const handleMcp = async (req: express.Request, res: express.Response) => {
+      try {
+        console.log(`[mcp] ${req.method} ${req.url} body=${JSON.stringify(req.body)?.slice(0, 120)}`);
+        await mcpTransport.handleRequest(req as any, res as any, req.body);
+        console.log(`[mcp] handled ${req.method} status=${res.statusCode}`);
+      } catch (error: any) {
+        console.error('[mcp] handle error:', error?.message, error?.stack);
+        if (!res.headersSent) {
+          res.status(500).json({ error: 'MCP 请求处理失败', detail: String(error?.message || '') });
+        } else {
+          res.end();
+        }
+      }
+    };
+    app.post('/api/mcp', handleMcp);
+    app.get('/api/mcp', handleMcp);
+  }
 
   // GET /api/stock-quote — A 股个股实时行情，多源回退并显式返回来源元数据
   app.get('/api/stock-quote', async (req, res) => {
