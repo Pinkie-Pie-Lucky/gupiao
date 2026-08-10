@@ -1,4 +1,4 @@
-export type ResearchSectionKey = 'fundamental' | 'technical' | 'events' | 'sentiment' | 'valuation' | 'risk' | 'evidence';
+export type ResearchSectionKey = 'fundamental' | 'technical' | 'events' | 'sentiment' | 'valuation' | 'risk' | 'industry' | 'evidence';
 
 export function normalizeResearchSymbol(input: string) {
   const symbol = String(input || '').trim().toUpperCase().replace(/\.(SH|SZ|BJ)$|^(SH|SZ|BJ)/, '');
@@ -51,6 +51,7 @@ export function researchSectionItems(outputs: any, key: Exclude<ResearchSectionK
     return mergeResearchItems(sentiment.items, sentiment.claims, labelValue('关注度', sentiment.attention), labelValue('情绪倾向', sentiment.tone), labelValue('观点分歧', sentiment.disagreement), labelValue('事件后反应', sentiment.eventReaction), labelValue('传播质量', sentiment.propagationQuality));
   }
   if (key === 'valuation') return mergeResearchItems(data.valuation?.reason, data.valuation?.comparison?.reason);
+  if (key === 'industry') return mergeResearchItems(data.industry?.financialPosition?.metrics, data.industry?.events, data.industry?.chain?.mappings);
   return mergeResearchItems(data.risk?.vetoes, data.risk?.risks, data.risk?.watchConditions, counterCase);
 }
 

@@ -99,10 +99,10 @@ test('keeps stock switching and empty-state entry in the research flow', () => {
 
 test('uses domain-specific structures for every research module', () => {
   const source = fs.readFileSync(path.resolve('src/components/StockResearchModules.tsx'), 'utf8');
-  for (const component of ['Fundamental', 'Technical', 'Events', 'Sentiment', 'Valuation', 'Risk', 'Evidence']) {
+  for (const component of ['Fundamental', 'Technical', 'Events', 'Industry', 'Sentiment', 'Valuation', 'Risk', 'Evidence']) {
     assert.ok(source.includes(`function ${component}`), `missing module: ${component}`);
   }
-  for (const text of ['基本面否决项', '结构失效条件', '事件后反应', '历史估值位置', '同行业可比', '模型情景', '观察与解除条件', '核验：']) {
+  for (const text of ['基本面否决项', '结构失效条件', '事件后反应', '行业位置', '产业链传导', '行业与政策事件', '历史估值位置', '同行业可比', '模型情景', '观察与解除条件', '核验：']) {
     assert.ok(source.includes(text), `missing module copy: ${text}`);
   }
 });
@@ -113,4 +113,18 @@ test('keeps loading, retry, refresh-error and narrow-screen states actionable', 
   for (const text of ['研究数据加载失败', '重新加载', '刷新失败，当前仍显示上一次结果', '正在加载研究模块']) assert.ok(tab.includes(text), `missing state: ${text}`);
   assert.ok(tab.includes('requestSequence'), 'stock switching must reject stale responses');
   assert.ok(overview.includes('grid-cols-3') && overview.includes('min-h-11'), 'horizon controls must remain usable on narrow screens');
+});
+
+test('loads the industry Agent independently so its AI explanation cannot block CIO research', () => {
+  const tab = fs.readFileSync(path.resolve('src/components/StockResearchTab.tsx'), 'utf8');
+  assert.ok(tab.includes('/api/stock-agents/industry-chain?symbol='));
+  assert.ok(tab.includes('industryResponse.ok'));
+  assert.ok(tab.includes('moduleExplanations'));
+});
+
+test('temporarily hides the sentiment section without deleting its module or backend data flow', () => {
+  const tab = fs.readFileSync(path.resolve('src/components/StockResearchTab.tsx'), 'utf8');
+  assert.ok(tab.includes('const visibleSectionKeys'));
+  assert.ok(tab.includes("// 'sentiment',"));
+  assert.ok(tab.includes('visibleSectionKeys.map'));
 });
