@@ -2,8 +2,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
-import { createResearchViewModel, normalizeResearchSymbol, researchDataGapText, researchSectionItems } from '../src/lib/stockResearch';
-import { uniqueResearchStocks } from '../src/components/StockResearchPicker';
+import { createResearchViewModel, normalizeResearchSymbol, researchDataGapText, researchSectionItems } from '../frontend/src/lib/stockResearch';
+import { uniqueResearchStocks } from '../frontend/src/components/StockResearchPicker';
 
 test('normalizes A-share symbols before calling the manager endpoint', () => {
   assert.equal(normalizeResearchSymbol('002230.SZ'), '002230');
@@ -68,15 +68,15 @@ test('turns internal data-source failures into user-facing data gaps', () => {
 });
 
 test('keeps critical stock research copy as valid UTF-8 Chinese', () => {
-  const tab = fs.readFileSync(path.resolve('src/components/StockResearchTab.tsx'), 'utf8');
-  const overview = fs.readFileSync(path.resolve('src/components/StockResearchOverview.tsx'), 'utf8');
+  const tab = fs.readFileSync(path.resolve('frontend/src/components/StockResearchTab.tsx'), 'utf8');
+  const overview = fs.readFileSync(path.resolve('frontend/src/components/StockResearchOverview.tsx'), 'utf8');
   const source = `${tab}\n${overview}`;
   for (const text of ['个股分析', '研究材料完整', '支持与反方', '下一步核验', '数据缺口']) assert.ok(source.includes(text), `missing copy: ${text}`);
   for (const mojibake of ['鐮旂┒', '涓偂', '璇佹嵁']) assert.ok(!source.includes(mojibake), `mojibake found: ${mojibake}`);
 });
 
 test('puts the Manager hold assessment and switchable three horizons in the first-screen component', () => {
-  const source = fs.readFileSync(path.resolve('src/components/StockResearchOverview.tsx'), 'utf8');
+  const source = fs.readFileSync(path.resolve('frontend/src/components/StockResearchOverview.tsx'), 'utf8');
   for (const text of ['持有评估', '综合倾向', '周期结论', '短期', '中期', '长期', '置信度']) assert.ok(source.includes(text), `missing overview copy: ${text}`);
   for (const field of ['holdAssessment', 'direction', 'horizons?.short', 'horizons?.medium', 'horizons?.long', 'role="tablist"', 'aria-selected']) assert.ok(source.includes(field), `missing Manager field: ${field}`);
 });
@@ -90,15 +90,15 @@ test('deduplicates the research stock universe and keeps watchlist priority', ()
 });
 
 test('keeps stock switching and empty-state entry in the research flow', () => {
-  const app = fs.readFileSync(path.resolve('src/App.tsx'), 'utf8');
-  const picker = fs.readFileSync(path.resolve('src/components/StockResearchPicker.tsx'), 'utf8');
+  const app = fs.readFileSync(path.resolve('frontend/src/App.tsx'), 'utf8');
+  const picker = fs.readFileSync(path.resolve('frontend/src/components/StockResearchPicker.tsx'), 'utf8');
   assert.ok(app.includes('StockResearchEmptyState'));
   assert.ok(app.includes('onSelectStock={setResearchStock}'));
   for (const text of ['输入股票名称或代码', '我的自选', '未找到匹配股票']) assert.ok(picker.includes(text), `missing picker state: ${text}`);
 });
 
 test('uses domain-specific structures for every research module', () => {
-  const source = fs.readFileSync(path.resolve('src/components/StockResearchModules.tsx'), 'utf8');
+  const source = fs.readFileSync(path.resolve('frontend/src/components/StockResearchModules.tsx'), 'utf8');
   for (const component of ['Fundamental', 'Technical', 'Events', 'Industry', 'Sentiment', 'Valuation', 'Risk', 'Evidence']) {
     assert.ok(source.includes(`function ${component}`), `missing module: ${component}`);
   }
@@ -108,22 +108,22 @@ test('uses domain-specific structures for every research module', () => {
 });
 
 test('keeps loading, retry, refresh-error and narrow-screen states actionable', () => {
-  const tab = fs.readFileSync(path.resolve('src/components/StockResearchTab.tsx'), 'utf8');
-  const overview = fs.readFileSync(path.resolve('src/components/StockResearchOverview.tsx'), 'utf8');
+  const tab = fs.readFileSync(path.resolve('frontend/src/components/StockResearchTab.tsx'), 'utf8');
+  const overview = fs.readFileSync(path.resolve('frontend/src/components/StockResearchOverview.tsx'), 'utf8');
   for (const text of ['研究数据加载失败', '重新加载', '刷新失败，当前仍显示上一次结果', '正在加载研究模块']) assert.ok(tab.includes(text), `missing state: ${text}`);
   assert.ok(tab.includes('requestSequence'), 'stock switching must reject stale responses');
   assert.ok(overview.includes('grid-cols-3') && overview.includes('min-h-11'), 'horizon controls must remain usable on narrow screens');
 });
 
 test('loads the industry Agent independently so its AI explanation cannot block CIO research', () => {
-  const tab = fs.readFileSync(path.resolve('src/components/StockResearchTab.tsx'), 'utf8');
+  const tab = fs.readFileSync(path.resolve('frontend/src/components/StockResearchTab.tsx'), 'utf8');
   assert.ok(tab.includes('/api/stock-agents/industry-chain?symbol='));
   assert.ok(tab.includes('industryResponse.ok'));
   assert.ok(tab.includes('moduleExplanations'));
 });
 
 test('temporarily hides the sentiment section without deleting its module or backend data flow', () => {
-  const tab = fs.readFileSync(path.resolve('src/components/StockResearchTab.tsx'), 'utf8');
+  const tab = fs.readFileSync(path.resolve('frontend/src/components/StockResearchTab.tsx'), 'utf8');
   assert.ok(tab.includes('const visibleSectionKeys'));
   assert.ok(tab.includes("// 'sentiment',"));
   assert.ok(tab.includes('visibleSectionKeys.map'));

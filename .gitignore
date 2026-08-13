@@ -10,6 +10,7 @@ __pycache__/
 !.env.example
 .npm-cache/  
 .git_disabled/  
+tsconfig.tsbuildinfo
 
 # 运行时产物（运行产生的数据文件，不应入库）
 work/feedback.jsonl

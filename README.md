@@ -72,7 +72,6 @@ npm run dev
 > - `DEEPSEEK_API_KEY`：必填，DeepSeek API Key
 > - `AI_BASE_URL`：可选，默认 `https://api.deepseek.com`
 > - `AI_MODEL`：可选，默认 `deepseek-v4-flash`
-> - `APP_URL`：应用对外访问地址
 > - `AKSHARE_PYTHON`：可选，指定 Python 解释器路径（默认使用项目根 `.venv`）
 
 ## 数据源与回退链路
@@ -135,16 +134,24 @@ node dist/server.cjs
 
 ```
 gupiao/
-├── server.ts                 # Express 后端（全部 API 与数据源）
-├── scripts/                  # Python 数据源脚本
-├── mcp/                      # MCP StreamableHTTP 服务
-├── src/                      # React 前端
-│   ├── App.tsx               # 导航与全局状态
-│   └── components/           # 各 Tab 与弹窗组件
+├── frontend/                 # React 前端
+│   ├── index.html            # SPA 入口
+│   ├── vite.config.ts        # Vite 构建配置
+│   └── src/                  # 前端源码（App.tsx + components/）
+├── backend/                  # Express 后端
+│   ├── server.ts             # 全部 API 与数据源调度
+│   ├── event-rules.ts        # 事件规则
+│   └── mcp/                  # MCP StreamableHTTP 服务
+├── shared/                   # 前后端共享模块
+│   └── managerStance.ts      # CIO 立场打分引擎
+├── scripts/python/           # Python 数据源脚本
+├── tests/                    # Node / Python 测试
 ├── api/                      # Vercel 无服务器函数入口
+├── docs/                     # 设计文档
+├── dev-tools/                # 开发辅助脚本
 ├── requirements-stock-data.txt
 ├── Dockerfile
-└── vite.config.ts
+└── package.json
 ```
 
 ## 免责声明

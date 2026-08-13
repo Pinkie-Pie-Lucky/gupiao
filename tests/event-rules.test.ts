@@ -7,7 +7,7 @@ import {
   eventImpactHorizon,
   eventStatus,
   normalizedEventKey,
-} from '../event-rules.js';
+} from '../backend/event-rules.js';
 
 const NOW = Date.parse('2026-08-08T00:00:00.000Z');
 

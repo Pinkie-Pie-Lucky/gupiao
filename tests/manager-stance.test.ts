@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { buildManagerStance } from '../src/lib/managerStance';
+import { buildManagerStance } from '../shared/managerStance';
 
 const evidence = ['market:1', 'financial:1', 'technical:1'];
 
