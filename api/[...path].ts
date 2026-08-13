@@ -1,3 +1,3 @@
-import vercelHandler from '../server.js';
+import vercelHandler from '../backend/server.js';
 
 export default vercelHandler;

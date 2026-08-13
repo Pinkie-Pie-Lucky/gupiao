@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { AlertTriangle, CheckCircle2, Clock3, Database, ShieldAlert } from 'lucide-react';
-import type { Direction, HoldAssessment, HorizonView } from '../lib/managerStance';
+import type { Direction, HoldAssessment, HorizonView } from '../../../shared/managerStance';
 
 interface Props {
   stock: { name: string; code: string; price: number; changePercent: number };

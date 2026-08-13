@@ -13,7 +13,7 @@ import { promisify } from 'node:util';
 import OpenAI from 'openai';
 import dotenv from 'dotenv';
 import { eventCategory, eventDate, eventDirection, eventImpactHorizon, eventStatus, normalizedEventKey } from './event-rules.js';
-import { buildManagerStance } from './src/lib/managerStance.js';
+import { buildManagerStance } from '../shared/managerStance.js';
 import { createMcpServer } from './mcp/server.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { randomUUID } from 'node:crypto';
@@ -27,14 +27,15 @@ const MARKET_IMPACT_PATH_ENABLED = process.env.MARKET_IMPACT_PATH_ENABLED !== 'f
 const execFileAsync = promisify(execFile);
 
 function resolvePythonInvocation(scriptName: string, args: string[] = []) {
-  const scriptPath = path.join(process.cwd(), 'scripts', scriptName);
+  const scriptPath = path.join(process.cwd(), 'scripts', 'python', scriptName);
   const configured = String(process.env.AKSHARE_PYTHON || '').trim();
   const localCandidates = process.platform === 'win32'
     ? [path.join(process.cwd(), '.venv', 'Scripts', 'python.exe'), path.join(process.cwd(), '.venv', 'python.exe')]
     : [path.join(process.cwd(), '.venv', 'bin', 'python'), path.join(process.cwd(), '.venv', 'python')];
   const runtime = configured || localCandidates.find((candidate) => fs.existsSync(candidate));
   if (runtime) return { command: runtime, args: [scriptPath, ...args] };
-  return { command: process.platform === 'win32' ? 'py' : 'python3', args: ['-3', scriptPath, ...args] };
+  if (process.platform === 'win32') return { command: 'py', args: ['-3', scriptPath, ...args] };
+  return { command: 'python3', args: [scriptPath, ...args] };
 }
 
 function pythonChildEnv() {
@@ -7765,6 +7766,7 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
     const viteModuleName = 'vite';
     const { createServer: createViteServer } = await import(viteModuleName);
     const vite = await createViteServer({
+      root: path.join(process.cwd(), 'frontend'),
       server: { middlewareMode: true, hmr: false, watch: null },
       appType: 'spa',
     });

@@ -21,10 +21,12 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm install --no-audit --no-fund
 
-COPY requirements-stock-data.txt ./
+COPY requirements-stock-data.txt requirements-ocr.txt ./
 RUN python3 -m venv .venv && \
     .venv/bin/pip install --upgrade pip && \
     .venv/bin/pip install -r requirements-stock-data.txt
+# 可选：启用公告文档 OCR（paddlepaddle/paddleocr，体积较大）
+# RUN .venv/bin/pip install -r requirements-ocr.txt
 
 # ---------- 4. 复制源码并构建 ----------
 COPY . .
