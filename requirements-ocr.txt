@@ -1,0 +1,4 @@
+# 可选 OCR 依赖：仅公告文档的扫描页识别需要（cninfo_document_parser.py）
+# 安装方式：.venv/bin/pip install -r requirements-ocr.txt
+paddlepaddle==3.3.1
+paddleocr==3.7.0

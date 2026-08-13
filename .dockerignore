@@ -1,0 +1,26 @@
+node_modules/
+.venv/
+dist/
+build/
+coverage/
+.git/
+.gitignore
+.env*
+!.env.example
+*.log
+work/
+README.md
+Dockerfile
+.dockerignore
+.deploy
+
+# 生产部署不需要的目录（纯文档 / 本地工具 / 历史遗留）
+archive/
+docs/
+deploy/
+dev-tools/
+tests/
+skills/
+.monkeycode/
+.finnews/
+metadata.json

@@ -1,0 +1,24 @@
+# 本地开发数据库（方案2：本地与生产都用 PostgreSQL，行为一致）
+# 使用方式：docker compose up -d   （无需 pgvector；如需向量检索，换用 pgvector/pgvector:pg16 镜像）
+# 连接串示例：DATABASE_URL=postgres://gupiao:gupiao@localhost:5432/gupiao
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: gupiao-pg
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: gupiao
+      POSTGRES_PASSWORD: gupiao
+      POSTGRES_DB: gupiao
+    ports:
+      - "5432:5432"
+    volumes:
+      - gupiao-pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gupiao -d gupiao"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  gupiao-pg-data:
