@@ -2,9 +2,9 @@
 
 ## 启动方式
 ```
-cd /d l:\gupiao-main\gupiao-main && npx tsx server.ts
+cd /workspace && npx tsx backend/server.ts
 ```
-访问 http://localhost:3000
+访问 http://localhost:8080
 
 ## 分支状态
 
@@ -30,4 +30,4 @@ cd /d l:\gupiao-main\gupiao-main && npx tsx server.ts
 - 首页数据、反馈Agent都没集成完
 - 用户要求先把数据修稳定再开发新功能
 - 当前 main 分支的 MarketMapTab 有 v4 完整API调用但用户看不到效果（缓存占位）
-- 新对话恢复上下文路径: `l:\gupiao-main\gupiao-main\DEV-SUMMARY.md`
+- 新对话恢复上下文路径: `docs/DEV-SUMMARY.md`

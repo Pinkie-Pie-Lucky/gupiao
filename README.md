@@ -18,7 +18,7 @@
 
 ### 个股分析六大模块
 
-个股分析页并行加载 `cio-manager` 与 `industry-chain` 两个 Agent 快照，通过确定性打分引擎（`src/lib/managerStance.ts`）输出**持有评估**（继续持有/条件持有/观察后再决定/不建议持有）与**三周期结论**（短期 1-4 周 / 中期 1-3 月 / 长期 6-12 月），并统一汇总数据缺口：
+个股分析页并行加载 `cio-manager` 与 `industry-chain` 两个 Agent 快照，通过确定性打分引擎（`shared/managerStance.ts`）输出**持有评估**（继续持有/条件持有/观察后再决定/不建议持有）与**三周期结论**（短期 1-4 周 / 中期 1-3 月 / 长期 6-12 月），并统一汇总数据缺口：
 
 | 模块 | 内容 |
 | --- | --- |
@@ -40,9 +40,9 @@ AI 失败时返回明确 `aiFailed` 标记并走规则兜底，**不会伪造假
 ## 技术栈与架构
 
 - **前端**：React 19 + TypeScript + Vite 6 + Tailwind CSS 4 + motion + recharts
-- **后端**：Express 单体（`server.ts`，约 7800 行），dev 模式内嵌 Vite middleware，生产模式静态托管 + SPA fallback
+- **后端**：Express 单体（`backend/server.ts`，约 7800 行），dev 模式内嵌 Vite middleware，生产模式静态托管 + SPA fallback
 - **AI 服务**：Node 端通过 OpenAI SDK 兼容方式直连 DeepSeek（默认 `deepseek-v4-flash`）
-- **Python 数据源**：`scripts/*.py` 脚本（依赖 akshare / baostock / pandas / pytdx / tickflow 等），由 Node `child_process` 调用
+- **Python 数据源**：`scripts/python/*.py` 脚本（依赖 akshare / baostock / pandas / pytdx / tickflow 等），由 Node `child_process` 调用
 - **MCP 服务**：`/api/mcp`（StreamableHTTP），提供 `get_stock_quote`、`get_market_overview` 两个工具（纯 Node，无 Python 依赖）
 
 ## 快速启动
@@ -116,9 +116,9 @@ npm run dev
 
 ## 确定性组件
 
-- **`src/lib/managerStance.ts`**：CIO 决策立场打分引擎（bullish/lean_bullish/neutral/lean_bearish/bearish + hold/conditional_hold/observe/avoid），对基本面/技术/事件/舆情/估值加权计分，叠加风险否决惩罚
-- **`event-rules.ts`**：事件分类/方向/日期/状态规则
-- **`src/lib/impactAnalysis.ts`**：影响路径树兜底构建
+- **`shared/managerStance.ts`**：CIO 决策立场打分引擎（bullish/lean_bullish/neutral/lean_bearish/bearish + hold/conditional_hold/observe/avoid），对基本面/技术/事件/舆情/估值加权计分，叠加风险否决惩罚
+- **`backend/event-rules.ts`**：事件分类/方向/日期/状态规则
+- **`frontend/src/lib/impactAnalysis.ts`**：影响路径树兜底构建
 
 ## 部署
 

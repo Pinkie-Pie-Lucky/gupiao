@@ -380,7 +380,7 @@ interface StockEvent {
 
 ### 第二步已实施：事件分类、去重与生命周期回归测试
 
-事件规则已抽取到可独立测试的 `event-rules.ts`，生产快照与测试共用同一套规则。新增 `npm run test:event-rules`，覆盖财报、业绩预告、合同、中标、并购、融资、股东、治理、监管、诉讼、产能、分红和澄清等类别；同时验证标题标点去重、日期区分、官方事件与传闻状态、即时/短期/中期/长期影响期限，以及 `new`、`ongoing`、`settled`、`expired`、`unconfirmed` 生命周期。设置 `STOCK_EVENTS_BASE_URL` 后会额外执行真实 `/api/stock-events` 烟测。
+事件规则已抽取到可独立测试的 `backend/event-rules.ts`，生产快照与测试共用同一套规则。新增 `npm run test:event-rules`，覆盖财报、业绩预告、合同、中标、并购、融资、股东、治理、监管、诉讼、产能、分红和澄清等类别；同时验证标题标点去重、日期区分、官方事件与传闻状态、即时/短期/中期/长期影响期限，以及 `new`、`ongoing`、`settled`、`expired`、`unconfirmed` 生命周期。设置 `STOCK_EVENTS_BASE_URL` 后会额外执行真实 `/api/stock-events` 烟测。
 
 ### 数据来源与确定性处理
 
