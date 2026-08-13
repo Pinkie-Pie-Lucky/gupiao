@@ -11,6 +11,17 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { randomUUID } from 'node:crypto';
 
+const MAX_STOCK_IDENTIFIER_LENGTH = 16;
+const MAX_STOCK_SEARCH_LENGTH = 64;
+const MAX_UPSTREAM_RESPONSE_BYTES = 1024 * 1024;
+
+class UpstreamResponseTooLargeError extends Error {
+  constructor() {
+    super('上游响应超过安全大小限制');
+    this.name = 'UpstreamResponseTooLargeError';
+  }
+}
+
 function httpGetText(urlStr: string, referer = 'https://gu.qq.com/', encoding = 'utf-8'): Promise<string> {
   return new Promise((resolve, reject) => {
     const u = new URL(urlStr);
@@ -24,7 +35,16 @@ function httpGetText(urlStr: string, referer = 'https://gu.qq.com/', encoding = 
         },
         (res: any) => {
           const chunks: Buffer[] = [];
-          res.on('data', (chunk: Buffer) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
+          let receivedBytes = 0;
+          res.on('data', (chunk: Buffer) => {
+            const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+            receivedBytes += buffer.length;
+            if (receivedBytes > MAX_UPSTREAM_RESPONSE_BYTES) {
+              req.destroy(new UpstreamResponseTooLargeError());
+              return;
+            }
+            chunks.push(buffer);
+          });
           res.on('end', () => {
             if (res.statusCode && res.statusCode >= 400) {
               reject(new Error(`HTTP ${res.statusCode}`));
@@ -57,8 +77,16 @@ function httpGetJSON(urlStr: string): Promise<any> {
         },
         (res: any) => {
           let data = '';
+          let receivedBytes = 0;
           res.setEncoding('utf8');
-          res.on('data', (chunk: string) => (data += chunk));
+          res.on('data', (chunk: string) => {
+            receivedBytes += Buffer.byteLength(chunk, 'utf8');
+            if (receivedBytes > MAX_UPSTREAM_RESPONSE_BYTES) {
+              req.destroy(new UpstreamResponseTooLargeError());
+              return;
+            }
+            data += chunk;
+          });
           res.on('end', () => {
             if (res.statusCode && res.statusCode >= 400) {
               reject(new Error(`HTTP ${res.statusCode}`));
@@ -85,10 +113,29 @@ function normalizeSymbol(input: string): string {
   return String(input || '').trim().toUpperCase().replace(/\.(SH|SZ|BJ)$|^(SH|SZ|BJ)/, '');
 }
 
+class InvalidStockIdentifierError extends Error {
+  constructor(input: string) {
+    const raw = String(input || '').trim();
+    const preview = raw.length > 32 ? `${raw.slice(0, 32)}…` : raw || '空值';
+    super(`请提供具体 A 股代码或股票名称，例如“002230”或“科大讯飞”。“${preview}”不是可查询的证券标识。`);
+    this.name = 'InvalidStockIdentifierError';
+  }
+}
+
+function toMcpError(error: unknown) {
+  const message = String((error as Error)?.message || '未知错误');
+  if (error instanceof InvalidStockIdentifierError) return { error: 'invalid_argument', message, retryable: false };
+  return { error: 'upstream_error', trace_id: randomUUID(), message, retryable: true };
+}
+
+function isValidStockCode(input: string) {
+  return /^\d{6}$/.test(normalizeSymbol(input));
+}
+
 /** 查询 A 股实时行情（腾讯为主，新浪兜底） */
 async function fetchStockQuote(symbol: string) {
   const code = normalizeSymbol(symbol);
-  if (!/^\d{6}$/.test(code)) throw new Error('股票代码应为 6 位数字');
+  if (!/^\d{6}$/.test(code)) throw new InvalidStockIdentifierError(symbol);
   const market = code.startsWith('6') || code.startsWith('5') || code.startsWith('9') ? 'sh' : 'sz';
 
   // 腾讯
@@ -135,6 +182,50 @@ async function fetchStockQuote(symbol: string) {
     amount: Number(s[9]) || 0,
     source: 'sina',
   };
+}
+
+type StockSearchResult = { code: string; name: string; exchange: 'SH' | 'SZ' | 'BJ' };
+
+function normalizeSearchResult(code: unknown, name: unknown, exchange?: unknown): StockSearchResult | null {
+  const normalizedCode = String(code || '').replace(/\D/g, '');
+  const normalizedName = String(name || '').trim();
+  if (!/^\d{6}$/.test(normalizedCode) || !normalizedName) return null;
+  const rawExchange = String(exchange || '').toUpperCase();
+  const market: 'SH' | 'SZ' | 'BJ' = rawExchange === 'BJ' || /^[48]/.test(normalizedCode)
+    ? 'BJ' : rawExchange === 'SH' || /^(5|6|9)/.test(normalizedCode) ? 'SH' : 'SZ';
+  return { code: normalizedCode, name: normalizedName, exchange: market };
+}
+
+async function searchStocks(query: string): Promise<StockSearchResult[]> {
+  const keyword = String(query || '').trim();
+  if (!keyword || /^股票行情$|^行情$|^股市$/.test(keyword)) throw new InvalidStockIdentifierError(keyword);
+  const matches = new Map<string, StockSearchResult>();
+  try {
+    const payload = await httpGetJSON(`https://searchapi.eastmoney.com/api/suggest/get?input=${encodeURIComponent(keyword)}&type=14&token=D43BF722C1B2D6D0F3513D2F4B09D208&count=10`);
+    const rows = Array.isArray(payload?.QuotationCodeTable?.Data) ? payload.QuotationCodeTable.Data : [];
+    for (const item of rows) {
+      const kind = String(item?.Classify || item?.SecurityTypeName || '');
+      if (kind && !/AStock|A股|沪A|深A|北交/.test(kind)) continue;
+      const quoteId = String(item?.QuoteID || '');
+      const result = normalizeSearchResult(item?.Code || item?.UnifiedCode, item?.Name, quoteId.startsWith('1.') ? 'SH' : quoteId.startsWith('0.') ? 'SZ' : undefined);
+      if (result) matches.set(result.code, result);
+    }
+  } catch {
+    // Fall through to the Sina suggestion endpoint.
+  }
+  if (!matches.size) {
+    try {
+      const text = await httpGetText(`https://suggest3.sinajs.cn/suggest/type=11,12,13,14,15/&key=${encodeURIComponent(keyword)}`, 'https://finance.sina.com.cn/', 'gb18030');
+      for (const item of text.matchAll(/"([a-z]{2})(\d{6}),[^,]*,([^,]+),/gi)) {
+        const result = normalizeSearchResult(item[2], item[3], item[1].toUpperCase());
+        if (result) matches.set(result.code, result);
+      }
+    } catch {
+      // Error is normalized below.
+    }
+  }
+  if (!matches.size) throw new Error('股票搜索数据源暂不可用或未找到匹配证券');
+  return [...matches.values()].slice(0, 10);
 }
 
 
@@ -189,9 +280,9 @@ export function createMcpServer(): McpServer {
     {
       title: '查询 A 股实时行情',
       description:
-        '查询任意 A 股股票的实时行情，包括现价、涨跌、涨跌幅、开盘/最高/最低、成交量、成交额等。输入 6 位股票代码即可。数据来源腾讯/新浪，实时更新。',
+        '查询单只 A 股实时行情。仅在已知明确股票代码时调用：symbol 必须为 6 位代码或交易所前后缀代码（如 002230、002230.SZ、SH600519）。若用户只说股票名称，先调用 search_stock；若只说“股票行情”“看行情”等泛化意图，不得调用本工具，应追问具体股票。',
       inputSchema: {
-        symbol: z.string().describe('6 位 A 股股票代码，如 600519（贵州茅台）、000001（平安银行）'),
+        symbol: z.string().trim().min(1).max(MAX_STOCK_IDENTIFIER_LENGTH).regex(/^(?:(?:SH|SZ|BJ)?\d{6}|\d{6}\.(?:SH|SZ|BJ))$/i, 'symbol 必须是 6 位 A 股代码，可带 SH/SZ/BJ 前后缀').describe('单只股票的明确代码：002230、002230.SZ 或 SH600519；不能填写“股票行情”、股票名称或市场泛称。'),
       },
     },
     async ({ symbol }) => {
@@ -203,8 +294,29 @@ export function createMcpServer(): McpServer {
       } catch (error: any) {
         return {
           isError: true,
-          content: [{ type: 'text' as const, text: JSON.stringify({ error: 'upstream_error', trace_id: randomUUID(), message: String(error?.message || '未知错误') }) }],
+          content: [{ type: 'text' as const, text: JSON.stringify(toMcpError(error)) }],
         };
+      }
+    },
+  );
+
+  server.registerTool(
+    'search_stock',
+    {
+      title: '搜索 A 股证券',
+      description: '按股票名称、6 位代码或代码片段搜索 A 股证券。用户只提供名称时先调用本工具，得到明确代码后再调用 get_stock_quote；用户只说“股票行情”时应追问，不调用行情工具。',
+      inputSchema: {
+        query: z.string().trim().min(1).max(MAX_STOCK_SEARCH_LENGTH).describe('股票名称、6 位代码或代码片段，例如“科大讯飞”“002230”；最长 64 个字符。'),
+      },
+    },
+    async ({ query }) => {
+      try {
+        const results = isValidStockCode(query)
+          ? [{ code: normalizeSymbol(query), name: '代码已识别，可调用 get_stock_quote 查询实时行情', exchange: /^(5|6|9)/.test(normalizeSymbol(query)) ? 'SH' as const : 'SZ' as const }]
+          : await searchStocks(query);
+        return { content: [{ type: 'text' as const, text: JSON.stringify({ query, results }, null, 2) }] };
+      } catch (error: any) {
+        return { isError: true, content: [{ type: 'text' as const, text: JSON.stringify(toMcpError(error)) }] };
       }
     },
   );
@@ -226,7 +338,7 @@ export function createMcpServer(): McpServer {
       } catch (error: any) {
         return {
           isError: true,
-          content: [{ type: 'text' as const, text: JSON.stringify({ error: 'upstream_error', trace_id: randomUUID(), message: String(error?.message || '未知错误') }) }],
+          content: [{ type: 'text' as const, text: JSON.stringify(toMcpError(error)) }],
         };
       }
     },
