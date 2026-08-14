@@ -6,7 +6,11 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import dotenv from 'dotenv';
 import { getPool } from '../lib/db/pool.js';
+
+// migrate.ts 独立运行，需自行加载 .env（server.ts 由自身 dotenv.config() 负责）
+dotenv.config();
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
