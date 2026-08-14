@@ -43,7 +43,7 @@ AI 失败时返回明确 `aiFailed` 标记并走规则兜底，**不会伪造假
 - **后端**：Express 单体（`server.ts`，约 7800 行），dev 模式内嵌 Vite middleware，生产模式静态托管 + SPA fallback
 - **AI 服务**：Node 端通过 OpenAI SDK 兼容方式直连 DeepSeek（默认 `deepseek-v4-flash`）
 - **Python 数据源**：`scripts/*.py` 脚本（依赖 akshare / baostock / pandas / pytdx / tickflow 等），由 Node `child_process` 调用
-- **MCP 服务**：`/api/mcp`（StreamableHTTP），提供 `get_stock_quote`、`get_market_overview` 两个工具（纯 Node，无 Python 依赖）
+- **MCP 服务**：`/api/mcp`（StreamableHTTP），提供 `search_stock`、`get_stock_quote`、`get_market_overview` 三个工具（纯 Node，无 Python 依赖）
 
 ## 快速启动
 

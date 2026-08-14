@@ -110,7 +110,7 @@ async function startServer() {
   const PORT = Number(process.env.PORT) || 8080;
 
   // Middleware for parsing JSON
-  app.use(express.json());
+  app.use(express.json({ limit: '64kb' }));
 
   // ---- 用户与会话（方案2：本地 Docker PG / 生产阿里云 PG；无 DATABASE_URL 时回退内存仓储） ----
   const dbRuntime = await createRuntime();
@@ -3314,14 +3314,24 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
   // MCP Server（Streamable HTTP，无状态模式）——供赛事平台 tools/list 验证与调用
   // 数据源为 Node 原生 HTTP（腾讯/新浪/东财），不依赖 Python，Vercel / Railway 均可运行。
   // 注意：无状态模式下，每个请求必须使用全新的 server + transport（官方示例 simpleStatelessStreamableHttp）。
+  const MAX_CONCURRENT_MCP_REQUESTS = 32;
+  let activeMcpRequests = 0;
   const handleMcp = async (req: express.Request, res: express.Response) => {
+    if (activeMcpRequests >= MAX_CONCURRENT_MCP_REQUESTS) {
+      return res.status(429).json({
+        jsonrpc: '2.0',
+        error: { code: -32001, message: 'MCP service is busy, please retry shortly' },
+        id: req.body?.id ?? null,
+      });
+    }
+    activeMcpRequests += 1;
     const mcpServer = createMcpServer();
     const mcpTransport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined, // 无状态：Vercel Serverless 每次请求独立，不维护 session
       enableJsonResponse: true, // 直接返回 JSON（而非 SSE 流），适配 Serverless 与评测平台
     });
     try {
-      console.log(`[mcp] ${req.method} ${req.url} body=${JSON.stringify(req.body)?.slice(0, 120)}`);
+      console.log(`[mcp] ${req.method} ${req.url} method=${String(req.body?.method || 'unknown').slice(0, 64)}`);
       await mcpServer.connect(mcpTransport);
       await mcpTransport.handleRequest(req as any, res as any, req.body);
       console.log(`[mcp] handled ${req.method} status=${res.statusCode}`);
@@ -3337,6 +3347,7 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
         res.end();
       }
     } finally {
+      activeMcpRequests = Math.max(0, activeMcpRequests - 1);
       res.on('close', () => {
         void mcpTransport.close();
         void mcpServer.close();
