@@ -154,6 +154,56 @@ CREATE TABLE IF NOT EXISTS morning_reports (
   created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- 今日市场动态（一键深度研判，每次生成追加一条，保留生成历史）
+CREATE TABLE IF NOT EXISTS market_reports (
+  id             TEXT PRIMARY KEY,
+  market_date    TEXT NOT NULL,                  -- 'YYYY-MM-DD'
+  report         TEXT NOT NULL,
+  fallback       BOOLEAN NOT NULL DEFAULT false,
+  prompt_version TEXT NOT NULL DEFAULT '',
+  input_snapshot JSONB NOT NULL DEFAULT '{}'::jsonb, -- 指数/板块等输入快照
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_market_reports_market_date ON market_reports (market_date, created_at);
+
+-- 泡泡精选（市场地图，每次生成追加一条，保留生成历史）
+CREATE TABLE IF NOT EXISTS bubble_selections (
+  id             TEXT PRIMARY KEY,
+  market_date    TEXT NOT NULL,                  -- 'YYYY-MM-DD'
+  payload        JSONB NOT NULL,
+  prompt_version TEXT NOT NULL DEFAULT '',
+  fallback       BOOLEAN NOT NULL DEFAULT false,
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_bubble_selections_market_date ON bubble_selections (market_date, created_at);
+
+-- 今日市场概览（三大指数 / 两市成交额 / 涨跌停家数，按交易日幂等更新，
+-- 交易时段内由定时任务每 5/15 分钟刷新，页面读库展示）
+CREATE TABLE IF NOT EXISTS market_overviews (
+  market_date TEXT PRIMARY KEY,                  -- 'YYYY-MM-DD'
+  payload     JSONB NOT NULL,                    -- GET /api/market-overview 的完整响应
+  updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- 领涨领跌（东方财富板块接口全量，按交易日幂等更新）
+CREATE TABLE IF NOT EXISTS sector_snapshots (
+  market_date TEXT PRIMARY KEY,                  -- 'YYYY-MM-DD'
+  payload     JSONB NOT NULL,                    -- { sectors, timestamp }
+  updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- 个股分析 Agent 输出（按 symbol + agent 幂等更新）
+CREATE TABLE IF NOT EXISTS stock_agent_outputs (
+  symbol      TEXT NOT NULL,                     -- 6 位证券代码
+  agent       TEXT NOT NULL,                     -- 'cio-manager' | 'industry-chain' | ...
+  payload     JSONB NOT NULL,
+  updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (symbol, agent)
+);
+
 -- 通用 AI 输出缓存（各 Agent/接口可复用）
 CREATE TABLE IF NOT EXISTS ai_cache (
   cache_key   TEXT PRIMARY KEY,                  -- 如 'stock-agents/cio-manager:600519'

@@ -24,6 +24,7 @@ import { WatchlistService } from './lib/watchlistService.js';
 import { createAuthRouter, bearerToken } from './lib/authRouter.js';
 import { createWatchlistRouter } from './lib/watchlistRouter.js';
 import { ApiError } from './lib/errors.js';
+import { startMarketScheduler } from './lib/scheduler.js';
 
 dotenv.config();
 
@@ -120,6 +121,38 @@ async function startServer() {
   app.use('/api/auth', createAuthRouter(authService));
   app.use('/api/watchlist', createWatchlistRouter(authService, watchlistService));
 
+  // 内容落库（早报 / 市场动态 / 泡泡精选 / 聊天记录）：
+  // 写入失败只告警，绝不影响主接口的可用性，因此统一 fire-and-forget。
+  function safePersist(label: string, action: () => Promise<void>): void {
+    action()
+      .then(() => console.log(`[db-persist] ${label} saved`))
+      .catch((error: any) => console.warn(`[db-persist] ${label} failed: ${error?.message}`));
+  }
+
+  // 个股分析 Agent 输出落库（按 symbol + agent 幂等更新）
+  function persistStockAgentOutput(symbol: string, agent: string, output: unknown): void {
+    safePersist(`stock-agent:${agent}:${symbol}`, () =>
+      dbRuntime.content.saveStockAgentOutput({
+        symbol,
+        agent,
+        payload: output,
+        updatedAt: new Date().toISOString(),
+      }),
+    );
+  }
+
+  // 由行情时间戳推导上海时区的交易日 'YYYY-MM-DD'，不可解析时回退当前上海日期。
+  function marketDateFromTimestamp(timestamp: unknown): string {
+    const date = timestamp instanceof Date ? timestamp : new Date(String(timestamp ?? ''));
+    if (Number.isNaN(date.getTime())) return new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Shanghai' });
+    return date.toLocaleDateString('sv-SE', { timeZone: 'Asia/Shanghai' });
+  }
+
+  // 当前上海时区日期 'YYYY-MM-DD'（页面/定时任务读写当日数据的主键）。
+  function shanghaiToday(): string {
+    return new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Shanghai' });
+  }
+
   // API Route: AI Teacher Dialogue Chat (with history)
   app.post('/api/chat', async (req, res) => {
     try {
@@ -127,6 +160,30 @@ async function startServer() {
       if (!message) {
         return res.status(400).json({ error: 'Message is required' });
       }
+
+      // 会话隔离：前端维护并传递 sessionId；缺失时后端兜底生成。
+      const sessionId = typeof req.body?.sessionId === 'string' && req.body.sessionId.trim()
+        ? String(req.body.sessionId).trim().slice(0, 128)
+        : randomUUID();
+
+      // 登录用户关联 user_id，匿名会话允许落库（user_id 为 NULL）。
+      let userId: string | null = null;
+      try {
+        const auth = await authService.authenticate(bearerToken(req));
+        userId = auth.user.id;
+      } catch { /* 匿名会话也允许 */ }
+
+      const persistedUserText = String(message).slice(0, 2000);
+      safePersist(`chat:${sessionId}:user`, () =>
+        dbRuntime.chat.addMessage({
+          id: randomUUID(),
+          userId,
+          sessionId,
+          role: 'user',
+          content: persistedUserText,
+          createdAt: new Date().toISOString(),
+        }),
+      );
 
       // 未配置 DeepSeek Key 时优雅降级：明确提示，而不是抛 500 让前端误报"网络连接断开"
       let client: OpenAI;
@@ -178,6 +235,17 @@ async function startServer() {
       const replyText = completion.choices[0]?.message?.content
         || '抱歉呢，泡泡由于看盘劳累，刚才开小差了，您可以换个问题再和泡泡聊哦。';
 
+      safePersist(`chat:${sessionId}:assistant`, () =>
+        dbRuntime.chat.addMessage({
+          id: randomUUID(),
+          userId,
+          sessionId,
+          role: 'assistant',
+          content: replyText.slice(0, 2000),
+          createdAt: new Date().toISOString(),
+        }),
+      );
+
       let suggestedPrompts = [
         '这只股票的技术支撑位在多少？',
         '同板块还有哪些值得看好的龙头股？',
@@ -211,8 +279,9 @@ async function startServer() {
     }
   });
 
-  // API Route: One-click Comprehensive Market Digest Analysis
-  app.post('/api/market-report', async (req, res) => {
+  // 今日市场动态生成（一键深度研判）。
+  // 定时任务每 15 分钟调用一次并落库；POST 路由（用户手动点击）复用本函数。
+  async function generateMarketReport(): Promise<{ report: string; fallback: boolean }> {
     let fallback = false;
     try {
       const client = getAIClient();
@@ -257,19 +326,33 @@ ${breadth}
       const report = completion.choices[0]?.message?.content || '';
       if (!report) fallback = true;
 
-      res.json({
-        report: report
-          || '泡泡老师今天发现，市场整体氛围需要结合具体行情观察。当前未能生成实时解盘，请稍后重试。',
-        fallback,
-      });
+      const finalReport = report
+        || '泡泡老师今天发现，市场整体氛围需要结合具体行情观察。当前未能生成实时解盘，请稍后重试。';
+      safePersist('market-report', () =>
+        dbRuntime.content.saveMarketReport({
+          id: randomUUID(),
+          marketDate: marketDateFromTimestamp(marketData.timestamp),
+          report: finalReport,
+          fallback,
+          promptVersion: 'market-digest-v1',
+          inputSnapshot: { indexLines, topSectors, turnoverAmount, breadth },
+          createdAt: new Date().toISOString(),
+        }),
+      );
+
+      return { report: finalReport, fallback };
     } catch (error: any) {
       console.error('Error in /api/market-report:', error.message);
-      fallback = true;
-      res.json({
+      return {
         report: '泡泡老师今天发现，当前行情数据暂未获取成功，暂时无法生成一键解盘。请稍后再试。股市有风险，投资需谨慎！',
         fallback: true,
-      });
+      };
     }
+  }
+
+  // API Route: One-click Comprehensive Market Digest Analysis
+  app.post('/api/market-report', async (_req, res) => {
+    res.json(await generateMarketReport());
   });
 
   // ─── Prompt Pipeline: Three-Prompt Architecture ───
@@ -3007,24 +3090,25 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
     }
   });
 
-  // POST /api/morning-report — Prompt 1 → 2 → 3 pipeline
+  // 早报生成（Prompt 1 → 2 → 3 pipeline）。
+  // 定时任务每 15 分钟以 force 模式调用一次并把结果写入 morning_reports；
+  // 页面读取走 DB 优先（见下方路由），不再由页面触发 AI 生成。
   let morningReportCache: { data: any; timestamp: number } | null = null;
   let morningReportPromise: Promise<any> | null = null;
   // 首页日报和“今天发生了什么”共用同一份生成结果，统一缓存 15 分钟。
   const REPORT_CACHE_TTL = 15 * 60 * 1000;
 
-  app.get('/api/morning-report', async (req, res) => {
-    console.log(`[morning-report] incoming request, ref=${req.header('referer') || 'none'}, ua=${req.header('user-agent')?.substring(0, 40) || 'none'}`);
+  async function generateMorningReport(options?: { force?: boolean }): Promise<any> {
     const now = Date.now();
-    if (morningReportCache && (now - morningReportCache.timestamp) < REPORT_CACHE_TTL) {
+    if (!options?.force && morningReportCache && (now - morningReportCache.timestamp) < REPORT_CACHE_TTL) {
       console.log(`[morning-report] served from cache, data.sentiment=${morningReportCache.data.sentiment}, summaryLen=${morningReportCache.data.summaryText?.length || 0}`);
-      return res.json(morningReportCache.data);
+      return morningReportCache.data;
     }
 
     // 缓存过期期间并发请求共享同一个生成任务，避免重复执行昂贵的 AI pipeline
     if (morningReportPromise) {
       try {
-        return res.json(await morningReportPromise);
+        return await morningReportPromise;
       } catch (e: any) {
         console.error('[morning-report] shared generation failed:', e.message);
       }
@@ -3288,6 +3372,13 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
           timestamp: marketData.timestamp,
         };
         morningReportCache = { data: result, timestamp: Date.now() };
+        safePersist(`morning-report:${snapshot.marketDate}`, () =>
+          dbRuntime.content.saveMorningReport({
+            marketDate: snapshot.marketDate,
+            payload: result,
+            createdAt: new Date().toISOString(),
+          }),
+        );
         return result;
       } catch (error: any) {
         console.error('[morning-report] error:', error.message);
@@ -3297,15 +3388,30 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
 
     morningReportPromise = reportPromise;
     try {
-      const result = await reportPromise;
-      res.json(result);
-    } catch (error: any) {
-      res.status(500).json({
-        error: '早报生成失败，请稍后重试',
-        fallback: true,
-      });
+      return await reportPromise;
     } finally {
       morningReportPromise = null;
+    }
+  }
+
+  // GET /api/morning-report — 页面读库优先，不触发 AI 生成（AI 由定时任务每 15 分钟生成并落库）
+  app.get('/api/morning-report', async (_req, res) => {
+    try {
+      const stored = await dbRuntime.content.getMorningReport(shanghaiToday());
+      if (stored?.payload) return res.json(stored.payload);
+      return res.json({
+        aiFailed: true,
+        sentiment: '中性',
+        summaryText: '早报将在交易时段由服务端自动生成，当前暂无数据。',
+        reasonBrief: '',
+        stories: [],
+        top3Themes: [],
+        fallback: true,
+        timestamp: Date.now(),
+      });
+    } catch (error: any) {
+      console.error('[morning-report] query failed:', error.message);
+      res.status(500).json({ error: '早报数据获取失败，请稍后重试', fallback: true });
     }
   });
 
@@ -3480,7 +3586,9 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
       if (!symbol) return res.status(400).json({ error: 'symbol is required' });
       const refresh = String(req.query.refresh || '') === '1';
       if (refresh) invalidateStockResearchCaches(symbol);
-      res.json(await runCioManagerAgent(symbol, refresh));
+      const output = await runCioManagerAgent(symbol, refresh);
+      persistStockAgentOutput(symbol, 'cio-manager', output);
+      res.json(output);
     } catch (error: any) {
       console.error('[cio-manager-agent] query failed:', error.message);
       res.status(503).json({ error: 'CIO/Manager Agent 暂不可用', detail: error.message, dataUnavailable: true });
@@ -3599,7 +3707,9 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
       if (!symbol) return res.status(400).json({ error: 'symbol is required' });
       const refresh = String(req.query.refresh || '') === '1';
       if (refresh) invalidateStockResearchCaches(symbol);
-      res.json(await runIndustryChainAgent(symbol, refresh));
+      const output = await runIndustryChainAgent(symbol, refresh);
+      persistStockAgentOutput(symbol, 'industry-chain', output);
+      res.json(output);
     } catch (error: any) {
       console.error('[industry-chain-agent] query failed:', error.message);
       res.status(503).json({ error: '行业与产业链 Agent 暂不可用', detail: safeRuntimeDataGap(error.message), dataUnavailable: true });
@@ -3658,7 +3768,9 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
     try {
       const symbol = String(req.query.symbol || '');
       if (!symbol) return res.status(400).json({ error: 'symbol is required' });
-      res.json(await runFundamentalAgent(symbol, String(req.query.refresh || '') === '1'));
+      const output = await runFundamentalAgent(symbol, String(req.query.refresh || '') === '1');
+      persistStockAgentOutput(symbol, 'fundamental', output);
+      res.json(output);
     } catch (error: any) {
       console.error('[fundamental-agent] query failed:', error.message);
       res.status(503).json({ error: '基本面 Agent 暂不可用', detail: error.message, dataUnavailable: true });
@@ -3672,7 +3784,9 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
       if (!symbol) return res.status(400).json({ error: 'symbol is required' });
       const days = Number(req.query.days || 180);
       if (!Number.isInteger(days) || days < 1 || days > 365) return res.status(400).json({ error: 'days must be an integer between 1 and 365' });
-      res.json(await runEventAgent(symbol, days, String(req.query.refresh || '') === '1'));
+      const output = await runEventAgent(symbol, days, String(req.query.refresh || '') === '1');
+      persistStockAgentOutput(symbol, 'event', output);
+      res.json(output);
     } catch (error: any) {
       console.error('[event-agent] query failed:', error.message);
       res.status(503).json({ error: '事件 Agent 暂不可用', detail: error.message, dataUnavailable: true });
@@ -3686,7 +3800,9 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
       if (!symbol) return res.status(400).json({ error: 'symbol is required' });
       const days = Number(req.query.days || 30);
       if (!Number.isInteger(days) || days < 1 || days > 90) return res.status(400).json({ error: 'days must be an integer between 1 and 90' });
-      res.json(await runSentimentAgent(symbol, days, String(req.query.refresh || '') === '1'));
+      const output = await runSentimentAgent(symbol, days, String(req.query.refresh || '') === '1');
+      persistStockAgentOutput(symbol, 'sentiment', output);
+      res.json(output);
     } catch (error: any) {
       console.error('[sentiment-agent] query failed:', error.message);
       res.status(503).json({ error: '舆情 Agent 暂不可用', detail: error.message, dataUnavailable: true });
@@ -3698,7 +3814,9 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
     try {
       const symbol = String(req.query.symbol || '');
       if (!symbol) return res.status(400).json({ error: 'symbol is required' });
-      res.json(await runRiskCounterAgent(symbol, String(req.query.refresh || '') === '1'));
+      const output = await runRiskCounterAgent(symbol, String(req.query.refresh || '') === '1');
+      persistStockAgentOutput(symbol, 'risk-counter', output);
+      res.json(output);
     } catch (error: any) {
       console.error('[risk-counter-agent] query failed:', error.message);
       res.status(503).json({ error: '风险/反方 Agent 暂不可用', detail: error.message, dataUnavailable: true });
@@ -3710,7 +3828,9 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
     try {
       const symbol = String(req.query.symbol || '');
       if (!symbol) return res.status(400).json({ error: 'symbol is required' });
-      res.json(await runValuationAgent(symbol, String(req.query.refresh || '') === '1'));
+      const output = await runValuationAgent(symbol, String(req.query.refresh || '') === '1');
+      persistStockAgentOutput(symbol, 'valuation', output);
+      res.json(output);
     } catch (error: any) {
       console.error('[valuation-agent] query failed:', error.message);
       res.status(503).json({ error: '估值 Agent 暂不可用', detail: error.message, dataUnavailable: true });
@@ -3722,16 +3842,26 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
     try {
       const symbol = String(req.query.symbol || '');
       if (!symbol) return res.status(400).json({ error: 'symbol is required' });
-      res.json(await runTechnicalMarketAgent(symbol, String(req.query.refresh || '') === '1'));
+      const output = await runTechnicalMarketAgent(symbol, String(req.query.refresh || '') === '1');
+      persistStockAgentOutput(symbol, 'technical-market', output);
+      res.json(output);
     } catch (error: any) {
       console.error('[technical-market-agent] query failed:', error.message);
       res.status(503).json({ error: '技术与市场 Agent 暂不可用', detail: error.message, dataUnavailable: true });
     }
   });
 
-  // GET /api/sectors - 东方财富真实板块数据，供 MarketMapTab 使用
+  // GET /api/sectors - 领涨领跌（东方财富板块接口），页面读库优先；
+  // 库中无当日数据时拉取真实板块数据并落库（不触发 AI）。
   app.get('/api/sectors', async (_req, res) => {
     try {
+      const marketDate = shanghaiToday();
+      const stored = await dbRuntime.content.getSectorSnapshot(marketDate);
+      if (stored?.payload) {
+        const p = stored.payload as { sectors?: unknown[]; timestamp?: unknown };
+        return res.json({ sectors: p.sectors || [], timestamp: p.timestamp || stored.updatedAt });
+      }
+
       const marketData = await fetchMarketData();
       // marketData.sectors 来自东方财富板块API，包含 name + changePercent
       // 将板块数据映射为我们前端使用的格式
@@ -3741,7 +3871,11 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
         changePercent: s.changePercent,
         description: '',
       }));
-      res.json({ sectors, timestamp: marketData.timestamp });
+      const payload = { sectors, timestamp: marketData.timestamp };
+      safePersist(`sector-snapshot:${marketDate}`, () =>
+        dbRuntime.content.saveSectorSnapshot({ marketDate, payload, updatedAt: new Date().toISOString() }),
+      );
+      res.json(payload);
     } catch (error: any) {
       console.error('[sectors] error:', error.message);
       res.status(503).json({ error: '板块数据获取失败', dataUnavailable: true });
@@ -3784,11 +3918,42 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
     }
   }
 
-  // GET /api/market-overview — rule engine, no AI
+  // 市场概览 payload 构建（纯函数，供路由与定时任务共用）。
+  function buildMarketOverviewPayload(marketData: Awaited<ReturnType<typeof fetchMarketData>>) {
+    const sortedSectors = [...marketData.sectors].sort((a: any, b: any) => b.changePercent - a.changePercent);
+    const upCount = sortedSectors.filter((s: any) => s.changePercent > 0).length;
+    const downCount = sortedSectors.filter((s: any) => s.changePercent < 0).length;
+    const totalSectors = sortedSectors.length;
+    // 市场宽度 = 上涨板块占比
+    const breadthRatio = totalSectors > 0 ? Math.round((upCount / totalSectors) * 100) : 50;
+    const marketTemperature = calculateMarketTemperature(marketData);
+
+    return {
+      indices: marketData.indices.map((i: any) => ({
+        name: i.name,
+        code: i.code,
+        price: i.price,
+        changePercent: i.changePercent,
+      })),
+      topSectors: sortedSectors.slice(0, 3),
+      bottomSectors: sortedSectors.slice(-3).reverse(),
+      marketBreath: { up: upCount, down: downCount, breadthRatio },
+      totalVolume: marketData.marketPulse.turnoverAmount || marketData.volume,
+      marketTemperature,
+      timestamp: marketData.timestamp,
+      sourceMeta: marketData.sourceMeta || null,
+      marketStatus: getMarketStatus(),
+    };
+  }
+
+  // GET /api/market-overview — 页面读库优先；库中无当日数据时拉真实行情并落库（不触发 AI）
   app.get('/api/market-overview', async (_req, res) => {
     try {
-      const marketData = await fetchMarketData();
+      const marketDate = shanghaiToday();
+      const stored = await dbRuntime.content.getMarketOverview(marketDate);
+      if (stored?.payload) return res.json(stored.payload);
 
+      const marketData = await fetchMarketData();
       // 如果没有任何数据，直接返回错误而非硬编码假数据
       if (!marketData.indices || marketData.indices.length === 0) {
         return res.status(503).json({
@@ -3796,31 +3961,11 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
           dataUnavailable: true,
         });
       }
-
-      const sortedSectors = [...marketData.sectors].sort((a: any, b: any) => b.changePercent - a.changePercent);
-      const upCount = sortedSectors.filter((s: any) => s.changePercent > 0).length;
-      const downCount = sortedSectors.filter((s: any) => s.changePercent < 0).length;
-      const totalSectors = sortedSectors.length;
-      // 市场宽度 = 上涨板块占比
-      const breadthRatio = totalSectors > 0 ? Math.round((upCount / totalSectors) * 100) : 50;
-      const marketTemperature = calculateMarketTemperature(marketData);
-
-      res.json({
-        indices: marketData.indices.map((i: any) => ({
-          name: i.name,
-          code: i.code,
-          price: i.price,
-          changePercent: i.changePercent,
-        })),
-        topSectors: sortedSectors.slice(0, 3),
-        bottomSectors: sortedSectors.slice(-3).reverse(),
-        marketBreath: { up: upCount, down: downCount, breadthRatio },
-        totalVolume: marketData.marketPulse.turnoverAmount || marketData.volume,
-        marketTemperature,
-        timestamp: marketData.timestamp,
-        sourceMeta: marketData.sourceMeta || null,
-        marketStatus: getMarketStatus(),
-      });
+      const payload = buildMarketOverviewPayload(marketData);
+      safePersist(`market-overview:${marketDate}`, () =>
+        dbRuntime.content.saveMarketOverview({ marketDate, payload, updatedAt: new Date().toISOString() }),
+      );
+      res.json(payload);
     } catch (error: any) {
       console.error('[market-overview] error:', error.message);
       res.status(503).json({
@@ -4379,16 +4524,17 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
   let bubbleSelectionPromise: Promise<any> | null = null;
   const BUBBLE_CACHE_TTL = 15 * 60 * 1000;
 
-  // GET /api/bubble-selection — Prompt 5，泡泡精选板块
-  app.get('/api/bubble-selection', async (_req, res) => {
+  // 泡泡精选生成（Prompt 5）。定时任务每 15 分钟以 force 模式调用并落库；
+  // 页面读取走 DB 优先（见下方路由），不再由页面触发 AI 生成。
+  async function generateBubbleSelection(options?: { force?: boolean }): Promise<any> {
     const now = Date.now();
-    if (bubbleSelectionCache && (now - bubbleSelectionCache.timestamp) < BUBBLE_CACHE_TTL) {
-      return res.json(bubbleSelectionCache.data);
+    if (!options?.force && bubbleSelectionCache && (now - bubbleSelectionCache.timestamp) < BUBBLE_CACHE_TTL) {
+      return bubbleSelectionCache.data;
     }
     // 缓存过期期间的并发请求共享同一次生成，避免重复打东财和 AI
     if (bubbleSelectionPromise) {
       try {
-        return res.json(await bubbleSelectionPromise);
+        return await bubbleSelectionPromise;
       } catch (e: any) {
         console.error('[bubble-selection] shared generation failed:', e.message);
       }
@@ -4445,20 +4591,42 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
       };
       console.log(`[bubble-selection] completed in ${((Date.now() - startedAt) / 1000).toFixed(1)}s, fallback=${fallback}`);
       bubbleSelectionCache = { data: result, timestamp: Date.now() };
+      safePersist('bubble-selection', () =>
+        dbRuntime.content.saveBubbleSelection({
+          id: randomUUID(),
+          marketDate: marketDateFromTimestamp(result.timestamp),
+          payload: result,
+          promptVersion: result.promptVersion,
+          fallback: result.fallback,
+          createdAt: new Date().toISOString(),
+        }),
+      );
       return result;
     })();
 
     bubbleSelectionPromise = task;
     try {
-      res.json(await task);
-    } catch (error: any) {
-      console.error('[bubble-selection] error:', error.message);
-      res.status(503).json({
-        error: error.dataUnavailable ? '板块数据获取失败，请稍后重试' : '泡泡精选生成失败，请稍后重试',
-        dataUnavailable: true,
-      });
+      return await task;
     } finally {
       bubbleSelectionPromise = null;
+    }
+  }
+
+  // GET /api/bubble-selection — 页面读库优先，不触发 AI 生成（AI 由定时任务每 15 分钟生成并落库）
+  app.get('/api/bubble-selection', async (_req, res) => {
+    try {
+      const stored = await dbRuntime.content.getBubbleSelection(shanghaiToday());
+      if (stored?.payload) return res.json(stored.payload);
+      return res.json({
+        bubbleSelection: [],
+        candidateCount: 0,
+        promptVersion: 'p5-bubble-signal-v2',
+        fallback: true,
+        timestamp: null,
+      });
+    } catch (error: any) {
+      console.error('[bubble-selection] query failed:', error.message);
+      res.status(503).json({ error: '泡泡精选数据获取失败，请稍后重试', dataUnavailable: true });
     }
   });
 
@@ -7768,6 +7936,53 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
   if (!process.env.VERCEL) {
     app.listen(PORT, '0.0.0.0', () => {
       console.log(`[Paopao Server] Running at http://localhost:${PORT} in ${process.env.NODE_ENV || 'development'} mode`);
+    });
+
+    // A 股交易时段主动数据刷新调度：
+    //   refreshIndices — 指数每 5 分钟：拉真实行情 → 组装市场概览 → 落库
+    //   refreshAll     — 全量每 15 分钟：拉真实行情 → 板块快照落库 → 市场动态/早报/泡泡精选（内部均落库）
+    // 页面路由一律 DB 优先，定时任务保证数据库在交易时段内持续更新。
+    const refreshIndices = async () => {
+      try {
+        const marketData = await fetchMarketData();
+        if (!marketData.indices || marketData.indices.length === 0) return;
+        const payload = buildMarketOverviewPayload(marketData);
+        safePersist(`market-overview:${shanghaiToday()}`, () =>
+          dbRuntime.content.saveMarketOverview({ marketDate: shanghaiToday(), payload, updatedAt: new Date().toISOString() }),
+        );
+      } catch (error: any) {
+        console.warn('[scheduler] refreshIndices failed:', error?.message);
+      }
+    };
+
+    const refreshAll = async () => {
+      try {
+        const marketData = await fetchMarketData();
+        const sectors = (marketData.sectors || []).map((s: any, i: number) => ({
+          id: `sector-${i}`,
+          name: s.name,
+          changePercent: s.changePercent,
+          description: '',
+        }));
+        safePersist(`sector-snapshot:${shanghaiToday()}`, () =>
+          dbRuntime.content.saveSectorSnapshot({
+            marketDate: shanghaiToday(),
+            payload: { sectors, timestamp: marketData.timestamp },
+            updatedAt: new Date().toISOString(),
+          }),
+        );
+        await generateMarketReport();
+        await generateMorningReport({ force: true });
+        await generateBubbleSelection({ force: true });
+      } catch (error: any) {
+        console.warn('[scheduler] refreshAll failed:', error?.message);
+      }
+    };
+
+    startMarketScheduler({
+      refreshIndices,
+      refreshAll,
+      log: (message) => console.log(message),
     });
   }
 

@@ -33,6 +33,8 @@ export function AiTeacherTab({ prefilledStock, onClearPrefilledStock, pendingPro
   const [inputValue, setInputValue] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  // 会话唯一标识：每次进入 AI 泡泡页生成一次，用于聊天记录落库后的按会话归档。
+  const sessionIdRef = useRef<string>(`bubble-chat-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`);
 
   // Auto-scroll to bottom of chat
   useEffect(() => {
@@ -111,6 +113,7 @@ export function AiTeacherTab({ prefilledStock, onClearPrefilledStock, pendingPro
         body: JSON.stringify({
           message: text,
           history: recentHistory,
+          sessionId: sessionIdRef.current,
         }),
       });
 

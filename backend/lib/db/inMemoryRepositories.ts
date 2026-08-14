@@ -4,7 +4,10 @@
  */
 import type {
   UserRepo, BlacklistRepo, FeedbackRepo, WatchlistRepo,
+  ContentRepo, ChatRepo,
   UserRecord, BlacklistEntry, FeedbackRecord, FeedbackStats, WatchlistItem,
+  MorningReportRecord, MarketReportRecord, BubbleSelectionRecord, ChatMessageRecord,
+  MarketOverviewRecord, SectorSnapshotRecord, StockAgentOutputRecord,
 } from './repositories.js';
 
 export class InMemoryUserRepo implements UserRepo {
@@ -97,5 +100,68 @@ export class InMemoryWatchlistRepo implements WatchlistRepo {
 
   async remove(userId: string, symbol: string): Promise<void> {
     this.rows.get(userId)?.delete(symbol);
+  }
+}
+
+export class InMemoryContentRepo implements ContentRepo {
+  private morning = new Map<string, MorningReportRecord>();   // marketDate -> record
+  private market: MarketReportRecord[] = [];
+  private bubble: BubbleSelectionRecord[] = [];
+  private overviews = new Map<string, MarketOverviewRecord>();
+  private sectors = new Map<string, SectorSnapshotRecord>();
+  private agents = new Map<string, StockAgentOutputRecord>();  // `${symbol}:${agent}` -> record
+
+  async saveMorningReport(record: MorningReportRecord): Promise<void> {
+    this.morning.set(record.marketDate, record);
+  }
+
+  async saveMarketReport(record: MarketReportRecord): Promise<void> {
+    this.market.push(record);
+  }
+
+  async saveBubbleSelection(record: BubbleSelectionRecord): Promise<void> {
+    this.bubble.push(record);
+  }
+
+  async saveMarketOverview(record: MarketOverviewRecord): Promise<void> {
+    this.overviews.set(record.marketDate, record);
+  }
+
+  async saveSectorSnapshot(record: SectorSnapshotRecord): Promise<void> {
+    this.sectors.set(record.marketDate, record);
+  }
+
+  async saveStockAgentOutput(record: StockAgentOutputRecord): Promise<void> {
+    this.agents.set(`${record.symbol}:${record.agent}`, record);
+  }
+
+  async getMorningReport(marketDate: string): Promise<MorningReportRecord | null> {
+    return this.morning.get(marketDate) ?? null;
+  }
+
+  async getBubbleSelection(marketDate: string): Promise<BubbleSelectionRecord | null> {
+    const matches = this.bubble.filter((record) => record.marketDate === marketDate);
+    if (!matches.length) return null;
+    return matches.sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
+  }
+
+  async getMarketOverview(marketDate: string): Promise<MarketOverviewRecord | null> {
+    return this.overviews.get(marketDate) ?? null;
+  }
+
+  async getSectorSnapshot(marketDate: string): Promise<SectorSnapshotRecord | null> {
+    return this.sectors.get(marketDate) ?? null;
+  }
+
+  async getStockAgentOutput(symbol: string, agent: string): Promise<StockAgentOutputRecord | null> {
+    return this.agents.get(`${symbol}:${agent}`) ?? null;
+  }
+}
+
+export class InMemoryChatRepo implements ChatRepo {
+  private rows: ChatMessageRecord[] = [];
+
+  async addMessage(record: ChatMessageRecord): Promise<void> {
+    this.rows.push(record);
   }
 }

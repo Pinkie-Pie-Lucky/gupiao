@@ -5,7 +5,10 @@
 import type { Pool } from 'pg';
 import type {
   UserRepo, BlacklistRepo, FeedbackRepo, WatchlistRepo,
+  ContentRepo, ChatRepo,
   UserRecord, BlacklistEntry, FeedbackRecord, FeedbackStats, WatchlistItem,
+  MorningReportRecord, MarketReportRecord, BubbleSelectionRecord, ChatMessageRecord,
+  MarketOverviewRecord, SectorSnapshotRecord, StockAgentOutputRecord,
 } from './repositories.js';
 
 export class PgUserRepo implements UserRepo {
@@ -134,5 +137,138 @@ export class PgWatchlistRepo implements WatchlistRepo {
 
   async remove(userId: string, symbol: string): Promise<void> {
     await this.pool.query(`DELETE FROM watchlist WHERE user_id = $1 AND symbol = $2`, [userId, symbol]);
+  }
+}
+
+export class PgContentRepo implements ContentRepo {
+  constructor(private pool: Pool) {}
+
+  async saveMorningReport(record: MorningReportRecord): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO morning_reports (market_date, payload, created_at)
+       VALUES ($1, $2::jsonb, $3)
+       ON CONFLICT (market_date) DO UPDATE SET payload = EXCLUDED.payload, created_at = EXCLUDED.created_at`,
+      [record.marketDate, JSON.stringify(record.payload), record.createdAt],
+    );
+  }
+
+  async saveMarketReport(record: MarketReportRecord): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO market_reports (id, market_date, report, fallback, prompt_version, input_snapshot, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7)`,
+      [
+        record.id, record.marketDate, record.report, record.fallback,
+        record.promptVersion, JSON.stringify(record.inputSnapshot ?? {}), record.createdAt,
+      ],
+    );
+  }
+
+  async saveBubbleSelection(record: BubbleSelectionRecord): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO bubble_selections (id, market_date, payload, prompt_version, fallback, created_at)
+       VALUES ($1, $2, $3::jsonb, $4, $5, $6)`,
+      [
+        record.id, record.marketDate, JSON.stringify(record.payload),
+        record.promptVersion, record.fallback, record.createdAt,
+      ],
+    );
+  }
+
+  async getMorningReport(marketDate: string): Promise<MorningReportRecord | null> {
+    const { rows } = await this.pool.query(
+      `SELECT market_date AS "marketDate", payload, created_at AS "createdAt"
+       FROM morning_reports WHERE market_date = $1 LIMIT 1`,
+      [marketDate],
+    );
+    const row = rows[0];
+    if (!row) return null;
+    return { marketDate: row.marketDate, payload: row.payload, createdAt: row.createdAt instanceof Date ? row.createdAt.toISOString() : String(row.createdAt) };
+  }
+
+  async getBubbleSelection(marketDate: string): Promise<BubbleSelectionRecord | null> {
+    const { rows } = await this.pool.query(
+      `SELECT id, market_date AS "marketDate", payload, prompt_version AS "promptVersion", fallback, created_at AS "createdAt"
+       FROM bubble_selections WHERE market_date = $1 ORDER BY created_at DESC LIMIT 1`,
+      [marketDate],
+    );
+    const row = rows[0];
+    if (!row) return null;
+    return {
+      id: row.id, marketDate: row.marketDate, payload: row.payload,
+      promptVersion: row.promptVersion, fallback: row.fallback,
+      createdAt: row.createdAt instanceof Date ? row.createdAt.toISOString() : String(row.createdAt),
+    };
+  }
+
+  async saveMarketOverview(record: MarketOverviewRecord): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO market_overviews (market_date, payload, updated_at, created_at)
+       VALUES ($1, $2::jsonb, $3, now())
+       ON CONFLICT (market_date) DO UPDATE SET payload = EXCLUDED.payload, updated_at = EXCLUDED.updated_at`,
+      [record.marketDate, JSON.stringify(record.payload), record.updatedAt],
+    );
+  }
+
+  async getMarketOverview(marketDate: string): Promise<MarketOverviewRecord | null> {
+    const { rows } = await this.pool.query(
+      `SELECT market_date AS "marketDate", payload, updated_at AS "updatedAt"
+       FROM market_overviews WHERE market_date = $1 LIMIT 1`,
+      [marketDate],
+    );
+    const row = rows[0];
+    if (!row) return null;
+    return { marketDate: row.marketDate, payload: row.payload, updatedAt: row.updatedAt instanceof Date ? row.updatedAt.toISOString() : String(row.updatedAt) };
+  }
+
+  async saveSectorSnapshot(record: SectorSnapshotRecord): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO sector_snapshots (market_date, payload, updated_at, created_at)
+       VALUES ($1, $2::jsonb, $3, now())
+       ON CONFLICT (market_date) DO UPDATE SET payload = EXCLUDED.payload, updated_at = EXCLUDED.updated_at`,
+      [record.marketDate, JSON.stringify(record.payload), record.updatedAt],
+    );
+  }
+
+  async getSectorSnapshot(marketDate: string): Promise<SectorSnapshotRecord | null> {
+    const { rows } = await this.pool.query(
+      `SELECT market_date AS "marketDate", payload, updated_at AS "updatedAt"
+       FROM sector_snapshots WHERE market_date = $1 LIMIT 1`,
+      [marketDate],
+    );
+    const row = rows[0];
+    if (!row) return null;
+    return { marketDate: row.marketDate, payload: row.payload, updatedAt: row.updatedAt instanceof Date ? row.updatedAt.toISOString() : String(row.updatedAt) };
+  }
+
+  async saveStockAgentOutput(record: StockAgentOutputRecord): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO stock_agent_outputs (symbol, agent, payload, updated_at, created_at)
+       VALUES ($1, $2, $3::jsonb, $4, now())
+       ON CONFLICT (symbol, agent) DO UPDATE SET payload = EXCLUDED.payload, updated_at = EXCLUDED.updated_at`,
+      [record.symbol, record.agent, JSON.stringify(record.payload), record.updatedAt],
+    );
+  }
+
+  async getStockAgentOutput(symbol: string, agent: string): Promise<StockAgentOutputRecord | null> {
+    const { rows } = await this.pool.query(
+      `SELECT symbol, agent, payload, updated_at AS "updatedAt"
+       FROM stock_agent_outputs WHERE symbol = $1 AND agent = $2 LIMIT 1`,
+      [symbol, agent],
+    );
+    const row = rows[0];
+    if (!row) return null;
+    return { symbol: row.symbol, agent: row.agent, payload: row.payload, updatedAt: row.updatedAt instanceof Date ? row.updatedAt.toISOString() : String(row.updatedAt) };
+  }
+}
+
+export class PgChatRepo implements ChatRepo {
+  constructor(private pool: Pool) {}
+
+  async addMessage(record: ChatMessageRecord): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO chat_messages (id, user_id, session_id, role, content, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [record.id, record.userId, record.sessionId, record.role, record.content, record.createdAt],
+    );
   }
 }
