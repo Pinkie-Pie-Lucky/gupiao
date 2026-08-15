@@ -18,6 +18,34 @@ export interface MarketRefreshPlan {
   refreshAll: boolean;
 }
 
+// A-share market closures published by SSE for 2026. Future years can be
+// supplied through CN_MARKET_HOLIDAYS as a comma-separated YYYY-MM-DD list.
+const DEFAULT_CN_MARKET_HOLIDAYS = new Set([
+  '2026-01-01', '2026-01-02', '2026-01-03',
+  '2026-02-15', '2026-02-16', '2026-02-17', '2026-02-18', '2026-02-19', '2026-02-20', '2026-02-21', '2026-02-22', '2026-02-23',
+  '2026-04-04', '2026-04-05', '2026-04-06',
+  '2026-05-01', '2026-05-02', '2026-05-03', '2026-05-04', '2026-05-05',
+  '2026-06-19', '2026-06-20', '2026-06-21',
+  '2026-09-25', '2026-09-26', '2026-09-27',
+  '2026-10-01', '2026-10-02', '2026-10-03', '2026-10-04', '2026-10-05', '2026-10-06', '2026-10-07',
+]);
+
+function configuredMarketHolidays(): Set<string> {
+  const configured = String(process.env.CN_MARKET_HOLIDAYS || '')
+    .split(',')
+    .map((value) => value.trim())
+    .filter((value) => /^\d{4}-\d{2}-\d{2}$/.test(value));
+  return configured.length ? new Set(configured) : DEFAULT_CN_MARKET_HOLIDAYS;
+}
+
+export function getShanghaiDate(now: Date): string {
+  return now.toLocaleDateString('sv-SE', { timeZone: 'Asia/Shanghai' });
+}
+
+export function isChinaMarketHoliday(date: string): boolean {
+  return configuredMarketHolidays().has(date);
+}
+
 /** 由具体时间点推导上海时区钟点（便于注入测试）。 */
 export function getShanghaiClock(now: Date): ShanghaiClock {
   const parts = new Intl.DateTimeFormat('en-US', {
@@ -56,6 +84,12 @@ export function planMarketRefresh(dayOfWeek: number, minutes: number): MarketRef
   };
 }
 
+export function isAshareTradingTime(now: Date): boolean {
+  const clock = getShanghaiClock(now);
+  if (clock.dayOfWeek === 0 || clock.dayOfWeek === 6 || isChinaMarketHoliday(getShanghaiDate(now))) return false;
+  return (clock.minutes >= 570 && clock.minutes < 690) || (clock.minutes >= 780 && clock.minutes < 900);
+}
+
 export interface MarketSchedulerCallbacks {
   refreshIndices(): Promise<void>;
   refreshAll(): Promise<void>;
@@ -70,10 +104,28 @@ export function startMarketScheduler(callbacks: MarketSchedulerCallbacks): () =>
   let running = false;
   let lastIndicesMinute = -1;
   let lastAllMinute = -1;
+  let lastNonTradingRefreshDate = '';
 
   const tick = async () => {
     if (running) return;
-    const clock = getShanghaiClock(new Date());
+    const now = new Date();
+    const clock = getShanghaiClock(now);
+    const marketDate = getShanghaiDate(now);
+    const nonTradingDay = clock.dayOfWeek === 0 || clock.dayOfWeek === 6 || isChinaMarketHoliday(marketDate);
+    if (nonTradingDay) {
+      if (lastNonTradingRefreshDate === marketDate) return;
+      lastNonTradingRefreshDate = marketDate;
+      running = true;
+      try {
+        callbacks.log(`[scheduler] ${marketDate} non-trading daily refreshAll`);
+        await callbacks.refreshAll();
+      } catch (error: any) {
+        callbacks.log(`[scheduler] non-trading refresh failed: ${error?.message}`);
+      } finally {
+        running = false;
+      }
+      return;
+    }
     const plan = planMarketRefresh(clock.dayOfWeek, clock.minutes);
     if (!plan.active || (!plan.refreshIndices && !plan.refreshAll)) return;
     if (plan.refreshIndices && lastIndicesMinute === clock.minutes) return;

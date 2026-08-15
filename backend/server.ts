@@ -10,6 +10,7 @@ import https from 'node:https';
 import http from 'node:http';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import OpenAI from 'openai';
 import dotenv from 'dotenv';
 import { eventCategory, eventDate, eventDirection, eventImpactHorizon, eventStatus, normalizedEventKey } from './event-rules.js';
@@ -24,7 +25,7 @@ import { WatchlistService } from './lib/watchlistService.js';
 import { createAuthRouter, bearerToken } from './lib/authRouter.js';
 import { createWatchlistRouter } from './lib/watchlistRouter.js';
 import { ApiError } from './lib/errors.js';
-import { startMarketScheduler } from './lib/scheduler.js';
+import { isAshareTradingTime, startMarketScheduler } from './lib/scheduler.js';
 
 dotenv.config();
 
@@ -32,6 +33,9 @@ const AI_MODEL = process.env.AI_MODEL || 'deepseek-v4-flash';
 const MARKET_REASONING_PROMPT_V2_ENABLED = process.env.MARKET_REASONING_PROMPT_V2 !== 'false';
 // 新影响路径可独立关闭，关闭后仍返回并展示原有 reasoning 因果链。
 const MARKET_IMPACT_PATH_ENABLED = process.env.MARKET_IMPACT_PATH_ENABLED !== 'false';
+// 个股研究允许慢数据源完整返回；可通过环境变量下调，但不会低于 60 秒。
+const RESEARCH_WAIT_TIMEOUT_MS = Math.max(60_000, Number(process.env.RESEARCH_WAIT_TIMEOUT_MS) || 5 * 60_000);
+const RESEARCH_SOURCE_TIMEOUT_MS = RESEARCH_WAIT_TIMEOUT_MS;
 const execFileAsync = promisify(execFile);
 
 function resolvePythonInvocation(scriptName: string, args: string[] = []) {
@@ -78,7 +82,7 @@ async function callDeepSeekCompat(request: Record<string, unknown>, jsonMode = f
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
     body: JSON.stringify({ ...request, thinking: { type: 'disabled' }, ...(jsonMode ? { response_format: { type: 'json_object' } } : {}) }),
-    signal: AbortSignal.timeout(180_000),
+    signal: AbortSignal.timeout(RESEARCH_WAIT_TIMEOUT_MS),
   });
   const payload = await response.json().catch(() => null) as any;
   if (!response.ok) {
@@ -99,7 +103,7 @@ function getAIClient(): OpenAI {
     aiClient = new OpenAI({
       baseURL: process.env.AI_BASE_URL || 'https://api.deepseek.com',
       apiKey,
-      timeout: 180_000,
+      timeout: RESEARCH_WAIT_TIMEOUT_MS,
       maxRetries: 1,
     });
   }
@@ -119,7 +123,19 @@ async function startServer() {
   const feedbackService = new FeedbackService(dbRuntime.feedback);
   const watchlistService = new WatchlistService(dbRuntime.watchlist);
   app.use('/api/auth', createAuthRouter(authService));
-  app.use('/api/watchlist', createWatchlistRouter(authService, watchlistService));
+  app.use('/api/watchlist', createWatchlistRouter(authService, watchlistService, async (item) => {
+    const snapshot = await fetchAndPersistStockQuote(item.symbol);
+    return {
+      name: snapshot.quote.name || item.name,
+      price: snapshot.quote.price,
+      changePercent: snapshot.quote.changePercent,
+      volume: snapshot.quote.volume,
+      amount: snapshot.quote.amount,
+      asOf: snapshot.quote.asOf || snapshot.sourceMeta.asOf || null,
+      source: snapshot.sourceMeta.source,
+      freshness: snapshot.sourceMeta.freshness,
+    };
+  }));
 
   // 内容落库（早报 / 市场动态 / 泡泡精选 / 聊天记录）：
   // 写入失败只告警，绝不影响主接口的可用性，因此统一 fire-and-forget。
@@ -141,6 +157,47 @@ async function startServer() {
     );
   }
 
+  type ResearchSpan = { name: string; durationMs: number };
+  type ResearchTrace = { id: string; operation: string; symbol: string; startedAt: number; spans: ResearchSpan[] };
+  const researchTraceStorage = new AsyncLocalStorage<ResearchTrace>();
+  const researchInFlight = new Map<string, Promise<any>>();
+
+  async function measureResearch<T>(name: string, work: () => Promise<T>): Promise<T> {
+    const trace = researchTraceStorage.getStore();
+    const startedAt = Date.now();
+    try {
+      return await work();
+    } finally {
+      if (trace) trace.spans.push({ name, durationMs: Date.now() - startedAt });
+    }
+  }
+
+  function coalesceResearch<T>(key: string, work: () => Promise<T>): Promise<T> {
+    const pending = researchInFlight.get(key) as Promise<T> | undefined;
+    if (pending) return pending;
+    const task = Promise.resolve().then(work);
+    researchInFlight.set(key, task);
+    void task.finally(() => {
+      if (researchInFlight.get(key) === task) researchInFlight.delete(key);
+    }).catch(() => undefined);
+    return task;
+  }
+
+  async function runResearchRequest<T>(res: express.Response, operation: string, symbol: string, work: () => Promise<T>): Promise<T> {
+    const trace: ResearchTrace = { id: randomUUID(), operation, symbol, startedAt: Date.now(), spans: [] };
+    try {
+      const value = await researchTraceStorage.run(trace, work);
+      return value;
+    } finally {
+      const totalMs = Date.now() - trace.startedAt;
+      const spans = trace.spans.slice(-12);
+      res.setHeader('X-Research-Trace-Id', trace.id);
+      res.setHeader('X-Research-Wait-Timeout-Ms', String(RESEARCH_WAIT_TIMEOUT_MS));
+      res.setHeader('Server-Timing', [...spans.map((span) => `${span.name};dur=${span.durationMs}`), `total;dur=${totalMs}`].join(', '));
+      console.info(`[research-perf] trace=${trace.id} operation=${operation} symbol=${symbol} total_ms=${totalMs} spans=${spans.map((span) => `${span.name}:${span.durationMs}`).join('|')}`);
+    }
+  }
+
   // 由行情时间戳推导上海时区的交易日 'YYYY-MM-DD'，不可解析时回退当前上海日期。
   function marketDateFromTimestamp(timestamp: unknown): string {
     const date = timestamp instanceof Date ? timestamp : new Date(String(timestamp ?? ''));
@@ -151,6 +208,25 @@ async function startServer() {
   // 当前上海时区日期 'YYYY-MM-DD'（页面/定时任务读写当日数据的主键）。
   function shanghaiToday(): string {
     return new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Shanghai' });
+  }
+
+  const HOME_AI_TRADING_TTL_MS = 15 * 60_000;
+  const HOME_AI_NON_TRADING_TTL_MS = 24 * 60 * 60_000;
+
+  function isFreshHomeAiContent(record: { createdAt: string } | null): boolean {
+    if (!record?.createdAt) return false;
+    const createdAt = Date.parse(record.createdAt);
+    if (!Number.isFinite(createdAt)) return false;
+    const ttl = isAshareTradingTime(new Date()) ? HOME_AI_TRADING_TTL_MS : HOME_AI_NON_TRADING_TTL_MS;
+    return Date.now() - createdAt >= 0 && Date.now() - createdAt < ttl;
+  }
+
+  function staleContentPayload(payload: unknown, refreshError: unknown) {
+    return {
+      ...(payload && typeof payload === 'object' ? payload as Record<string, unknown> : {}),
+      freshness: 'stale',
+      refreshError: safeRuntimeDataGap(String(refreshError || '数据刷新失败')),
+    };
   }
 
   // API Route: AI Teacher Dialogue Chat (with history)
@@ -3117,7 +3193,7 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
     const startedAt = Date.now();
     const reportPromise = (async () => {
       try {
-        const marketData = await fetchMarketData();
+        const marketData = await fetchMarketData(Boolean(options?.force));
         const snapshot = buildMarketSnapshot(marketData);
         console.log('[morning-report] step 0: market data fetched');
 
@@ -3394,21 +3470,17 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
     }
   }
 
-  // GET /api/morning-report — 页面读库优先，不触发 AI 生成（AI 由定时任务每 15 分钟生成并落库）
+  // GET /api/morning-report — current-date DB first; stale or absent content is regenerated.
   app.get('/api/morning-report', async (_req, res) => {
     try {
       const stored = await dbRuntime.content.getMorningReport(shanghaiToday());
-      if (stored?.payload) return res.json(stored.payload);
-      return res.json({
-        aiFailed: true,
-        sentiment: '中性',
-        summaryText: '早报将在交易时段由服务端自动生成，当前暂无数据。',
-        reasonBrief: '',
-        stories: [],
-        top3Themes: [],
-        fallback: true,
-        timestamp: Date.now(),
-      });
+      if (stored?.payload && isFreshHomeAiContent(stored)) return res.json(stored.payload);
+      try {
+        return res.json(await generateMorningReport({ force: true }));
+      } catch (refreshError: any) {
+        if (stored?.payload) return res.json(staleContentPayload(stored.payload, refreshError));
+        throw refreshError;
+      }
     } catch (error: any) {
       console.error('[morning-report] query failed:', error.message);
       res.status(500).json({ error: '早报数据获取失败，请稍后重试', fallback: true });
@@ -3468,7 +3540,7 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
     try {
       const symbol = String(req.query.symbol || '');
       if (!symbol) return res.status(400).json({ error: 'symbol is required' });
-      res.json(await fetchAshareStockQuoteWithFallback(symbol));
+      res.json(await fetchAndPersistStockQuote(symbol));
     } catch (error: any) {
       res.status(503).json({ error: error.message || '个股行情暂不可用', dataUnavailable: true });
     }
@@ -3586,7 +3658,7 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
       if (!symbol) return res.status(400).json({ error: 'symbol is required' });
       const refresh = String(req.query.refresh || '') === '1';
       if (refresh) invalidateStockResearchCaches(symbol);
-      const output = await runCioManagerAgent(symbol, refresh);
+      const output = await runResearchRequest(res, 'cio-manager', symbol, () => runCioManagerAgent(symbol, refresh));
       persistStockAgentOutput(symbol, 'cio-manager', output);
       res.json(output);
     } catch (error: any) {
@@ -3707,7 +3779,7 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
       if (!symbol) return res.status(400).json({ error: 'symbol is required' });
       const refresh = String(req.query.refresh || '') === '1';
       if (refresh) invalidateStockResearchCaches(symbol);
-      const output = await runIndustryChainAgent(symbol, refresh);
+      const output = await runResearchRequest(res, 'industry-chain', symbol, () => runIndustryChainAgent(symbol, refresh));
       persistStockAgentOutput(symbol, 'industry-chain', output);
       res.json(output);
     } catch (error: any) {
@@ -4542,7 +4614,7 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
 
     const startedAt = Date.now();
     const task = (async () => {
-      const marketData = await fetchMarketData();
+      const marketData = await fetchMarketData(Boolean(options?.force));
       if (!marketData.sectors?.length) {
         const err: any = new Error('sectors unavailable');
         err.dataUnavailable = true;
@@ -4612,18 +4684,17 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
     }
   }
 
-  // GET /api/bubble-selection — 页面读库优先，不触发 AI 生成（AI 由定时任务每 15 分钟生成并落库）
+  // GET /api/bubble-selection — current-date DB first; stale or absent content is regenerated.
   app.get('/api/bubble-selection', async (_req, res) => {
     try {
       const stored = await dbRuntime.content.getBubbleSelection(shanghaiToday());
-      if (stored?.payload) return res.json(stored.payload);
-      return res.json({
-        bubbleSelection: [],
-        candidateCount: 0,
-        promptVersion: 'p5-bubble-signal-v2',
-        fallback: true,
-        timestamp: null,
-      });
+      if (stored?.payload && isFreshHomeAiContent(stored)) return res.json(stored.payload);
+      try {
+        return res.json(await generateBubbleSelection({ force: true }));
+      } catch (refreshError: any) {
+        if (stored?.payload) return res.json(staleContentPayload(stored.payload, refreshError));
+        throw refreshError;
+      }
     } catch (error: any) {
       console.error('[bubble-selection] query failed:', error.message);
       res.status(503).json({ error: '泡泡精选数据获取失败，请稍后重试', dataUnavailable: true });
@@ -4658,7 +4729,10 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
       open: Number(fields[5]) || null, high: Number(fields[33]) || null, low: Number(fields[34]) || null,
       change: Number.isFinite(change) ? change : Math.round((price - previousClose) * 100) / 100,
       changePercent: Number.isFinite(changePercent) ? changePercent : Math.round(((price / previousClose) - 1) * 10_000) / 100,
-      volume: Number(fields[6]) || null, amount: Number(fields[37]) || null,
+      // 腾讯字段的成交量单位为“手”、成交额单位为“万元”；统一为“股、元”，
+      // 保证与新浪、雪球回退源及前端展示口径一致。
+      volume: Number(fields[6]) ? Number(fields[6]) * 100 : null,
+      amount: Number(fields[37]) ? Number(fields[37]) * 10_000 : null,
       asOf: fields[30] || null,
     };
   }
@@ -4721,6 +4795,35 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
   }
 
   // 同一研究快照会被基本面、事件等模块同时消费；并发去重可避免对巨潮发出重复请求而触发限流。
+  /**
+   * 每次个股研究和自选列表加载都先回源获取真实报价；成功结果写入
+   * stock_agent_outputs（agent=market-quote），供上游短暂不可用时展示最近报价。
+   */
+  async function fetchAndPersistStockQuote(input: string) {
+    const symbol = normalizeAshareSymbol(input).code;
+    try {
+      const snapshot = await fetchAshareStockQuoteWithFallback(symbol);
+      persistStockAgentOutput(symbol, 'market-quote', snapshot);
+      return snapshot;
+    } catch (error: any) {
+      const stored = await dbRuntime.content.getStockAgentOutput(symbol, 'market-quote').catch(() => null);
+      const snapshot: any = stored?.payload;
+      if (snapshot?.quote) {
+        return {
+          ...snapshot,
+          sourceMeta: {
+            ...(snapshot.sourceMeta || {}),
+            source: 'database_cache',
+            fetchedAt: new Date().toISOString(),
+            freshness: 'stale',
+            confidence: 'limited',
+          },
+        };
+      }
+      throw error;
+    }
+  }
+
   const cninfoAnnouncementInFlight = new Map<string, Promise<any>>();
 
   async function fetchCninfoAnnouncements(symbol: string, startDate: string, endDate: string, category = '') {
@@ -4731,7 +4834,7 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
     if (inFlight) return inFlight;
     const request = (async () => {
       const { command, args } = resolvePythonInvocation('cninfo_announcements.py', [symbol, startDate, endDate, category]);
-      const { stdout } = await execFileAsync(command, args, { timeout: 45_000, windowsHide: true, maxBuffer: 2 * 1024 * 1024, env: pythonChildEnv() });
+      const { stdout } = await execFileAsync(command, args, { timeout: RESEARCH_SOURCE_TIMEOUT_MS, windowsHide: true, maxBuffer: 2 * 1024 * 1024, env: pythonChildEnv() });
       const payload = JSON.parse(stdout);
       return {
         announcements: Array.isArray(payload?.announcements) ? payload.announcements : [],
@@ -4886,6 +4989,12 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
     if (cached && cached.expiresAt > Date.now()) {
       return { ...cached.value, snapshotMeta: { ...cached.value.snapshotMeta, source: 'cache', freshness: 'stale' } };
     }
+    return coalesceResearch(`stock-event:${cacheKey}`, () => buildStockEventSnapshotUncached(symbol, days));
+  }
+
+  async function buildStockEventSnapshotUncached(input: string, days = 180) {
+    const symbol = normalizeAshareSymbol(input).code;
+    const cacheKey = `${symbol}:${days}`;
     const end = new Date();
     const start = new Date(end.getTime() - days * 86_400_000);
     const formatDate = (date: Date) => date.toLocaleDateString('sv-SE', { timeZone: 'Asia/Shanghai' }).replaceAll('-', '');
@@ -5127,7 +5236,7 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
   async function fetchStockValuationData(symbol: string) {
     if (!/^\d{6}$/.test(symbol)) throw new Error('symbol 应为 6 位证券代码');
     const invocation = resolvePythonInvocation('stock_valuation.py', [symbol]);
-    const { stdout } = await execFileAsync(invocation.command, invocation.args, { timeout: 45_000, windowsHide: true, maxBuffer: 2 * 1024 * 1024, env: pythonChildEnv() });
+    const { stdout } = await execFileAsync(invocation.command, invocation.args, { timeout: RESEARCH_SOURCE_TIMEOUT_MS, windowsHide: true, maxBuffer: 2 * 1024 * 1024, env: pythonChildEnv() });
     const payload = JSON.parse(stdout);
     return { valuation: payload?.valuation || {}, sourceMeta: { ...payload?.sourceMeta, fetchedAt: payload?.sourceMeta?.fetchedAt || new Date().toISOString() } };
   }
@@ -5136,7 +5245,7 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
     const industry = await fetchStockIndustryBenchmark(symbol);
     const members = Array.isArray(industry?.industry?.members) ? industry.industry.members.map((item: any) => String(item.symbol || '')).filter((item: string) => /^\d{6}$/.test(item)).slice(0, 80) : [];
     const invocation = resolvePythonInvocation('valuation_comparison.py', [symbol, members.join(',')]);
-    const { stdout } = await execFileAsync(invocation.command, invocation.args, { timeout: 90_000, windowsHide: true, maxBuffer: 4 * 1024 * 1024, env: pythonChildEnv() });
+    const { stdout } = await execFileAsync(invocation.command, invocation.args, { timeout: RESEARCH_SOURCE_TIMEOUT_MS, windowsHide: true, maxBuffer: 4 * 1024 * 1024, env: pythonChildEnv() });
     const payload = JSON.parse(stdout);
     return { ...payload, industry: industry.industry || null, sourceMeta: { ...payload?.sourceMeta, industrySource: industry.sourceMeta || null, fetchedAt: payload?.sourceMeta?.fetchedAt || new Date().toISOString() }, dataGaps: industry.dataGaps || [] };
   }
@@ -5384,18 +5493,28 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
     return { riskId: `${category}:${disposition}:${claim}`.replace(/[^a-zA-Z0-9:_-]/g, '_'), category, severity, status, claim, trigger, resolutionCondition, evidenceIds: [...new Set(evidenceIds.map(String).filter(Boolean))], disposition };
   }
 
-  async function buildStockRiskSnapshot(input: string) {
+  type PrefetchedRiskInputs = {
+    technicalResult: PromiseSettledResult<any>;
+    eventResult: PromiseSettledResult<any>;
+    sentimentResult: PromiseSettledResult<any>;
+    fundamentalResult: PromiseSettledResult<any>;
+    valuationResult: PromiseSettledResult<any>;
+  };
+
+  async function buildStockRiskSnapshot(input: string, prefetched?: PrefetchedRiskInputs) {
     const symbol = normalizeAshareSymbol(input).code;
     const cached = stockRiskSnapshotCache.get(symbol);
-    if (cached && cached.expiresAt > Date.now()) return { ...cached.value, snapshotMeta: { ...cached.value.snapshotMeta, source: 'cache', freshness: 'stale' } };
+    if (!prefetched && cached && cached.expiresAt > Date.now()) return { ...cached.value, snapshotMeta: { ...cached.value.snapshotMeta, source: 'cache', freshness: 'stale' } };
 
-    const [technicalResult, eventResult, sentimentResult, fundamentalResult, valuationResult] = await Promise.allSettled([
-      buildTechnicalMarketSignals(symbol),
-      buildStockEventSnapshot(symbol, 180),
-      buildStockSentimentSnapshot(symbol, 30),
-      buildStockFactSnapshot(symbol),
-      buildStockValuationSnapshot(symbol),
-    ]);
+    const [technicalResult, eventResult, sentimentResult, fundamentalResult, valuationResult] = prefetched
+      ? [prefetched.technicalResult, prefetched.eventResult, prefetched.sentimentResult, prefetched.fundamentalResult, prefetched.valuationResult]
+      : await Promise.allSettled([
+        buildTechnicalMarketSignals(symbol),
+        buildStockEventSnapshot(symbol, 180),
+        buildStockSentimentSnapshot(symbol, 30),
+        buildStockFactSnapshot(symbol),
+        buildStockValuationSnapshot(symbol),
+      ]);
     const dataGaps: string[] = [];
     const evidence: any[] = [];
     const risks: any[] = [];
@@ -5505,15 +5624,32 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
     const symbol = normalizeAshareSymbol(input).code;
     const cached = stockManagerSnapshotCache.get(symbol);
     if (cached && cached.expiresAt > Date.now()) return { ...cached.value, snapshotMeta: { ...cached.value.snapshotMeta, source: 'cache', freshness: 'stale' } };
-    const [factResult, technicalResult, eventResult, sentimentResult, valuationResult, riskResult, industryResult] = await Promise.allSettled([
-      buildStockFactSnapshot(symbol),
-      buildTechnicalMarketSignals(symbol),
-      buildStockEventSnapshot(symbol, 180),
-      buildStockSentimentSnapshot(symbol, 30),
-      buildStockValuationSnapshot(symbol),
-      buildStockRiskSnapshot(symbol),
-      buildIndustryChainSnapshot(symbol),
-    ]);
+    return coalesceResearch(`stock-manager:${symbol}`, () => buildStockManagerSnapshotUncached(symbol));
+  }
+
+  async function buildStockManagerSnapshotUncached(input: string) {
+    const symbol = normalizeAshareSymbol(input).code;
+    const [factResult, technicalResult, eventResult, sentimentResult, valuationResult, industryResult] = await measureResearch('snapshot_bundle', () => Promise.allSettled([
+      measureResearch('facts', () => buildStockFactSnapshot(symbol)),
+      measureResearch('technical', () => buildTechnicalMarketSignals(symbol)),
+      measureResearch('events', () => buildStockEventSnapshot(symbol, 180)),
+      measureResearch('sentiment', () => buildStockSentimentSnapshot(symbol, 30)),
+      measureResearch('valuation', () => buildStockValuationSnapshot(symbol)),
+      measureResearch('industry', () => buildIndustryChainSnapshot(symbol)),
+    ]));
+    let [riskResult] = await measureResearch('risk', () => Promise.allSettled([buildStockRiskSnapshot(symbol, {
+      technicalResult,
+      eventResult,
+      sentimentResult,
+      fundamentalResult: factResult,
+      valuationResult,
+    })]));
+    // 风险层使用已获取的快照以避免重复请求；若组合执行本身异常，再单独重试一次。
+    // 这样单个编排问题不会让整个 CIO/Manager 研究快照被错误标记为 blocked。
+    if (riskResult.status === 'rejected') {
+      console.warn(`[stock-manager] prefetched risk snapshot failed for ${symbol}, retrying independently:`, riskResult.reason?.message || 'unknown error');
+      [riskResult] = await measureResearch('risk_retry', () => Promise.allSettled([buildStockRiskSnapshot(symbol)]));
+    }
     const fact: any = factResult.status === 'fulfilled' ? factResult.value : null;
     const technical: any = technicalResult.status === 'fulfilled' ? technicalResult.value : null;
     const eventSnapshot: any = eventResult.status === 'fulfilled' ? eventResult.value : null;
@@ -5563,7 +5699,18 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
     if (sentiment?.communityViewpointDisagreement === 'unavailable') requiredConditions.push({ text: '接入社区帖子/评论立场数据后，才能评估社区观点分歧。', evidenceIds: [] });
     const allCoreAvailable = Boolean(fact && technical && eventSnapshot && sentiment && valuation && risk);
     const criticalGap = dataGaps.some((gap) => /不可用|缺少|不足|无法|不能/.test(gap));
-    const researchStatus = !risk || risk.decision === 'blocked' || !allCoreAvailable && !risk ? 'blocked' : vetoes.length || risk.decision === 'veto' ? 'rejected' : risk.decision === 'downgrade' || conflicts.some((item) => item.severity === 'high') || criticalGap ? 'deferred' : risk.decision === 'watch' || requiredConditions.length ? 'watch' : 'research_ready';
+    const coreInputsExceptRisk = Boolean(fact && technical && eventSnapshot && sentiment && valuation);
+    const researchStatus = !risk
+      ? coreInputsExceptRisk ? 'deferred' : 'blocked'
+      : risk.decision === 'blocked'
+        ? 'blocked'
+        : vetoes.length || risk.decision === 'veto'
+          ? 'rejected'
+          : risk.decision === 'downgrade' || conflicts.some((item) => item.severity === 'high') || criticalGap
+            ? 'deferred'
+            : risk.decision === 'watch' || requiredConditions.length
+              ? 'watch'
+              : 'research_ready';
     const supportingCase = [...positiveFundamental.slice(0, 5).map((item: any) => ({ text: item.summary, evidenceIds: item.evidenceIds || [] })), ...positiveTechnical.slice(0, 3).map((item: any) => ({ text: item.summary, evidenceIds: item.evidenceIds || [] })), ...positiveEvents.slice(0, 3).map((item: any) => ({ text: item.title, evidenceIds: item.evidenceIds || [] }))];
     const counterCase = [...vetoes, ...(risk?.risks || []), ...negativeFundamental.slice(0, 4).map((item: any) => ({ claim: item.summary, evidenceIds: item.evidenceIds || [] })), ...negativeEvents.slice(0, 3).map((item: any) => ({ claim: item.title, evidenceIds: item.evidenceIds || [] }))].map((item: any) => ({ text: item.claim || item.description || item.summary || '', evidenceIds: item.evidenceIds || [] })).filter((item: any) => item.text);
     const researchPriorities = [
@@ -5631,7 +5778,7 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
     const cached = cninfoDocumentCache.get(cacheKey);
     if (!force && cached && cached.expiresAt > Date.now()) return { ...cached.value, sourceMeta: { ...cached.value.sourceMeta, cache: 'memory_hit' } };
     const invocation = resolvePythonInvocation('cninfo_document_parser.py', [announcementId, announcementTime, stockCode, ...(force ? ['--force'] : [])]);
-    const { stdout } = await execFileAsync(invocation.command, invocation.args, { timeout: 120_000, windowsHide: true, maxBuffer: 3 * 1024 * 1024, env: pythonChildEnv() });
+    const { stdout } = await execFileAsync(invocation.command, invocation.args, { timeout: RESEARCH_SOURCE_TIMEOUT_MS, windowsHide: true, maxBuffer: 3 * 1024 * 1024, env: pythonChildEnv() });
     const payload = JSON.parse(stdout);
     const value = {
       document: payload?.document || null,
@@ -5743,7 +5890,8 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
     if (snapshot.researchStatus === 'blocked' || !input.evidenceIds.size) {
       const opinion = fallbackCioManagerOpinion(snapshot, input, snapshot.researchStatus === 'blocked' ? '核心输入不可用。' : '没有可引用的汇总证据，不调用 AI。');
       const value = { symbol, managerSnapshot: snapshot, deterministicManager: { researchStatus: snapshot.researchStatus, riskDecision: snapshot.riskDecision, riskLevel: snapshot.riskLevel, managerStance: snapshot.managerStance, conflicts: snapshot.conflicts, requiredConditions: snapshot.requiredConditions, researchPriorities: snapshot.researchPriorities }, opinion, agentMeta: { generatedAt: new Date().toISOString(), source: 'live', aiStatus: 'not_requested', promptVersion: 'cio-manager-v1', snapshotGeneratedAt: snapshot.snapshotMeta.generatedAt, managerVersion: snapshot.snapshotMeta.managerVersion } };
-      cioManagerAgentCache.set(symbol, { expiresAt: Date.now() + 15 * 60_000, value });
+      // 核心输入不完整时只短暂缓存，避免一次上游抖动把“不可用”状态保留过久。
+      cioManagerAgentCache.set(symbol, { expiresAt: Date.now() + (snapshot.researchStatus === 'blocked' || !snapshot.inputAvailability?.risk ? 60_000 : 15 * 60_000), value });
       return value;
     }
     let opinion: any;
@@ -5784,7 +5932,8 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
       opinion,
       agentMeta: { generatedAt: new Date().toISOString(), source: 'live', aiStatus, promptVersion: 'cio-manager-v1', snapshotGeneratedAt: snapshot.snapshotMeta.generatedAt, managerVersion: snapshot.snapshotMeta.managerVersion },
     };
-    cioManagerAgentCache.set(symbol, { expiresAt: Date.now() + 15 * 60_000, value });
+    // 正常完成的研究结果可复用；缺少风险层时仅保留一分钟，等待下一次自动恢复。
+    cioManagerAgentCache.set(symbol, { expiresAt: Date.now() + (snapshot.researchStatus === 'blocked' || !snapshot.inputAvailability?.risk ? 60_000 : 15 * 60_000), value });
     return value;
   }
 
@@ -5875,7 +6024,7 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
   async function fetchFinancialSummary(symbol: string) {
     if (!/^\d{6}$/.test(symbol)) throw new Error('symbol 应为 6 位证券代码');
     const invocation = resolvePythonInvocation('financial_summary.py', [symbol]);
-    const { stdout } = await execFileAsync(invocation.command, invocation.args, { timeout: 45_000, windowsHide: true, maxBuffer: 2 * 1024 * 1024, env: pythonChildEnv() });
+    const { stdout } = await execFileAsync(invocation.command, invocation.args, { timeout: RESEARCH_SOURCE_TIMEOUT_MS, windowsHide: true, maxBuffer: 2 * 1024 * 1024, env: pythonChildEnv() });
     const payload = JSON.parse(stdout);
     return {
       reports: Array.isArray(payload?.reports) ? payload.reports : [],
@@ -5888,7 +6037,7 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
 
   async function runXueqiuAdapter(args: string[]) {
     const invocation = resolvePythonInvocation('xueqiu_insights.py', args);
-    const { stdout } = await execFileAsync(invocation.command, invocation.args, { timeout: 60_000, windowsHide: true, maxBuffer: 3 * 1024 * 1024, env: pythonChildEnv() });
+    const { stdout } = await execFileAsync(invocation.command, invocation.args, { timeout: RESEARCH_SOURCE_TIMEOUT_MS, windowsHide: true, maxBuffer: 3 * 1024 * 1024, env: pythonChildEnv() });
     return JSON.parse(stdout);
   }
 
@@ -6018,7 +6167,7 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
   async function fetchThsFinancialStatements(symbol: string) {
     if (!/^\d{6}$/.test(symbol)) throw new Error('symbol 应为 6 位证券代码');
     const invocation = resolvePythonInvocation('ths_financial_statements.py', [symbol]);
-    const { stdout } = await execFileAsync(invocation.command, invocation.args, { timeout: 90_000, windowsHide: true, maxBuffer: 4 * 1024 * 1024, env: pythonChildEnv() });
+    const { stdout } = await execFileAsync(invocation.command, invocation.args, { timeout: RESEARCH_SOURCE_TIMEOUT_MS, windowsHide: true, maxBuffer: 4 * 1024 * 1024, env: pythonChildEnv() });
     const payload = JSON.parse(stdout);
     const reports = Array.isArray(payload?.reports) ? payload.reports : [];
     if (!reports.length) throw new Error('同花顺三大报表未返回有效报告期');
@@ -6274,7 +6423,7 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
   async function fetchMarketDailyKline(kind: 'stock' | 'index', symbol: string) {
     if (!/^\d{6}$/.test(symbol)) throw new Error('symbol 应为 6 位证券代码');
     const invocation = resolvePythonInvocation('market_daily_kline.py', [kind, symbol]);
-    const { stdout } = await execFileAsync(invocation.command, invocation.args, { timeout: 90_000, windowsHide: true, maxBuffer: 5 * 1024 * 1024, env: pythonChildEnv() });
+    const { stdout } = await execFileAsync(invocation.command, invocation.args, { timeout: RESEARCH_SOURCE_TIMEOUT_MS, windowsHide: true, maxBuffer: 5 * 1024 * 1024, env: pythonChildEnv() });
     const payload = JSON.parse(stdout);
     const bars = Array.isArray(payload?.bars) ? payload.bars : [];
     if (bars.length < 60) throw new Error('统一日线适配未返回足够数据');
@@ -6494,7 +6643,7 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
     const cached = stockIndustryBenchmarkCache.get(symbol);
     if (cached && cached.expiresAt > Date.now()) return { ...cached.value, snapshotMeta: { ...cached.value.snapshotMeta, source: 'cache', freshness: 'stale' } };
     const invocation = resolvePythonInvocation('industry_benchmark.py', [symbol]);
-    const { stdout } = await execFileAsync(invocation.command, invocation.args, { timeout: 180_000, windowsHide: true, maxBuffer: 5 * 1024 * 1024, env: pythonChildEnv() });
+    const { stdout } = await execFileAsync(invocation.command, invocation.args, { timeout: RESEARCH_SOURCE_TIMEOUT_MS, windowsHide: true, maxBuffer: 5 * 1024 * 1024, env: pythonChildEnv() });
     const payload = JSON.parse(stdout);
     const bars = Array.isArray(payload?.bars) ? payload.bars : [];
     if (!payload?.industry?.name) throw new Error('行业归属未返回');
@@ -6859,7 +7008,7 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
     const cached = industryChainIndicatorCache.get(ruleId);
     if (cached && cached.expiresAt > Date.now()) return { ...cached.value, sourceMeta: { ...cached.value.sourceMeta, source: 'cache', freshness: 'stale' } };
     const invocation = resolvePythonInvocation('industry_chain_indicators.py', [ruleId]);
-    const { stdout } = await execFileAsync(invocation.command, invocation.args, { timeout: 90_000, windowsHide: true, maxBuffer: 2 * 1024 * 1024, env: pythonChildEnv() });
+    const { stdout } = await execFileAsync(invocation.command, invocation.args, { timeout: RESEARCH_SOURCE_TIMEOUT_MS, windowsHide: true, maxBuffer: 2 * 1024 * 1024, env: pythonChildEnv() });
     const value = JSON.parse(stdout);
     industryChainIndicatorCache.set(ruleId, { expiresAt: Date.now() + 6 * 60 * 60_000, value });
     return value;
@@ -6875,6 +7024,11 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
     if (cached && cached.expiresAt > Date.now()) {
       return { ...cached.value, snapshotMeta: { ...cached.value.snapshotMeta, source: 'cache', freshness: 'stale' } };
     }
+    return coalesceResearch(`stock-facts:${symbol}`, () => buildStockFactSnapshotUncached(symbol));
+  }
+
+  async function buildStockFactSnapshotUncached(input: string) {
+    const symbol = normalizeAshareSymbol(input).code;
     const today = new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Shanghai' }).replaceAll('-', '');
     const startDate = `${today.slice(0, 4)}0101`;
     const [quoteResult, financialResult, technicalResult, announcementResult, profileResult, heatResult, businessSegmentsResult] = await Promise.allSettled([
@@ -6998,6 +7152,11 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
     const symbol = normalizeAshareSymbol(input).code;
     const cached = stockIndustryChainSnapshotCache.get(symbol);
     if (cached && cached.expiresAt > Date.now()) return { ...cached.value, snapshotMeta: { ...cached.value.snapshotMeta, source: 'cache', freshness: 'stale' } };
+    return coalesceResearch(`industry-chain:${symbol}`, () => buildIndustryChainSnapshotUncached(symbol));
+  }
+
+  async function buildIndustryChainSnapshotUncached(input: string) {
+    const symbol = normalizeAshareSymbol(input).code;
     const [benchmarkResult, financialResult, mappingResult, eventResult] = await Promise.allSettled([
       fetchStockIndustryBenchmark(symbol),
       buildIndustryFinancialPercentiles(symbol),

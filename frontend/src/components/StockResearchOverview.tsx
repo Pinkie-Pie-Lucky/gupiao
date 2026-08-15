@@ -40,6 +40,7 @@ function Horizon({ name, range, value }: { name: string; range: string; value?: 
 
 export function StockResearchOverview({ stock, stance, researchStatus, riskLevel, conclusion, evidenceCount, loading, error, aiFailed = false }: Props) {
   const direction = directions[stance?.direction || 'unknown']; const hold = holds[stance?.holdAssessment || 'unknown']; const status = statuses[researchStatus || 'blocked'] || statuses.blocked; const StatusIcon = status.icon;
+  const hasQuote = Number.isFinite(stock.price) && stock.price > 0;
   const [selectedHorizon, setSelectedHorizon] = useState<'short' | 'medium' | 'long'>('short');
   const horizons = [
     { key: 'short' as const, name: '短期', range: '1-4周', value: stance?.horizons?.short },
@@ -61,7 +62,7 @@ export function StockResearchOverview({ stock, stance, researchStatus, riskLevel
     : null;
   return <section id="stock-research-overview" aria-busy={loading} className={`rounded-2xl border p-4 ${aiFailed ? 'border-slate-200 bg-slate-50' : hold.surface}`}>
     <div className="flex items-start justify-between gap-3">
-      <div><p className="text-xs font-bold text-slate-900">{stock.name}</p><div className="mt-1 flex flex-wrap items-baseline gap-2"><span className="font-mono text-2xl font-bold text-slate-950">¥{Number(stock.price || 0).toFixed(2)}</span><span className={`font-mono text-xs font-bold ${stock.changePercent >= 0 ? 'text-rose-700' : 'text-emerald-700'}`}>{stock.changePercent >= 0 ? '+' : ''}{Number(stock.changePercent || 0).toFixed(2)}%</span></div></div>
+      <div><p className="text-xs font-bold text-slate-900">{stock.name}</p><div className="mt-1 flex flex-wrap items-baseline gap-2"><span className="font-mono text-2xl font-bold text-slate-950">{hasQuote ? `¥${Number(stock.price).toFixed(2)}` : '--'}</span>{hasQuote && <span className={`font-mono text-xs font-bold ${stock.changePercent >= 0 ? 'text-rose-700' : 'text-emerald-700'}`}>{stock.changePercent >= 0 ? '+' : ''}{Number(stock.changePercent).toFixed(2)}%</span>}</div></div>
       <span className={`inline-flex shrink-0 items-center gap-1 rounded-full bg-white/70 px-2.5 py-1 text-[10px] font-bold ${status.tone}`}><StatusIcon className="h-3.5 w-3.5" />{loading ? '正在加载' : status.label}</span>
     </div>
     <div className="mt-4 border-t border-black/5 pt-3">

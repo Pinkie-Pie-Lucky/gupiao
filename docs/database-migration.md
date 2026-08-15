@@ -21,9 +21,8 @@
 
 ```bash
 # 在项目根目录
-docker compose up -d
-# 连接信息（与 docker-compose.yml 一致）：
-#   host: localhost  port: 5432  user: gupiao  password: gupiao  db: gupiao
+POSTGRES_PASSWORD="替换为至少 32 位随机密码" docker compose up -d
+# 连接信息：host: 127.0.0.1  port: 5432  user: gupiao  db: gupiao
 ```
 
 ## 2. 配置环境变量
@@ -31,7 +30,8 @@ docker compose up -d
 复制 `.env.example` 为 `.env`，确保包含：
 
 ```env
-DATABASE_URL="postgres://gupiao:gupiao@localhost:5432/gupiao"
+POSTGRES_PASSWORD="替换为至少 32 位随机密码"
+DATABASE_URL="postgres://gupiao:<POSTGRES_PASSWORD>@127.0.0.1:5432/gupiao"
 JWT_SECRET="（改为足够长的随机串，如 openssl rand -hex 32 的输出）"
 ```
 

@@ -77,6 +77,7 @@ export function WatchlistTab({
         ) : (
           <div id="watchlist-cards-grid" className="space-y-2.5">
             {followedStocks.map((stock) => {
+              const hasQuote = Number.isFinite(stock.price) && stock.price > 0;
               const isUp = stock.changePercent >= 0;
               return (
                 <div
@@ -99,11 +100,11 @@ export function WatchlistTab({
                     <div className="flex items-center gap-3">
                       <div className="text-right">
                         <div className="font-mono font-bold text-sm text-gray-900 leading-none">
-                          ¥{stock.price.toFixed(2)}
+                          {hasQuote ? `¥${stock.price.toFixed(2)}` : '--'}
                         </div>
-                        <div className={`text-[10px] font-bold font-mono mt-1 ${isUp ? 'text-red-500' : 'text-emerald-500'}`}>
-                          {isUp ? '+' : ''}{stock.changePercent}%
-                        </div>
+                        {hasQuote && <div className={`text-[10px] font-bold font-mono mt-1 ${isUp ? 'text-red-500' : 'text-emerald-500'}`}>
+                          {isUp ? '+' : ''}{stock.changePercent.toFixed(2)}%
+                        </div>}
                       </div>
 
                       <button

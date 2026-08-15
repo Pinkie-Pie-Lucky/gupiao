@@ -24,6 +24,14 @@ const ACCOUNT_FEATURE_ENABLED = true;
 
 const normalizeWatchlistCode = (code: string) => String(code || '').trim().toUpperCase().replace(/^(SH|SZ)/, '').replace(/\.(SH|SZ)$/, '');
 
+const formatQuoteVolume = (value: number | null | undefined) => Number.isFinite(value) && Number(value) > 0
+  ? `${(Number(value) / 1e4).toFixed(0)}万`
+  : '--';
+
+const formatQuoteAmount = (value: number | null | undefined) => Number.isFinite(value) && Number(value) > 0
+  ? `${(Number(value) / 1e8).toFixed(2)}亿`
+  : '--';
+
 export default function App() {
   const [account, setAccount] = useState<SessionUser | null>(() => getSessionUser());
   const [authReady, setAuthReady] = useState(false);
@@ -40,10 +48,10 @@ export default function App() {
   const toStockItem = (entry: WatchlistEntry): StockItem => ({
     code: entry.symbol,
     name: entry.name,
-    price: 0,
-    changePercent: 0,
-    volume: '--',
-    turnover: '--',
+    price: Number.isFinite(entry.price) ? Number(entry.price) : 0,
+    changePercent: Number.isFinite(entry.changePercent) ? Number(entry.changePercent) : 0,
+    volume: formatQuoteVolume(entry.volume),
+    turnover: formatQuoteAmount(entry.amount),
     history: [],
   });
 
@@ -69,6 +77,10 @@ export default function App() {
 
   // 登录/切换账号后从服务端加载自选股
   useEffect(() => {
+    if (!account) {
+      setFollowedStocks([]);
+      return;
+    }
     let cancelled = false;
     (async () => {
       try {
@@ -83,7 +95,7 @@ export default function App() {
     })();
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [account?.id]);
+  }, [account?.id, activeTab === 'watchlist']);
 
   // 恢复会话：有本地 token 则向后端校验；失效则清理
   useEffect(() => {

@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { planMarketRefresh, getShanghaiClock } from '../backend/lib/scheduler.js';
+import { planMarketRefresh, getShanghaiClock, getShanghaiDate, isAshareTradingTime, isChinaMarketHoliday } from '../backend/lib/scheduler.js';
 
 describe('planMarketRefresh', () => {
   it('周末不执行任何刷新', () => {
@@ -46,5 +46,18 @@ describe('getShanghaiClock', () => {
     assert.equal(clock.dayOfWeek, 5);
     // UTC 01:30 = 上海 09:30
     assert.equal(clock.minutes, 9 * 60 + 30);
+  });
+});
+
+describe('China market calendar', () => {
+  it('recognizes 2026 SSE closures and Shanghai dates', () => {
+    assert.equal(getShanghaiDate(new Date('2026-05-03T16:30:00Z')), '2026-05-04');
+    assert.equal(isChinaMarketHoliday('2026-05-04'), true);
+    assert.equal(isChinaMarketHoliday('2026-05-06'), false);
+  });
+
+  it('does not treat a weekday holiday as a trading session', () => {
+    assert.equal(isAshareTradingTime(new Date('2026-05-04T02:00:00Z')), false); // Shanghai 10:00, Labour Day closure
+    assert.equal(isAshareTradingTime(new Date('2026-05-06T02:00:00Z')), true);  // Shanghai 10:00, open market
   });
 });

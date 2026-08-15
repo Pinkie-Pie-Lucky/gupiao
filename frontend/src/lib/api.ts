@@ -121,6 +121,13 @@ export function apiUpdateNickname(nickname: string): Promise<User> {
 export interface WatchlistEntry {
   symbol: string; // 6 位数字代码
   name: string;
+  price?: number;
+  changePercent?: number;
+  volume?: number | null;
+  amount?: number | null;
+  asOf?: string | null;
+  source?: string;
+  freshness?: 'realtime' | 'stale';
 }
 
 export function apiWatchlist(): Promise<WatchlistEntry[]> {
