@@ -4,7 +4,7 @@
  */
 
 import { useState, useEffect } from 'react';
-import { HomeTab } from './components/HomeTab';
+import { HomeTab, type HomeDashboardCache } from './components/HomeTab';
 import { MarketMapTab } from './components/MarketMapTab';
 import { WatchlistTab } from './components/WatchlistTab';
 import { AiTeacherTab } from './components/AiTeacherTab';
@@ -40,6 +40,8 @@ export default function App() {
   const [prefilledStock, setPrefilledStock] = useState<{ name: string; code: string } | null>(null);
   const [pendingPrompt, setPendingPrompt] = useState<string | null>(null);
   const [researchStock, setResearchStock] = useState<StockItem | null>(null);
+  // 首页会在标签切换时卸载；保留已加载的市场概览与早报，避免返回首页出现空白加载态。
+  const [homeCache, setHomeCache] = useState<HomeDashboardCache | null>(null);
 
   // Centralized Watchlist state（持久化于服务端 watchlist 表，登录后从 /api/watchlist 加载）
   const [followedStocks, setFollowedStocks] = useState<StockItem[]>([]);
@@ -222,6 +224,8 @@ export default function App() {
                   onNavigateToTab={(tabId) => setActiveTab(tabId as TabId)}
                   onAskTeacherAboutStock={handleAskTeacherAboutStock}
                   followedStocks={followedStocks}
+                  homeCache={homeCache}
+                  onHomeCacheChange={setHomeCache}
                 />
               )}
               {activeTab === 'market-map' && (

@@ -54,10 +54,32 @@ interface HomeTabProps {
   onNavigateToTab: (tabId: string) => void;
   onAskTeacherAboutStock: (stockName: string, stockCode: string) => void;
   followedStocks?: { name: string; code: string; price: number; changePercent: number }[];
+  homeCache?: HomeDashboardCache | null;
+  onHomeCacheChange?: (cache: HomeDashboardCache) => void;
 }
 
-export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStock, followedStocks = [] }: HomeTabProps) {
-  const [indices, setIndices] = useState<MarketIndex[]>([]);
+type MorningReportState = {
+  summaryText: string;
+  reasonBrief: string;
+  stories: MarketStory[];
+  sentiment: string;
+  loading: boolean;
+  promptVersion?: string;
+  promptVersions?: { beginner: string; professional: string };
+};
+
+export type HomeDashboardCache = {
+  indices: MarketIndex[];
+  morningReport: MorningReportState;
+  marketStatus: { isOpen: boolean; phase: string; label: string } | null;
+  marketOverview: any;
+  dataError: string | null;
+};
+
+const emptyMorningReport = (): MorningReportState => ({ summaryText: '', reasonBrief: '', stories: [], sentiment: '中性', loading: true });
+
+export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStock, followedStocks = [], homeCache, onHomeCacheChange }: HomeTabProps) {
+  const [indices, setIndices] = useState<MarketIndex[]>(() => homeCache?.indices || []);
   const [selectedIndex, setSelectedIndex] = useState<MarketIndex | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [isSearching, setIsSearching] = useState(false);
@@ -73,25 +95,14 @@ export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStoc
   });
 
   // Morning report from AI pipeline
-  const [morningReport, setMorningReport] = useState<{
-    summaryText: string;
-    reasonBrief: string;
-    stories: MarketStory[];
-    sentiment: string;
-    loading: boolean;
-    promptVersion?: string;
-    promptVersions?: {
-      beginner: string;
-      professional: string;
-    };
-  }>({ summaryText: '', reasonBrief: '', stories: [], sentiment: '中性', loading: true });
+  const [morningReport, setMorningReport] = useState<MorningReportState>(() => homeCache?.morningReport || emptyMorningReport());
 
   // 市场状态（交易时段判断）
   const [marketStatus, setMarketStatus] = useState<{
     isOpen: boolean;
     phase: string;
     label: string;
-  } | null>(null);
+  } | null>(() => homeCache?.marketStatus || null);
 
   // Market overview from rule engine
   const [marketOverview, setMarketOverview] = useState<{
@@ -125,10 +136,14 @@ export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStoc
         volatility: { score: number; averageAmplitude: number | null };
       };
     };
-  } | null>(null);
+  } | null>(() => homeCache?.marketOverview || null);
 
   // 数据是否成功加载
-  const [dataError, setDataError] = useState<string | null>(null);
+  const [dataError, setDataError] = useState<string | null>(() => homeCache?.dataError || null);
+  // 标签切换会卸载首页；同步已成功加载的核心数据到 App，返回时先展示缓存再静默刷新。
+  useEffect(() => {
+    onHomeCacheChange?.({ indices, morningReport, marketStatus, marketOverview, dataError });
+  }, [dataError, indices, marketOverview, marketStatus, morningReport, onHomeCacheChange]);
   // 缓存天气和情绪计算结果，避免每次渲染重新触发动画
   const [cachedWeather, setCachedWeather] = useState({
     emoji: '❓', text: '暂无数据', bg: 'bg-gray-50 border-gray-200 text-gray-500', temp: 50,
