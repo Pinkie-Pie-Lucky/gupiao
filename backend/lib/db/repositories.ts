@@ -3,11 +3,17 @@
  * 生产环境走 backend/lib/db/pgRepositories.ts（PostgreSQL 实现）。
  */
 
+export type UserRole = 'user' | 'admin';
+export type UserStatus = 'active' | 'banned';
+export type ClientPlatform = 'web' | 'app' | 'miniprogram';
+
 export interface UserRecord {
   id: string;
   phone: string;
   passwordHash: string;
   nickname: string;
+  role: UserRole;
+  status: UserStatus;
   createdAt: string; // ISO
 }
 
@@ -15,6 +21,19 @@ export interface PublicUser {
   id: string;
   phone: string;
   nickname: string;
+  role: UserRole;
+  status: UserStatus;
+}
+
+export interface UserListQuery {
+  search?: string;      // 昵称 / 手机号模糊匹配
+  offset?: number;
+  limit?: number;
+}
+
+export interface UserListResult {
+  rows: Array<PublicUser & { createdAt: string }>;
+  total: number;
 }
 
 export interface BlacklistEntry {
@@ -98,6 +117,127 @@ export interface StockAgentOutputRecord {
   updatedAt: string;   // ISO
 }
 
+// ---- 用户保存的条件选股（结果快照仅用于候选池变化追踪，不构成投资建议） ----
+export interface SavedScreenerRecord {
+  id: string;
+  userId: string;
+  name: string;
+  query: string;
+  enabled: boolean;
+  lastRunAt: string | null;
+  lastResult: unknown | null;
+  lastDiff: unknown | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ScreenerRepo {
+  list(userId: string): Promise<SavedScreenerRecord[]>;
+  create(record: SavedScreenerRecord): Promise<void>;
+  remove(userId: string, id: string): Promise<void>;
+  find(userId: string, id: string): Promise<SavedScreenerRecord | null>;
+  listEnabled(limit: number): Promise<SavedScreenerRecord[]>;
+  saveRun(userId: string, id: string, run: { lastRunAt: string; lastResult: unknown; lastDiff: unknown; updatedAt: string }): Promise<SavedScreenerRecord | null>;
+}
+
+export interface SentimentRawRecord {
+  contentId: string;
+  platform: string;
+  contentType: string;
+  title: string;
+  summary: string;
+  originalUrl: string | null;
+  publishedAt: string | null;
+  fetchedAt: string;
+  authorIdHash: string | null;
+  engagement: unknown;
+  relatedSymbols: string[];
+  entityMatchScore: number;
+  sourceQuality: string;
+  verification: string;
+  contentHash: string;
+  clusterId: string | null;
+  evidenceId: string;
+  requiresReview: boolean;
+}
+
+export interface SentimentSourceHealthRecord {
+  source: string;
+  status: string;
+  lastAttemptAt: string | null;
+  lastSuccessAt: string | null;
+  lastError: string | null;
+  consecutiveFailures: number;
+  metadata: unknown;
+  updatedAt: string;
+}
+
+export interface SentimentClusterRecord {
+  clusterId: string;
+  symbol: string;
+  category: string;
+  representativeTitle: string;
+  representativeContentId: string;
+  startedAt: string | null;
+  endedAt: string | null;
+  itemCount: number;
+  sourceCount: number;
+  sourceBreakdown: Record<string, number>;
+  stanceMetrics: unknown;
+  verification: string;
+  itemIds: string[];
+  updatedAt: string;
+}
+
+export interface EventFactChainRecord {
+  chainId: string;
+  symbol: string;
+  topicKey: string;
+  category: string;
+  headline: string;
+  lifecycleState: string;
+  factStatus: string;
+  firstPublishedAt: string | null;
+  lastPublishedAt: string | null;
+  officialNodeId: string | null;
+  clarificationNodeId: string | null;
+  sourceCount: number;
+  nodeCount: number;
+  propagation: unknown;
+  updatedAt: string;
+}
+
+export interface EventFactNodeRecord {
+  nodeId: string;
+  chainId: string;
+  symbol: string;
+  evidenceId: string;
+  title: string;
+  summary: string;
+  source: string;
+  sourceUrl: string | null;
+  publishedAt: string | null;
+  category: string;
+  direction: string;
+  verification: string;
+  role: string;
+  parentNodeId: string | null;
+  relationType: string;
+  linkConfidence: string;
+  superseded: boolean;
+  updatedAt: string;
+}
+
+export interface SentimentRepo {
+  saveRawItems(items: SentimentRawRecord[]): Promise<void>;
+  listRawItems(symbol: string, since: string, limit?: number): Promise<SentimentRawRecord[]>;
+  saveSourceHealth(records: SentimentSourceHealthRecord[]): Promise<void>;
+  listSourceHealth(): Promise<SentimentSourceHealthRecord[]>;
+  saveClusters(symbol: string, clusters: SentimentClusterRecord[]): Promise<void>;
+  saveEventFactChains(chains: EventFactChainRecord[], nodes: EventFactNodeRecord[]): Promise<void>;
+  listEventFactChains(symbol: string, since: string, limit?: number): Promise<{ chains: EventFactChainRecord[]; nodes: EventFactNodeRecord[] }>;
+}
+
 export interface ContentRepo {
   saveMorningReport(record: MorningReportRecord): Promise<void>;
   saveMarketReport(record: MarketReportRecord): Promise<void>;
@@ -137,6 +277,14 @@ export interface UserRepo {
   findByPhone(phone: string): Promise<UserRecord | null>;
   findById(id: string): Promise<UserRecord | null>;
   updateNickname(id: string, nickname: string): Promise<UserRecord | null>;
+  /** 管理端：角色调整（白名单提权 / 手动降权） */
+  updateRole(id: string, role: UserRole): Promise<UserRecord | null>;
+  /** 管理端：封禁 / 解封；已发 token 因每次鉴权查库而即时失效 */
+  updateStatus(id: string, status: UserStatus): Promise<UserRecord | null>;
+  /** 管理端：用户列表（分页 + 搜索） */
+  list(query?: UserListQuery): Promise<UserListResult>;
+  /** 管理端：某时间点之后注册的用户数（新增注册统计） */
+  countCreatedSince(since: Date): Promise<number>;
 }
 
 export interface BlacklistRepo {
@@ -153,5 +301,78 @@ export interface FeedbackRepo {
 }
 
 export function toPublicUser(user: UserRecord): PublicUser {
-  return { id: user.id, phone: user.phone, nickname: user.nickname };
+  return { id: user.id, phone: user.phone, nickname: user.nickname, role: user.role, status: user.status };
+}
+
+// ---------- 访问统计（管理端） ----------
+
+export interface AccessEventRecord {
+  id: string;
+  userId: string | null;
+  sessionKey: string;              // 前端 localStorage 匿名 UUID，UV 去重口径
+  platform: ClientPlatform;        // web | app | miniprogram
+  path: string;
+  method: string;
+  statusCode: number;
+  referer: string | null;          // 来源
+  utmSource: string | null;        // 渠道参数
+  device: 'mobile' | 'tablet' | 'desktop';
+  ipHash: string | null;           // HMAC-SHA256，不落明文 IP
+  durationMs: number | null;       // pageview：页面停留毫秒数
+  eventKind: 'api' | 'pageview';   // api=服务端中间件埋点；pageview=前端页面浏览上报（PV 口径）
+  createdAt: string;               // ISO
+}
+
+export interface PeriodStats {
+  pv: number;          // 页面浏览量（仅 event_kind='pageview'）
+  uv: number;          // sessionKey 去重（含匿名，任何活动均计入）
+  dau: number;         // 登录用户去重
+  newUsers: number;    // 新增注册
+}
+
+export interface PlatformSessionDuration {
+  platform: string;
+  sessions: number;
+  avgSessionDurationMs: number | null;
+}
+
+export interface SessionDurationStats {
+  avgSessionDurationMs: number | null;   // 平均使用时长：按 session 汇总 pageview 时长后取均值
+  byPlatform: PlatformSessionDuration[];
+}
+
+export interface AdminOverview {
+  today: PeriodStats;
+  recent7d: PeriodStats;
+  recent30d: PeriodStats;
+  /** 今日平均使用时长（按平台细分） */
+  sessionDuration: SessionDurationStats;
+}
+
+export interface AdminPageStats {
+  path: string;                 // 页面标识（TabId）
+  views: number;                // 浏览次数
+  avgDurationMs: number | null; // 平均停留时长
+  totalDurationMs: number;      // 总停留时长
+}
+
+export interface AdminTraffic {
+  daily: Array<{ date: string; pv: number; uv: number }>;
+  referers: Array<{ referer: string; count: number }>;
+  devices: Array<{ device: string; count: number }>;
+  platforms: Array<{ platform: string; count: number }>;
+}
+
+export interface AccessStatsRepo {
+  /** 埋点写入：失败只告警，不影响业务响应（fire-and-forget） */
+  recordAccess(event: AccessEventRecord): Promise<void>;
+  /** 时间段访问统计（PV 只算页面浏览 / UV / DAU）；newUsers 由 UserRepo.countCreatedSince 另行查询 */
+  periodStats(since: Date): Promise<Omit<PeriodStats, 'newUsers'>>;
+  /** 平均使用时长：按 session 汇总页面停留时长再取均值，含平台细分 */
+  sessionDurations(since: Date): Promise<SessionDurationStats>;
+  /** 页面浏览时长排行（近 N 天） */
+  pageStats(days: number): Promise<AdminPageStats[]>;
+  traffic(days: number): Promise<AdminTraffic>;
+  /** 清理保留期（180 天）之前的明细，返回删除行数 */
+  purgeBefore(date: Date): Promise<number>;
 }

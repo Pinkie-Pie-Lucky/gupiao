@@ -11,6 +11,16 @@ import { ApiError } from './errors.js';
 
 export const PHONE_PATTERN = /^1[3-9]\d{9}$/;
 
+/** ADMIN_PHONES 白名单：逗号分隔手机号，命中者登录/注册时自动提权为管理员（只升不降） */
+function adminPhones(): Set<string> {
+  return new Set(
+    String(process.env.ADMIN_PHONES || '')
+      .split(',')
+      .map((item) => item.trim())
+      .filter((item) => PHONE_PATTERN.test(item)),
+  );
+}
+
 export interface AuthResult {
   token: string;
   user: PublicUser;
@@ -22,8 +32,14 @@ export interface AuthServiceDeps {
   jwtConfig?: AuthConfig;
 }
 
-function assertNickname(nickname: unknown): string {
+export function maskedPhoneNickname(phone: string): string {
+  const value = String(phone || '').trim();
+  return PHONE_PATTERN.test(value) ? `${value.slice(0, 3)}****${value.slice(-4)}` : '泡泡用户';
+}
+
+function assertNickname(nickname: unknown, fallbackPhone?: string): string {
   const value = String(nickname ?? '').trim();
+  if (!value && fallbackPhone) return maskedPhoneNickname(fallbackPhone);
   if (value.length < 2 || value.length > 16) throw new ApiError('昵称长度为 2–16 个字符。');
   return value;
 }
@@ -56,7 +72,7 @@ export class AuthService {
 
   async register(phone: unknown, nickname: unknown, password: unknown): Promise<AuthResult> {
     const phoneValue = assertPhone(phone);
-    const nicknameValue = assertNickname(nickname);
+    const nicknameValue = assertNickname(nickname, phoneValue);
     const passwordValue = assertPassword(password);
 
     const existing = await this.users.findByPhone(phoneValue);
@@ -67,6 +83,8 @@ export class AuthService {
       phone: phoneValue,
       passwordHash: await hashPassword(passwordValue),
       nickname: nicknameValue,
+      role: adminPhones().has(phoneValue) ? 'admin' : 'user',
+      status: 'active',
       createdAt: new Date().toISOString(),
     };
     await this.users.create(user);
@@ -83,9 +101,16 @@ export class AuthService {
     // 用户不存在也走一次假校验，避免通过耗时差异枚举手机号是否注册
     const ok = user ? await verifyPassword(passwordValue, user.passwordHash) : await verifyPassword(passwordValue, '$2a$10$invalidinvalidinvalidinvalidinvalidinvalidinvalid');
     if (!user || !ok) throw new ApiError('手机号或密码不正确。', 401);
+    if (user.status === 'banned') throw new ApiError('该账号已被禁用，如有疑问请联系管理员。', 403);
 
-    const signed = signAuthToken(user.id, user.phone, this.jwtConfig);
-    return { token: signed.token, user: toPublicUser(user) };
+    // 白名单种子：命中 ADMIN_PHONES 且尚未提权的已注册用户，登录时补一次提权（只升不降）
+    let effective = user;
+    if (user.role === 'user' && adminPhones().has(user.phone)) {
+      effective = (await this.users.updateRole(user.id, 'admin')) ?? user;
+    }
+
+    const signed = signAuthToken(effective.id, effective.phone, this.jwtConfig);
+    return { token: signed.token, user: toPublicUser(effective) };
   }
 
   /** 登出：把当前 token 的 jti 写入黑名单，使其在剩余有效期内即时失效 */
@@ -112,7 +137,7 @@ export class AuthService {
     return toPublicUser(updated);
   }
 
-  /** 校验 Bearer token：签名有效 + 未进入黑名单 */
+  /** 校验 Bearer token：签名有效 + 未进入黑名单 + 账号未封禁（每次查库，封禁/降权即时生效） */
   async authenticate(token: string | undefined): Promise<{ payload: AuthTokenPayload; user: PublicUser }> {
     if (!token) throw new ApiError('未登录。', 401);
     const result = verifyAuthToken(token, this.jwtConfig);
@@ -123,6 +148,7 @@ export class AuthService {
     if (await this.blacklist.has(result.payload.jti)) throw new ApiError('登录已失效，请重新登录。', 401);
     const user = await this.users.findById(result.payload.sub);
     if (!user) throw new ApiError('用户不存在。', 404);
+    if (user.status === 'banned') throw new ApiError('该账号已被禁用。', 403);
     return { payload: result.payload, user: toPublicUser(user) };
   }
 }

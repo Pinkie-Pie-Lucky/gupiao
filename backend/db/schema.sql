@@ -7,8 +7,45 @@ CREATE TABLE IF NOT EXISTS users (
   phone         TEXT NOT NULL UNIQUE,          -- 手机号（唯一）
   password_hash TEXT NOT NULL,                 -- bcrypt 哈希，绝不存明文
   nickname      TEXT NOT NULL,                 -- 昵称
+  role          TEXT NOT NULL DEFAULT 'user',  -- 'user' | 'admin'（管理端：统计/用户管理）
+  status        TEXT NOT NULL DEFAULT 'active',-- 'active' | 'banned'（封禁后已发 token 因每次鉴权查库即时失效）
   created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- 角色与状态枚举约束（幂等添加；老库迁移时上面 ADD COLUMN 已填默认值）
+DO $$ BEGIN
+  ALTER TABLE users ADD CONSTRAINT users_role_check CHECK (role IN ('user', 'admin'));
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN
+  ALTER TABLE users ADD CONSTRAINT users_status_check CHECK (status IN ('active', 'banned'));
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'user';
+ALTER TABLE users ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'active';
+
+-- 访问埋点（管理端统计）：
+--   event_kind='api'       —— 服务端中间件记录的每个业务请求（访问活跃度 / 来源 / 平台分布）
+--   event_kind='pageview'  —— 前端上报的页面浏览（PV 口径 + 停留时长 duration_ms）
+-- 保留策略：定时任务清理 180 天前明细；量大后再上按天 rollup 表。
+CREATE TABLE IF NOT EXISTS access_events (
+  id          TEXT PRIMARY KEY,
+  user_id     TEXT REFERENCES users(id) ON DELETE SET NULL,   -- 登录用户；匿名为 NULL
+  session_key TEXT NOT NULL,                 -- 前端 localStorage 匿名 UUID，UV 去重口径
+  platform    TEXT NOT NULL DEFAULT 'web',   -- 'web' | 'app' | 'miniprogram'
+  path        TEXT NOT NULL,
+  method      TEXT NOT NULL,
+  status_code INTEGER NOT NULL,
+  referer     TEXT,                          -- 来源页；空 = direct
+  utm_source  TEXT,                          -- 渠道参数
+  device      TEXT NOT NULL DEFAULT 'desktop', -- mobile | tablet | desktop
+  ip_hash     TEXT,                          -- HMAC-SHA256(secret, ip)，不落明文 IP
+  duration_ms INTEGER,                       -- pageview：页面停留毫秒数
+  event_kind  TEXT NOT NULL DEFAULT 'api',   -- 'api' | 'pageview'
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_access_events_created ON access_events (created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_access_events_session ON access_events (session_key, created_at);
+CREATE INDEX IF NOT EXISTS idx_access_events_kind_path ON access_events (event_kind, path, created_at DESC);
+ALTER TABLE access_events ADD COLUMN IF NOT EXISTS event_kind TEXT NOT NULL DEFAULT 'api';
 
 -- JWT 撤销黑名单：登出或强制下线时把 jti 写进来即可即时失效
 CREATE TABLE IF NOT EXISTS token_blacklist (
@@ -36,6 +73,22 @@ CREATE TABLE IF NOT EXISTS feedback (
 
 CREATE INDEX IF NOT EXISTS idx_feedback_created_at ON feedback (created_at);
 CREATE INDEX IF NOT EXISTS idx_feedback_prompt_version ON feedback (prompt_version);
+
+-- 用户保存的条件选股；每日刷新结果与候选变化用于研究候选观察，不自动触发个股 Agent。
+CREATE TABLE IF NOT EXISTS saved_screeners (
+  id          TEXT PRIMARY KEY,
+  user_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name        TEXT NOT NULL,
+  query       TEXT NOT NULL,
+  enabled     BOOLEAN NOT NULL DEFAULT true,
+  last_run_at TIMESTAMPTZ,
+  last_result JSONB,
+  last_diff   JSONB,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_saved_screeners_user_updated ON saved_screeners (user_id, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_saved_screeners_enabled ON saved_screeners (enabled, updated_at ASC);
 
 -- ============================================================
 -- 以下为后续批次的数据表（已建表，数据流接入见各批次计划）
@@ -112,6 +165,145 @@ CREATE TABLE IF NOT EXISTS sentiment_heat (
   payload     JSONB NOT NULL,
   fetched_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- 舆情原始内容：只保存平台允许使用的摘要、哈希和原文链接；按 content_id 幂等更新。
+CREATE TABLE IF NOT EXISTS sentiment_raw_items (
+  content_id          TEXT PRIMARY KEY,
+  platform            TEXT NOT NULL,
+  content_type        TEXT NOT NULL,
+  title               TEXT NOT NULL,
+  summary             TEXT NOT NULL DEFAULT '',
+  original_url        TEXT,
+  published_at        TIMESTAMPTZ,
+  fetched_at          TIMESTAMPTZ NOT NULL,
+  author_id_hash      TEXT,
+  engagement          JSONB NOT NULL DEFAULT '{}'::jsonb,
+  entity_match_score  DOUBLE PRECISION NOT NULL CHECK (entity_match_score >= 0 AND entity_match_score <= 1),
+  source_quality      TEXT NOT NULL,
+  verification        TEXT NOT NULL,
+  content_hash        TEXT NOT NULL,
+  evidence_id         TEXT NOT NULL UNIQUE,
+  requires_review     BOOLEAN NOT NULL DEFAULT false,
+  first_seen_at       TIMESTAMPTZ NOT NULL,
+  last_seen_at        TIMESTAMPTZ NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_sentiment_raw_published_at ON sentiment_raw_items (published_at DESC);
+CREATE INDEX IF NOT EXISTS idx_sentiment_raw_content_hash ON sentiment_raw_items (content_hash);
+
+-- 内容与股票使用关系表，避免在数组列上做高频“股票 + 时间窗”过滤。
+CREATE TABLE IF NOT EXISTS sentiment_content_symbols (
+  content_id   TEXT NOT NULL REFERENCES sentiment_raw_items(content_id) ON DELETE CASCADE,
+  symbol       TEXT NOT NULL,
+  observed_at  TIMESTAMPTZ NOT NULL,
+  PRIMARY KEY (content_id, symbol)
+);
+CREATE INDEX IF NOT EXISTS idx_sentiment_content_symbols_symbol_time
+  ON sentiment_content_symbols (symbol, observed_at DESC, content_id);
+
+CREATE TABLE IF NOT EXISTS sentiment_source_health (
+  source                TEXT PRIMARY KEY,
+  status                TEXT NOT NULL,
+  last_attempt_at       TIMESTAMPTZ,
+  last_success_at       TIMESTAMPTZ,
+  last_error            TEXT,
+  consecutive_failures  INTEGER NOT NULL DEFAULT 0 CHECK (consecutive_failures >= 0),
+  metadata              JSONB NOT NULL DEFAULT '{}'::jsonb,
+  updated_at            TIMESTAMPTZ NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS sentiment_event_clusters (
+  cluster_id                 TEXT PRIMARY KEY,
+  symbol                     TEXT NOT NULL,
+  category                   TEXT NOT NULL,
+  representative_title       TEXT NOT NULL,
+  representative_content_id  TEXT NOT NULL REFERENCES sentiment_raw_items(content_id) ON DELETE CASCADE,
+  started_at                 TIMESTAMPTZ,
+  ended_at                   TIMESTAMPTZ,
+  item_count                 INTEGER NOT NULL CHECK (item_count > 0),
+  source_count               INTEGER NOT NULL CHECK (source_count > 0),
+  source_breakdown           JSONB NOT NULL DEFAULT '{}'::jsonb,
+  stance_metrics             JSONB NOT NULL DEFAULT '{}'::jsonb,
+  verification               TEXT NOT NULL,
+  updated_at                 TIMESTAMPTZ NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_sentiment_clusters_symbol_time
+  ON sentiment_event_clusters (symbol, ended_at DESC, cluster_id);
+
+CREATE TABLE IF NOT EXISTS sentiment_cluster_items (
+  content_id   TEXT NOT NULL REFERENCES sentiment_raw_items(content_id) ON DELETE CASCADE,
+  symbol       TEXT NOT NULL,
+  cluster_id   TEXT NOT NULL REFERENCES sentiment_event_clusters(cluster_id) ON DELETE CASCADE,
+  assigned_at  TIMESTAMPTZ NOT NULL,
+  PRIMARY KEY (content_id, symbol)
+);
+CREATE INDEX IF NOT EXISTS idx_sentiment_cluster_items_cluster ON sentiment_cluster_items (cluster_id, content_id);
+
+-- 事件事实链：同一事项的传闻、媒体、公告、澄清、监管与后续进展以链路保存。
+CREATE TABLE IF NOT EXISTS event_fact_chains (
+  chain_id               TEXT PRIMARY KEY,
+  symbol                 TEXT NOT NULL,
+  topic_key              TEXT NOT NULL,
+  category               TEXT NOT NULL,
+  headline               TEXT NOT NULL,
+  lifecycle_state        TEXT NOT NULL,
+  fact_status            TEXT NOT NULL,
+  first_published_at     TIMESTAMPTZ,
+  last_published_at      TIMESTAMPTZ,
+  official_node_id       TEXT,
+  clarification_node_id  TEXT,
+  source_count           INTEGER NOT NULL DEFAULT 0 CHECK (source_count >= 0),
+  node_count             INTEGER NOT NULL DEFAULT 0 CHECK (node_count >= 0),
+  propagation            JSONB NOT NULL DEFAULT '{}'::jsonb,
+  updated_at             TIMESTAMPTZ NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_event_fact_chains_symbol_time
+  ON event_fact_chains (symbol, last_published_at DESC, chain_id);
+
+CREATE TABLE IF NOT EXISTS event_fact_nodes (
+  node_id          TEXT PRIMARY KEY,
+  chain_id         TEXT NOT NULL REFERENCES event_fact_chains(chain_id) ON DELETE CASCADE,
+  symbol           TEXT NOT NULL,
+  evidence_id      TEXT NOT NULL,
+  title            TEXT NOT NULL,
+  summary          TEXT NOT NULL DEFAULT '',
+  source           TEXT NOT NULL,
+  source_url       TEXT,
+  published_at     TIMESTAMPTZ,
+  category         TEXT NOT NULL,
+  direction        TEXT NOT NULL,
+  verification     TEXT NOT NULL,
+  role             TEXT NOT NULL,
+  parent_node_id   TEXT,
+  relation_type    TEXT NOT NULL,
+  link_confidence  TEXT NOT NULL,
+  superseded       BOOLEAN NOT NULL DEFAULT false,
+  updated_at       TIMESTAMPTZ NOT NULL,
+  UNIQUE (symbol, evidence_id)
+);
+CREATE INDEX IF NOT EXISTS idx_event_fact_nodes_chain_time
+  ON event_fact_nodes (chain_id, published_at ASC, node_id);
+CREATE INDEX IF NOT EXISTS idx_event_fact_nodes_symbol_time
+  ON event_fact_nodes (symbol, published_at DESC, node_id);
+
+-- 兼容早期仅以 content_id 为主键的本地开发表；允许同一内容按不同股票进入不同事件簇。
+ALTER TABLE sentiment_cluster_items ADD COLUMN IF NOT EXISTS symbol TEXT;
+UPDATE sentiment_cluster_items memberships
+SET symbol = clusters.symbol
+FROM sentiment_event_clusters clusters
+WHERE memberships.cluster_id = clusters.cluster_id AND memberships.symbol IS NULL;
+ALTER TABLE sentiment_cluster_items ALTER COLUMN symbol SET NOT NULL;
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'sentiment_cluster_items_pkey'
+      AND conrelid = 'sentiment_cluster_items'::regclass
+      AND array_length(conkey, 1) = 1
+  ) THEN
+    ALTER TABLE sentiment_cluster_items DROP CONSTRAINT sentiment_cluster_items_pkey;
+    ALTER TABLE sentiment_cluster_items ADD PRIMARY KEY (content_id, symbol);
+  END IF;
+END $$;
 
 -- 行业基准（同花顺行业指数 + baostock 兜底）
 CREATE TABLE IF NOT EXISTS industry_benchmarks (

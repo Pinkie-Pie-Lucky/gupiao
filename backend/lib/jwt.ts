@@ -18,6 +18,11 @@ function defaultConfig(): AuthConfig {
   };
 }
 
+/** 统一的 JWT 配置来源：AuthService 与埋点等旁路解析共用同一 secret */
+export function buildAuthConfig(): AuthConfig {
+  return defaultConfig();
+}
+
 export interface SignedToken {
   token: string;
   jti: string;

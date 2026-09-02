@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { HomeTab, type HomeDashboardCache } from './components/HomeTab';
 import { MarketMapTab } from './components/MarketMapTab';
 import { WatchlistTab } from './components/WatchlistTab';
@@ -11,13 +11,17 @@ import { AiTeacherTab } from './components/AiTeacherTab';
 import { MineTab } from './components/MineTab';
 import { StockResearchTab } from './components/StockResearchTab';
 import { StockResearchEmptyState } from './components/StockResearchEmptyState';
+import { StockScreenerTab } from './components/StockScreenerTab';
 import { LoginScreen } from './components/LoginScreen';
-import { apiLogout, apiMe, apiUpdateNickname, apiWatchlist, apiWatchlistAdd, apiWatchlistRemove, clearSession, getSessionUser, ApiError, type User as SessionUser, type WatchlistEntry } from './lib/api';
-import { Home, Compass, Star, MessageSquare, User, BarChart3 } from 'lucide-react';
+import { AdminTab } from './components/AdminTab';
+import { apiLogout, apiMe, apiUpdateNickname, apiWatchlist, apiWatchlistAdd, apiWatchlistRemove, apiRefreshMarketContent, clearSession, getSessionUser, reportPageView, ApiError, type User as SessionUser, type WatchlistEntry } from './lib/api';
+import { Home, Compass, Star, MessageSquare, User, BarChart3, SlidersHorizontal, ShieldCheck } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { StockItem } from './types';
+import { ResponsiveAppShell, type AppNavigationItem } from './components/ResponsiveAppShell';
+import { useDeviceLayout } from './hooks/useDeviceLayout';
 
-type TabId = 'home' | 'market-map' | 'watchlist' | 'ai-teacher' | 'mine' | 'stock-research';
+type TabId = 'home' | 'market-map' | 'watchlist' | 'ai-teacher' | 'mine' | 'stock-research' | 'stock-screener' | 'admin';
 
 // 个人中心与账号登录：基于服务端 PostgreSQL 存储（手机号 + 密码 + JWT）。
 const ACCOUNT_FEATURE_ENABLED = true;
@@ -33,6 +37,8 @@ const formatQuoteAmount = (value: number | null | undefined) => Number.isFinite(
   : '--';
 
 export default function App() {
+  const [darkMode, setDarkMode] = useState(() => window.localStorage.getItem('bubble-theme') === 'dark');
+  const deviceLayout = useDeviceLayout();
   const [account, setAccount] = useState<SessionUser | null>(() => getSessionUser());
   const [authReady, setAuthReady] = useState(false);
   const [activeTab, setActiveTab] = useState<TabId>('home');
@@ -42,9 +48,39 @@ export default function App() {
   const [researchStock, setResearchStock] = useState<StockItem | null>(null);
   // 首页会在标签切换时卸载；保留已加载的市场概览与早报，避免返回首页出现空白加载态。
   const [homeCache, setHomeCache] = useState<HomeDashboardCache | null>(null);
+  const [refreshVersion, setRefreshVersion] = useState(0);
+  const [globalRefreshing, setGlobalRefreshing] = useState(false);
+  const [globalRefreshMessage, setGlobalRefreshMessage] = useState<string | null>(null);
 
   // Centralized Watchlist state（持久化于服务端 watchlist 表，登录后从 /api/watchlist 加载）
   const [followedStocks, setFollowedStocks] = useState<StockItem[]>([]);
+
+  // 页面浏览埋点：记录当前页进入时间；切换 tab / 登出 / 关页时上报停留时长（PV 口径）
+  const pageEnterRef = useRef<{ tab: TabId; at: number } | null>(null);
+  useEffect(() => {
+    const now = Date.now();
+    if (!account) {
+      const previous = pageEnterRef.current;
+      if (previous) reportPageView(previous.tab, now - previous.at); // 登出时补报最后一段
+      pageEnterRef.current = null;
+      return;
+    }
+    const previous = pageEnterRef.current;
+    if (previous && previous.tab !== activeTab) {
+      reportPageView(previous.tab, now - previous.at);
+    }
+    pageEnterRef.current = { tab: activeTab, at: now };
+  }, [activeTab, account]);
+
+  // 关页（含移动端切后台）时兜底上报；重复注册/卸载只清理监听，不触发上报
+  useEffect(() => {
+    const handleHide = () => {
+      const current = pageEnterRef.current;
+      if (current) reportPageView(current.tab, Date.now() - current.at);
+    };
+    window.addEventListener('pagehide', handleHide);
+    return () => window.removeEventListener('pagehide', handleHide);
+  }, []);
 
   // DB 只存 symbol+name；实时行情字段先以占位展示，后续批次接入行情快照后再填充
   const toStockItem = (entry: WatchlistEntry): StockItem => ({
@@ -194,6 +230,27 @@ export default function App() {
     setActiveTab('home');
   };
 
+  const handleGlobalRefresh = useCallback(async () => {
+    if (globalRefreshing) return;
+    setGlobalRefreshing(true);
+    setGlobalRefreshMessage('正在回源真实行情并生成 AI 内容…');
+    try {
+      const result = await apiRefreshMarketContent();
+      setHomeCache(null);
+      setRefreshVersion((value) => value + 1);
+      if (account) {
+        const items = await apiWatchlist();
+        setFollowedStocks(items.map(toStockItem));
+      }
+      setGlobalRefreshMessage(result.ok ? '已更新真实行情与 AI 内容' : '行情已更新，部分 AI 内容暂未生成');
+    } catch (error: any) {
+      setGlobalRefreshMessage(error?.message || '刷新失败，请稍后重试');
+    } finally {
+      setGlobalRefreshing(false);
+      window.setTimeout(() => setGlobalRefreshMessage(null), 3600);
+    }
+  }, [account, globalRefreshing]);
+
   if (ACCOUNT_FEATURE_ENABLED && !authReady) {
     return <div className="min-h-screen bg-slate-50" />;
   }
@@ -202,13 +259,34 @@ export default function App() {
     return <LoginScreen onAuthenticated={handleAuthenticated} />;
   }
 
+  const navigation: AppNavigationItem[] = [
+    { id: 'home', label: '首页', icon: Home, onSelect: () => setActiveTab('home') },
+    { id: 'market-map', label: '市场地图', icon: Compass, onSelect: () => setActiveTab('market-map') },
+    { id: 'watchlist', label: '我的关注', icon: Star, onSelect: () => setActiveTab('watchlist') },
+    ...(deviceLayout !== 'mobile' ? [{ id: 'stock-screener', label: '条件选股', icon: SlidersHorizontal, onSelect: () => setActiveTab('stock-screener') }] : []),
+    { id: 'stock-research', label: '个股分析', icon: BarChart3, onSelect: handleOpenResearchEntry },
+    { id: 'ai-teacher', label: 'AI泡泡', icon: MessageSquare, onSelect: () => setActiveTab('ai-teacher') },
+    ...(ACCOUNT_FEATURE_ENABLED ? [{ id: 'mine', label: '个人中心', icon: User, onSelect: () => setActiveTab('mine') }] : []),
+    // 管理端入口仅对 admin 角色可见；权限闸门在后端（非 admin 调 /api/admin/* 一律 403）
+    ...(account?.role === 'admin' ? [{ id: 'admin', label: '管理后台', icon: ShieldCheck, onSelect: () => setActiveTab('admin') }] : []),
+  ];
+  const pageTitles: Record<TabId, string> = {
+    home: '首页', 'market-map': '市场地图', watchlist: '我的关注', 'stock-screener': '条件选股', 'stock-research': '个股分析', 'ai-teacher': 'AI 泡泡', mine: '个人中心', admin: '管理后台',
+  };
+
   return (
-    <div id="app-root-container" className="min-h-screen bg-[#F8FAFC] text-gray-900 font-sans flex justify-center">
-      {/* Centered Mobile Frame container to match design and prevent layout stretching on large screens */}
-      <div id="app-device-frame" className="w-full max-w-md bg-white min-h-screen shadow-2xl shadow-slate-200 border-x border-gray-100 flex flex-col justify-between relative overflow-hidden">
-        
-        {/* Main Viewport Content Scrollable Area */}
-        <div id="app-viewport" className="flex-grow overflow-y-auto no-scrollbar">
+    <ResponsiveAppShell
+      layout={deviceLayout}
+      darkMode={darkMode}
+      onToggleTheme={() => setDarkMode((value) => { const next = !value; window.localStorage.setItem('bubble-theme', next ? 'dark' : 'light'); return next; })}
+      activeId={activeTab}
+      navigation={navigation}
+      title={pageTitles[activeTab]}
+      onRefresh={() => void handleGlobalRefresh()}
+      refreshing={globalRefreshing}
+      refreshMessage={globalRefreshMessage}
+      hideRefresh={activeTab === 'stock-research'}
+    >
           <AnimatePresence mode="wait">
             <motion.div
               key={activeTab}
@@ -226,6 +304,7 @@ export default function App() {
                   followedStocks={followedStocks}
                   homeCache={homeCache}
                   onHomeCacheChange={setHomeCache}
+                  refreshVersion={refreshVersion}
                 />
               )}
               {activeTab === 'market-map' && (
@@ -234,6 +313,7 @@ export default function App() {
                   onSelectSectorId={handleSelectSectorId}
                   onNavigateToTab={(tabId) => setActiveTab(tabId as TabId)}
                   onAskTeacherAboutSector={handleAskTeacherAboutSector}
+                  refreshVersion={refreshVersion}
                 />
               )}
               {activeTab === 'watchlist' && (
@@ -245,6 +325,7 @@ export default function App() {
                   onOpenResearch={handleOpenResearch}
                 />
               )}
+              {activeTab === 'stock-screener' && <StockScreenerTab followedStocks={followedStocks} onOpenResearch={handleOpenResearch} onFollowStock={handleFollowResearchStock} />}
               {activeTab === 'stock-research' && (researchStock ? (
                 <StockResearchTab stock={researchStock} followedStocks={followedStocks} onSelectStock={setResearchStock} onFollowStock={handleFollowResearchStock} onBack={() => setActiveTab('watchlist')} onAskTeacher={() => { handleAskTeacherAboutStock(researchStock.name, researchStock.code); setActiveTab('ai-teacher'); }} />
               ) : (
@@ -265,105 +346,11 @@ export default function App() {
                   onSignOut={handleSignOut}
                 />
               )}
+              {activeTab === 'admin' && account?.role === 'admin' && (
+                <AdminTab currentUserId={account.id} />
+              )}
             </motion.div>
           </AnimatePresence>
-        </div>
-
-        {/* Global Bottom Navigation Bar - Clean 5-tab design */}
-        <nav id="bottom-tab-bar" className="fixed bottom-0 left-1/2 -translate-x-1/2 w-full max-w-md bg-white/95 backdrop-blur-md border-t border-slate-100 px-2 py-2 flex justify-between items-center z-40 h-16">
-          
-          {/* Tab: 首页 */}
-          <button
-            id="tab-btn-home"
-            onClick={() => setActiveTab('home')}
-              className={`order-1 flex flex-col items-center justify-center flex-1 py-1 transition-all relative ${
-              activeTab === 'home' ? 'text-indigo-600 scale-105 font-semibold' : 'text-slate-400 hover:text-slate-600'
-            }`}
-          >
-            <Home className="w-4.5 h-4.5 stroke-[2.2]" />
-            <span className="text-[9px] mt-1 tracking-tight">首页</span>
-            {activeTab === 'home' && (
-              <motion.div layoutId="activeTabDot" className="absolute -bottom-1 w-1 h-1 bg-indigo-600 rounded-full" />
-            )}
-          </button>
-
-          {/* Tab: 市场地图 */}
-          <button
-            id="tab-btn-market-map"
-            onClick={() => setActiveTab('market-map')}
-              className={`order-2 flex flex-col items-center justify-center flex-1 py-1 transition-all relative ${
-              activeTab === 'market-map' ? 'text-indigo-600 scale-105 font-semibold' : 'text-slate-400 hover:text-slate-600'
-            }`}
-          >
-            <Compass className="w-4.5 h-4.5 stroke-[2.2]" />
-            <span className="text-[9px] mt-1 tracking-tight">市场地图</span>
-            {activeTab === 'market-map' && (
-              <motion.div layoutId="activeTabDot" className="absolute -bottom-1 w-1 h-1 bg-indigo-600 rounded-full" />
-            )}
-          </button>
-
-          {/* Tab: 我的关注 */}
-          <button
-            id="tab-btn-watchlist"
-            onClick={() => setActiveTab('watchlist')}
-              className={`order-4 flex flex-col items-center justify-center flex-1 py-1 transition-all relative ${
-              activeTab === 'watchlist' ? 'text-indigo-600 scale-105 font-semibold' : 'text-slate-400 hover:text-slate-600'
-            }`}
-          >
-            <Star className="w-4.5 h-4.5 stroke-[2.2]" />
-            <span className="text-[9px] mt-1 tracking-tight">我的关注</span>
-            {activeTab === 'watchlist' && (
-              <motion.div layoutId="activeTabDot" className="absolute -bottom-1 w-1 h-1 bg-indigo-600 rounded-full" />
-            )}
-          </button>
-
-          {/* Tab: 个股分析 */}
-          <button
-            id="tab-btn-stock-research"
-            onClick={handleOpenResearchEntry}
-              className={`order-3 flex flex-col items-center justify-center flex-1 py-1 transition-all relative ${
-              activeTab === 'stock-research' ? 'text-indigo-600 scale-105 font-semibold' : 'text-slate-400 hover:text-slate-600'
-            }`}
-            aria-label="打开个股分析"
-          >
-            <BarChart3 className="w-4.5 h-4.5 stroke-[2.2]" />
-            <span className="text-[9px] mt-1 tracking-tight">个股分析</span>
-            {activeTab === 'stock-research' && (
-              <motion.div layoutId="activeTabDot" className="absolute -bottom-1 w-1 h-1 bg-indigo-600 rounded-full" />
-            )}
-          </button>
-
-          {/* Tab: AI泡泡 */}
-          <button
-            id="tab-btn-ai-teacher"
-            onClick={() => setActiveTab('ai-teacher')}
-              className={`order-5 flex flex-col items-center justify-center flex-1 py-1 transition-all relative ${
-              activeTab === 'ai-teacher' ? 'text-indigo-600 scale-105 font-semibold' : 'text-slate-400 hover:text-slate-600'
-            }`}
-          >
-            <MessageSquare className="w-4.5 h-4.5 stroke-[2.2]" />
-            <span className="text-[9px] mt-1 tracking-tight">AI泡泡</span>
-            {activeTab === 'ai-teacher' && (
-              <motion.div layoutId="activeTabDot" className="absolute -bottom-1 w-1 h-1 bg-indigo-600 rounded-full" />
-            )}
-          </button>
-
-          {/* 暂停个人中心入口；恢复时将 ACCOUNT_FEATURE_ENABLED 改为 true。 */}
-          {ACCOUNT_FEATURE_ENABLED && <button
-            id="tab-btn-mine"
-            onClick={() => setActiveTab('mine')}
-            className={`order-6 flex flex-col items-center justify-center flex-1 py-1 transition-all relative ${
-              activeTab === 'mine' ? 'text-indigo-600 scale-105 font-semibold' : 'text-slate-400 hover:text-slate-600'
-            }`}
-          >
-            <User className="w-4.5 h-4.5 stroke-[2.2]" />
-            <span className="text-[9px] mt-1 tracking-tight">个人中心</span>
-            {activeTab === 'mine' && (
-              <motion.div layoutId="activeTabDot" className="absolute -bottom-1 w-1 h-1 bg-indigo-600 rounded-full" />
-            )}
-          </button>}
-        </nav>
-      </div>
-    </div>
+    </ResponsiveAppShell>
   );
 }
