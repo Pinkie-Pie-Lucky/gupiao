@@ -1,0 +1,52 @@
+services:
+  app:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: paopao-app:${DEPLOY_VERSION:-local}
+    restart: unless-stopped
+    env_file:
+      - ./env/.env.prod
+    environment:
+      NODE_ENV: production
+      DEPLOY_ENV: production
+      PORT: "8080"
+      APP_VERSION: ${DEPLOY_VERSION:-unknown}
+    depends_on:
+      db:
+        condition: service_healthy
+    expose:
+      - "8080"
+    ports:
+      - "127.0.0.1:18080:8080"
+    networks:
+      internal:
+    healthcheck:
+      # Podman Compose 会把原 CMD 数组中的箭头函数交给 sh 重新解析；
+      # 改为一个完整的 CMD-SHELL 字符串，Docker Compose 与 Podman Compose 都兼容。
+      test: ["CMD-SHELL", "node -e 'fetch(\"http://127.0.0.1:8080/health\").then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))'"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 45s
+
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    env_file:
+      - ./env/.env.prod
+    volumes:
+      - paopao-prod-db:/var/lib/postgresql/data
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+networks:
+  internal:
+
+volumes:
+  paopao-prod-db:

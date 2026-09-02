@@ -11,7 +11,7 @@ interface Props {
   evidenceCount: number;
   loading: boolean;
   error?: string | null;
-  aiFailed?: boolean;
+  aiFallback?: boolean;
 }
 
 const directions: Record<Direction, { label: string; tone: string }> = {
@@ -38,7 +38,7 @@ function Horizon({ name, range, value }: { name: string; range: string; value?: 
   return <div className="min-w-0 rounded-xl border border-slate-200 bg-white p-3"><div className="flex flex-wrap items-center justify-between gap-1"><span className="text-[11px] font-bold text-slate-800">{name}</span><span className="text-[9px] text-slate-500">{range}</span></div><div className="mt-2 flex flex-wrap items-baseline gap-x-3 gap-y-1"><p className={`text-lg font-bold ${direction.tone}`}>倾向：{direction.label}</p><p className={`text-[11px] font-semibold ${hold.tone}`}>持有评估：{hold.label}</p></div><div className="mt-2 flex items-center justify-between text-[10px] text-slate-500"><span>置信度</span><span className="font-mono font-semibold text-slate-700">{value?.confidence == null ? '--' : `${value.confidence}%`}</span></div>{(value?.rationale || []).length > 0 && <div className="mt-3 border-t border-slate-100 pt-2"><p className="text-[10px] font-bold text-slate-600">依据</p><ul className="mt-1 space-y-1">{value!.rationale.slice(0, 3).map((item, index) => <li className="flex gap-1.5 text-[10px] leading-relaxed text-slate-700" key={`${item}-${index}`}><span aria-hidden="true">•</span><span className="min-w-0 break-words">{item}</span></li>)}</ul></div>}{(value?.invalidationConditions || []).length > 0 && <div className="mt-3 rounded-lg bg-amber-50 p-2"><p className="text-[10px] font-bold text-amber-900">失效条件</p><ul className="mt-1 space-y-1">{value!.invalidationConditions.slice(0, 2).map((item, index) => <li className="flex gap-1.5 text-[10px] leading-relaxed text-amber-900" key={`${item}-${index}`}><span aria-hidden="true">•</span><span className="min-w-0 break-words">{item}</span></li>)}</ul></div>}</div>;
 }
 
-export function StockResearchOverview({ stock, stance, researchStatus, riskLevel, conclusion, evidenceCount, loading, error, aiFailed = false }: Props) {
+export function StockResearchOverview({ stock, stance, researchStatus, riskLevel, conclusion, evidenceCount, loading, error, aiFallback = false }: Props) {
   const direction = directions[stance?.direction || 'unknown']; const hold = holds[stance?.holdAssessment || 'unknown']; const status = statuses[researchStatus || 'blocked'] || statuses.blocked; const StatusIcon = status.icon;
   const hasQuote = Number.isFinite(stock.price) && stock.price > 0;
   const [selectedHorizon, setSelectedHorizon] = useState<'short' | 'medium' | 'long'>('short');
@@ -57,10 +57,10 @@ export function StockResearchOverview({ stock, stance, researchStatus, riskLevel
     .replace(/\bhigh\b/g, '高')
     .replace(/\bmedium\b/g, '中')
     .replace(/\blow\b/g, '低');
-  const aiFailedText = aiFailed && !loading && !error
-    ? '当前调 API 失败，暂不展示持有评估与周期结论。'
+  const aiFallbackText = aiFallback && !loading && !error
+    ? 'AI 解读暂不可用，以下展示程序基于当前数据计算的汇总结论；数据缺口请见页面底部。'
     : null;
-  return <section id="stock-research-overview" aria-busy={loading} className={`rounded-2xl border p-4 ${aiFailed ? 'border-slate-200 bg-slate-50' : hold.surface}`}>
+  return <section id="stock-research-overview" aria-busy={loading} className={`rounded-2xl border p-4 ${hold.surface}`}>
     <div className="flex items-start justify-between gap-3">
       <div><p className="text-xs font-bold text-slate-900">{stock.name}</p><div className="mt-1 flex flex-wrap items-baseline gap-2"><span className="font-mono text-2xl font-bold text-slate-950">{hasQuote ? `¥${Number(stock.price).toFixed(2)}` : '--'}</span>{hasQuote && <span className={`font-mono text-xs font-bold ${stock.changePercent >= 0 ? 'text-rose-700' : 'text-emerald-700'}`}>{stock.changePercent >= 0 ? '+' : ''}{Number(stock.changePercent).toFixed(2)}%</span>}</div></div>
       <span className={`inline-flex shrink-0 items-center gap-1 rounded-full bg-white/70 px-2.5 py-1 text-[10px] font-bold ${status.tone}`}><StatusIcon className="h-3.5 w-3.5" />{loading ? '正在加载' : status.label}</span>
@@ -68,15 +68,16 @@ export function StockResearchOverview({ stock, stance, researchStatus, riskLevel
     <div className="mt-4 border-t border-black/5 pt-3">
       <p className="text-[10px] font-bold text-slate-600">持有评估</p>
       <div className="mt-1 flex flex-wrap items-baseline gap-x-3 gap-y-1">
-        <h1 className={`text-2xl font-bold ${aiFailed ? 'text-slate-500' : hold.tone}`}>{loading ? '正在评估' : aiFailed ? '暂不可判断' : hold.label}</h1>
-        <span className={`text-sm font-semibold ${aiFailed ? 'text-slate-500' : direction.tone}`}>综合倾向：{loading ? '汇总中' : aiFailed ? '--' : direction.label}</span>
+        <h1 className={`text-2xl font-bold ${hold.tone}`}>{loading ? '正在评估' : hold.label}</h1>
+        <span className={`text-sm font-semibold ${direction.tone}`}>综合倾向：{loading ? '汇总中' : direction.label}</span>
       </div>
-      {aiFailed ? <p className="mt-2 break-words rounded-lg bg-amber-50 px-3 py-2 text-xs font-medium leading-relaxed text-amber-900">当前调 API 失败，暂不展示持有评估与周期结论。</p> : <p className={`mt-2 break-words text-xs leading-relaxed ${error ? 'text-rose-800' : 'text-slate-700'}`}>{loading ? '正在汇总基本面、技术、事件和风险信号。' : error || conclusionText || '当前暂无确定性结论。'}</p>}
+      <p className={`mt-2 break-words text-xs leading-relaxed ${error ? 'text-rose-800' : 'text-slate-700'}`}>{loading ? '正在汇总基本面、技术、事件和风险信号。' : error || conclusionText || '当前暂无确定性结论。'}</p>
+      {aiFallbackText && <p className="mt-2 break-words rounded-lg bg-amber-50 px-3 py-2 text-xs font-medium leading-relaxed text-amber-900">{aiFallbackText}</p>}
     </div>
-    {!aiFailed && <div className="mt-4">
+    <div className="mt-4">
       <div className="mb-2 flex items-center justify-between gap-2"><p className="text-[10px] font-bold text-slate-600">周期结论</p><span className="text-[10px] text-slate-500">可分别查看</span></div>
       <div role="tablist" aria-label="结论周期" className="grid grid-cols-3 gap-1 rounded-xl bg-white/70 p-1">{horizons.map((item) => <button type="button" role="tab" aria-selected={selectedHorizon === item.key} key={item.key} onClick={() => setSelectedHorizon(item.key)} className={`min-h-11 rounded-lg px-2 text-[10px] font-bold transition-colors ${selectedHorizon === item.key ? 'bg-indigo-600 text-white shadow-sm' : 'text-slate-500 hover:bg-slate-100'}`}>{item.name}</button>)}</div>
       <div className="mt-3">{activeHorizon && <Horizon name={activeHorizon.name} range={activeHorizon.range} value={activeHorizon.value} />}</div>
-    </div>}
+    </div>
   </section>;
 }

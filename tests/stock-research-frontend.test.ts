@@ -70,7 +70,8 @@ test('turns internal data-source failures into user-facing data gaps', () => {
 test('keeps critical stock research copy as valid UTF-8 Chinese', () => {
   const tab = fs.readFileSync(path.resolve('frontend/src/components/StockResearchTab.tsx'), 'utf8');
   const overview = fs.readFileSync(path.resolve('frontend/src/components/StockResearchOverview.tsx'), 'utf8');
-  const source = `${tab}\n${overview}`;
+  const workspace = fs.readFileSync(path.resolve('frontend/src/components/StockResearchWorkspace.tsx'), 'utf8');
+  const source = `${tab}\n${overview}\n${workspace}`;
   for (const text of ['个股分析', '研究材料完整', '支持与反方', '下一步核验', '数据缺口']) assert.ok(source.includes(text), `missing copy: ${text}`);
   for (const mojibake of ['鐮旂┒', '涓偂', '璇佹嵁']) assert.ok(!source.includes(mojibake), `mojibake found: ${mojibake}`);
 });
@@ -107,6 +108,38 @@ test('uses domain-specific structures for every research module', () => {
   }
 });
 
+test('keeps annual reports and derived single-quarter values separate in the fundamental UI', () => {
+  const modules = fs.readFileSync(path.resolve('frontend/src/components/StockResearchModules.tsx'), 'utf8');
+  const server = fs.readFileSync(path.resolve('backend/server.ts'), 'utf8');
+  const adapter = fs.readFileSync(path.resolve('scripts/python/ths_financial_statements.py'), 'utf8');
+  for (const text of ['function FinancialTrend', '完整年报', '拆分为单季度值', '年度趋势质量', 'FinancialTrendQuality']) assert.ok(modules.includes(text), `missing fundamental trend UI: ${text}`);
+  for (const text of ['function buildFinancialTrendSnapshot', 'isDerivedSingleQuarter', 'annualSummary', 'self_history_trend_v1', 'financialTrends']) assert.ok(server.includes(text), `missing financial trend contract: ${text}`);
+  assert.ok(adapter.includes('[:24]'), 'financial adapter must retain enough periods for five-year annual history');
+});
+
+test('renders scored annual dimensions, five-year charts and readable financial cards', () => {
+  const modules = fs.readFileSync(path.resolve('frontend/src/components/StockResearchModules.tsx'), 'utf8');
+  const server = fs.readFileSync(path.resolve('backend/server.ts'), 'utf8');
+  const adapter = fs.readFileSync(path.resolve('scripts/python/ths_financial_statements.py'), 'utf8');
+  for (const text of ['FinancialFiveYearTrends', '近 5 年关键财务趋势', 'ROE', '净利率', '营收增速', 'role="progressbar"', '这个指标怎么看？', '趋势改善', '趋势走弱', '信号分歧', '流动比率']) {
+    assert.ok(modules.includes(text), `missing readable fundamental feature: ${text}`);
+  }
+  for (const text of ['scoredDimensions', 'dimensions: scoredDimensions', 'currentRatio']) assert.ok(server.includes(text), `missing financial contract: ${text}`);
+  for (const text of ['currentAssets', 'currentLiabilities']) assert.ok(adapter.includes(text), `missing balance-sheet field mapping: ${text}`);
+});
+
+test('prevents module conclusions from silently repeating their rationale or evidence', () => {
+  const server = fs.readFileSync(path.resolve('backend/server.ts'), 'utf8');
+  for (const text of ['researchTextIsNearDuplicate', '不以重复的单条事实替代总括结论', '模块四段必须严格分工', '支持与反方不得重复同一事实']) assert.ok(server.includes(text), `missing explanation separation guard: ${text}`);
+});
+
+test('keeps the no-AI research mode usable and collapses module evidence by default', () => {
+  const tab = fs.readFileSync(path.resolve('frontend/src/components/StockResearchTab.tsx'), 'utf8');
+  const modules = fs.readFileSync(path.resolve('frontend/src/components/StockResearchModules.tsx'), 'utf8');
+  for (const text of ['/api/stock-manager-snapshot', "aiStatus: 'pending'", 'industryPromise', '不再阻塞首屏']) assert.ok(tab.includes(text), `missing resilient research loading behavior: ${text}`);
+  for (const text of ["improving: '改善'", "deteriorating: '走弱'", 'const [evidenceOpen, setEvidenceOpen]', '支持与反方证据', 'deterministicConclusion', 'aiInterpretation', 'AI 观点摘要']) assert.ok(modules.includes(text), `missing readable four-part module behavior: ${text}`);
+});
+
 test('keeps loading, retry, refresh-error and narrow-screen states actionable', () => {
   const tab = fs.readFileSync(path.resolve('frontend/src/components/StockResearchTab.tsx'), 'utf8');
   const overview = fs.readFileSync(path.resolve('frontend/src/components/StockResearchOverview.tsx'), 'utf8');
@@ -115,16 +148,36 @@ test('keeps loading, retry, refresh-error and narrow-screen states actionable', 
   assert.ok(overview.includes('grid-cols-3') && overview.includes('min-h-11'), 'horizon controls must remain usable on narrow screens');
 });
 
+test('keeps deterministic holding and horizon results visible when only the AI explanation falls back', () => {
+  const tab = fs.readFileSync(path.resolve('frontend/src/components/StockResearchTab.tsx'), 'utf8');
+  const overview = fs.readFileSync(path.resolve('frontend/src/components/StockResearchOverview.tsx'), 'utf8');
+  assert.ok(tab.includes('const aiFallback'), 'AI fallback state should be passed separately');
+  assert.ok(overview.includes('AI 解读暂不可用'), 'fallback must explain the degraded AI layer');
+  assert.ok(!overview.includes('暂不展示持有评估与周期结论'), 'AI fallback must not hide deterministic conclusions');
+});
+
 test('loads the industry Agent independently so its AI explanation cannot block CIO research', () => {
   const tab = fs.readFileSync(path.resolve('frontend/src/components/StockResearchTab.tsx'), 'utf8');
   assert.ok(tab.includes('/api/stock-agents/industry-chain?symbol='));
-  assert.ok(tab.includes('industryResponse.ok'));
+  assert.ok(tab.includes('industryPromise'));
   assert.ok(tab.includes('moduleExplanations'));
 });
 
-test('temporarily hides the sentiment section without deleting its module or backend data flow', () => {
+test('keeps the restored sentiment section in the research flow with domain-specific panels', () => {
   const tab = fs.readFileSync(path.resolve('frontend/src/components/StockResearchTab.tsx'), 'utf8');
-  assert.ok(tab.includes('const visibleSectionKeys'));
-  assert.ok(tab.includes("// 'sentiment',"));
-  assert.ok(tab.includes('visibleSectionKeys.map'));
+  const workspace = fs.readFileSync(path.resolve('frontend/src/components/StockResearchWorkspace.tsx'), 'utf8');
+  const modules = fs.readFileSync(path.resolve('frontend/src/components/StockResearchModules.tsx'), 'utf8');
+  assert.ok(workspace.includes('const sectionKeys'));
+  assert.ok(workspace.includes("'sentiment',"));
+  assert.ok(workspace.includes('sectionKeys.map'));
+  for (const text of ['观点分歧怎么读？', '分歧较大：正负观点接近', '本股直接命中', '财经市场背景', '非本股消息', '讨论话题', '事件后反应']) assert.ok(modules.includes(text), `missing sentiment panel: ${text}`);
+});
+
+test('条件选股使用统一自选状态并移除研究按钮', () => {
+  const screener = fs.readFileSync(path.resolve('frontend/src/components/StockScreenerTab.tsx'), 'utf8');
+  const app = fs.readFileSync(path.resolve('frontend/src/App.tsx'), 'utf8');
+  assert.ok(screener.includes('followedStocks: StockItem[]'), 'screener must receive global watchlist state');
+  assert.ok(screener.includes('加入自选') && screener.includes('已在自选'), 'screener must expose add/watchlist state');
+  assert.ok(!screener.includes('>研究</button>'), 'legacy research action must be removed');
+  assert.ok(app.includes('<StockScreenerTab followedStocks={followedStocks}'), 'App must pass the global watchlist into screener');
 });

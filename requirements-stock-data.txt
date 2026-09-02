@@ -3,6 +3,7 @@ baostock==0.9.3
 pandas==3.0.5
 pytdx==1.72
 requests==2.34.2
+ddgs==9.15.0
 pdfplumber==0.11.10
 pypdf==6.15.0
 pypdfium2==5.12.1

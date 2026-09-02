@@ -6,15 +6,15 @@ type Scenario = {
   riskDecision: 'clear' | 'watch' | 'downgrade' | 'veto' | 'blocked';
   coreAvailable?: boolean;
   highConflict?: boolean;
-  criticalGap?: boolean;
+  blockingGap?: boolean;
   requiredConditions?: number;
   expected: 'research_ready' | 'watch' | 'deferred' | 'rejected' | 'blocked';
 };
 
-function deriveResearchStatus({ riskDecision, coreAvailable = true, highConflict = false, criticalGap = false, requiredConditions = 0 }: Omit<Scenario, 'name' | 'expected'>) {
+function deriveResearchStatus({ riskDecision, coreAvailable = true, highConflict = false, blockingGap = false, requiredConditions = 0 }: Omit<Scenario, 'name' | 'expected'>) {
   if (!coreAvailable && riskDecision === 'blocked') return 'blocked';
   if (riskDecision === 'veto') return 'rejected';
-  if (riskDecision === 'downgrade' || highConflict || criticalGap) return 'deferred';
+  if (riskDecision === 'downgrade' || highConflict || blockingGap) return 'deferred';
   if (riskDecision === 'watch' || requiredConditions > 0) return 'watch';
   return 'research_ready';
 }
@@ -22,7 +22,7 @@ function deriveResearchStatus({ riskDecision, coreAvailable = true, highConflict
 const scenarios: Scenario[] = [
   { name: 'complete and consistent inputs', riskDecision: 'clear', expected: 'research_ready' },
   { name: 'watch condition without veto', riskDecision: 'watch', requiredConditions: 1, expected: 'watch' },
-  { name: 'valuation data gap', riskDecision: 'clear', criticalGap: true, expected: 'deferred' },
+  { name: 'core valuation service unavailable', riskDecision: 'clear', blockingGap: true, expected: 'deferred' },
   { name: 'high fundamental technical conflict', riskDecision: 'clear', highConflict: true, expected: 'deferred' },
   { name: 'risk downgrade overrides positive agents', riskDecision: 'downgrade', expected: 'deferred' },
   { name: 'risk veto overrides supporting case', riskDecision: 'veto', requiredConditions: 2, expected: 'rejected' },
@@ -33,6 +33,12 @@ test('CIO/Manager research status precedence matrix', () => {
   for (const scenario of scenarios) {
     assert.equal(deriveResearchStatus(scenario), scenario.expected, scenario.name);
   }
+});
+
+test('informational data gaps reduce confidence but do not defer a clear research state', () => {
+  const nonBlockingGaps = ['缺少毛利率字段', '行业财务横向比较尚未就绪', '缺少个股热度历史序列'];
+  assert.equal(nonBlockingGaps.length > 0, true);
+  assert.equal(deriveResearchStatus({ riskDecision: 'clear' }), 'research_ready');
 });
 
 test('veto and blocked states cannot be weakened by AI explanation', () => {

@@ -46,3 +46,24 @@
 .animate-pulse-slow {
   animation: pulse-slow 8s cubic-bezier(0.4, 0, 0.6, 1) infinite;
 }
+
+/* Product night mode: cover the full Tailwind surface/text scale used by each feature. */
+.theme-dark { color-scheme: dark; background: #0b1220 !important; color: #e2e8f0 !important; }
+.theme-dark#app-root-container, .theme-dark #app-viewport { background-color: #0b1220 !important; }
+.theme-dark .bg-white, .theme-dark .bg-white\/95, .theme-dark .bg-white\/90, .theme-dark .bg-white\/80, .theme-dark .bg-white\/75 { background-color: #162033 !important; }
+.theme-dark .bg-gray-50, .theme-dark .bg-gray-50\/50, .theme-dark .bg-gray-50\/60, .theme-dark .bg-gray-100, .theme-dark .bg-gray-100\/50,
+.theme-dark .bg-slate-50, .theme-dark .bg-slate-50\/60, .theme-dark .bg-slate-50\/70, .theme-dark .bg-slate-100, .theme-dark .bg-slate-100\/70 { background-color: #1d293d !important; }
+.theme-dark .bg-gray-200, .theme-dark .bg-slate-200 { background-color: #27364d !important; }
+.theme-dark .text-black, .theme-dark .text-gray-950, .theme-dark .text-gray-900, .theme-dark .text-gray-800, .theme-dark .text-slate-950, .theme-dark .text-slate-900 { color: #f8fafc !important; }
+.theme-dark .text-gray-700, .theme-dark .text-gray-600, .theme-dark .text-slate-800, .theme-dark .text-slate-700 { color: #dbe4f0 !important; }
+.theme-dark .text-gray-500, .theme-dark .text-gray-400, .theme-dark .text-slate-600, .theme-dark .text-slate-500, .theme-dark .text-slate-400 { color: #9fb0c7 !important; }
+.theme-dark .placeholder\:text-gray-400::placeholder, .theme-dark .placeholder\:text-slate-400::placeholder { color: #8494ab !important; }
+.theme-dark .border-gray-200, .theme-dark .border-gray-200\/80, .theme-dark .border-gray-100, .theme-dark .border-gray-100\/80, .theme-dark .border-gray-100\/50,
+.theme-dark .border-slate-200, .theme-dark .border-slate-200\/80, .theme-dark .border-slate-100, .theme-dark .border-slate-100\/80 { border-color: #334155 !important; }
+.theme-dark .divide-slate-100 > :not([hidden]) ~ :not([hidden]) { border-color: #334155 !important; }
+.theme-dark .divide-gray-100 > :not([hidden]) ~ :not([hidden]) { border-color: #334155 !important; }
+.theme-dark .bg-indigo-50, .theme-dark .bg-indigo-50\/40, .theme-dark .bg-indigo-50\/70 { background-color: #1e1b4b !important; }
+.theme-dark .bg-emerald-50, .theme-dark .bg-emerald-50\/60 { background-color: #052e2b !important; }
+.theme-dark .bg-rose-50, .theme-dark .bg-rose-50\/60 { background-color: #3f1d2e !important; }
+.theme-dark .bg-amber-50, .theme-dark .bg-amber-50\/60 { background-color: #3a2a12 !important; }
+.theme-dark a { color: #a5b4fc; }

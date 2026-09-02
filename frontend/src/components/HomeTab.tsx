@@ -56,6 +56,7 @@ interface HomeTabProps {
   followedStocks?: { name: string; code: string; price: number; changePercent: number }[];
   homeCache?: HomeDashboardCache | null;
   onHomeCacheChange?: (cache: HomeDashboardCache) => void;
+  refreshVersion?: number;
 }
 
 type MorningReportState = {
@@ -78,7 +79,7 @@ export type HomeDashboardCache = {
 
 const emptyMorningReport = (): MorningReportState => ({ summaryText: '', reasonBrief: '', stories: [], sentiment: '中性', loading: true });
 
-export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStock, followedStocks = [], homeCache, onHomeCacheChange }: HomeTabProps) {
+export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStock, followedStocks = [], homeCache, onHomeCacheChange, refreshVersion = 0 }: HomeTabProps) {
   const [indices, setIndices] = useState<MarketIndex[]>(() => homeCache?.indices || []);
   const [selectedIndex, setSelectedIndex] = useState<MarketIndex | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
@@ -254,23 +255,15 @@ export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStoc
     }
     initLoad();
 
-    // 自动刷新行情（仅交易时段每 10 秒刷新一次）
-    const autoRefresh = setInterval(() => {
-      // 白天9:30-11:30、13:00-15:00交易时段才刷新
-      const h = new Date().getHours();
-      const m = new Date().getMinutes();
-      const t = h * 100 + m;
-      const isTrading = (t >= 930 && t < 1130) || (t >= 1300 && t < 1500);
-      if (isTrading) {
-        loadMarketOverview({ cancelled });
-      }
-    }, 10000);
+    /*
+     * LEGACY：测试期不再每 10 秒自动刷新首页行情，避免持续调用真实行情源。
+     * 需要恢复时，可重新启用下方交易时段 setInterval，并在清理函数中 clearInterval。
+     */
 
     return () => {
       cancelled = true;
-      clearInterval(autoRefresh);
     };
-  }, []);
+  }, [refreshVersion]);
 
   const turnoverText = (() => {
     const amount = marketOverview?.marketTemperature?.components.turnover.amount || marketOverview?.totalVolume || 0;
@@ -490,10 +483,118 @@ export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStoc
     onNavigateToTab('market-map');
   };
 
+  const desktopMascot = cachedWeather.temp >= 62
+    ? '/mascots/paopao-market-up.png'
+    : cachedWeather.temp <= 38
+      ? '/mascots/paopao-market-down.png'
+      : '/mascots/paopao-market-flat.png';
+
+  const desktopDashboard = (
+    <section className="hidden lg:block" aria-label="桌面首页市场概览">
+      <div className="grid grid-cols-[minmax(0,1fr)_304px] gap-5 xl:gap-6">
+        <div className="min-w-0 space-y-5">
+          <form onSubmit={handleSearchSubmit} className="relative">
+            <Search className="pointer-events-none absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+            <input
+              value={searchQuery}
+              onChange={(event) => setSearchQuery(event.target.value)}
+              className="h-11 w-full rounded-2xl border border-slate-200 bg-white pl-11 pr-4 text-sm text-slate-800 shadow-sm outline-none transition placeholder:text-slate-400 focus:border-indigo-300 focus:ring-4 focus:ring-indigo-50"
+              placeholder="搜索股票 / 板块 / 指数 / 关键词"
+              aria-label="搜索股票、板块或关键词"
+            />
+          </form>
+
+          {marketStatus && !marketStatus.isOpen && (
+            <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-2 text-xs font-medium text-amber-800">
+              当前处于 {marketStatus.label}，显示最近交易日数据仅供参考。
+            </div>
+          )}
+
+          <article className="relative min-h-[276px] overflow-hidden rounded-[24px] border border-indigo-100 bg-[linear-gradient(120deg,#f7f8ff_0%,#eff2ff_100%)] px-8 py-7 shadow-sm">
+            <img src={desktopMascot} alt="泡泡老师" className="absolute bottom-0 left-5 h-[238px] w-[238px] object-contain object-bottom" />
+            <div className="relative ml-[235px] max-w-[660px]">
+              <div className="flex items-center gap-3 text-xs font-bold text-indigo-500"><span className="text-3xl leading-none">✦</span> AI 早报</div>
+              <p className="mt-1 text-sm text-slate-500">为新手投资者提供简单、清晰的每日市场解读</p>
+              <h1 className="mt-5 text-[26px] font-bold tracking-tight text-slate-900">
+                {dataError ? '行情数据暂时不可用' : morningReport.loading ? '泡泡正在为你整理今日市场动态…' : morningReport.summaryText || '今日市场观察，先理解再行动'}
+              </h1>
+              <p className="mt-4 max-w-[620px] text-sm leading-7 text-slate-600">{cachedWeather.desc || '从大盘、资金与热点板块出发，帮助你在每个交易日建立自己的判断。'}</p>
+              <div className="mt-5 flex gap-3">
+                <button type="button" onClick={() => setIsReasonOpen(true)} className="h-11 rounded-xl bg-indigo-600 px-7 text-sm font-semibold text-white shadow-sm transition hover:bg-indigo-700">查看原因</button>
+                <button type="button" onClick={() => onNavigateToTab('ai-teacher')} className="h-11 rounded-xl border border-indigo-300 bg-white/80 px-7 text-sm font-semibold text-indigo-700 transition hover:bg-white">问问老师</button>
+              </div>
+            </div>
+          </article>
+
+          <article className="rounded-[20px] border border-slate-200 bg-white px-5 py-4 shadow-sm">
+            <div className="mb-4 flex items-center justify-between">
+              <h2 className="text-lg font-bold text-slate-900">今日市场概览</h2>
+              <span className="text-xs text-slate-400">数据更新 · {formatChineseDate(new Date())}</span>
+            </div>
+            <div className="grid grid-cols-3 divide-x divide-slate-100">
+              {indices.slice(0, 3).map((index) => {
+                const isUp = index.changePercent >= 0;
+                return <button type="button" key={index.code} onClick={() => setSelectedIndex(index)} className="group px-4 text-left first:pl-0 last:pr-0">
+                  <span className="block text-xs font-semibold text-slate-500 group-hover:text-indigo-600">{index.name}</span>
+                  <span className="mt-2 block font-mono text-xl font-bold text-slate-900">{index.value.toLocaleString(undefined, { maximumFractionDigits: 2 })}</span>
+                  <span className={`mt-1 block font-mono text-xs font-bold ${isUp ? 'text-red-500' : 'text-emerald-600'}`}>{isUp ? '+' : ''}{index.changePercent}%</span>
+                </button>;
+              })}
+            </div>
+            <div className="mt-4 flex items-center gap-2 rounded-xl bg-slate-50 px-3 py-2 text-xs text-slate-500"><span className="text-base">💡</span> 小贴士：指数是市场整体表现的参考，长期来看，优质公司更值得关注。</div>
+          </article>
+
+          <article className="rounded-[20px] border border-slate-200 bg-white px-5 py-4 shadow-sm">
+            <div className="mb-3 flex items-center justify-between"><div><h2 className="text-lg font-bold text-slate-900">今日市场动态</h2><p className="mt-1 text-xs text-slate-500">用一屏看懂事件和核心影响</p></div><button type="button" onClick={() => onNavigateToTab('ai-teacher')} className="text-xs font-semibold text-indigo-600 hover:text-indigo-700">查看详情</button></div>
+            <div className="divide-y divide-slate-100">
+              {morningReport.stories.slice(0, 5).map((story, index) => (
+                <button type="button" key={story.storyId} onClick={() => IMPACT_PATH_ENABLED ? setImpactStoryId(story.storyId) : setIsReasonOpen(true)} className="grid w-full grid-cols-[54px_68px_minmax(0,1fr)_18px] items-center gap-3 py-3 text-left transition hover:bg-slate-50">
+                  <span className="font-mono text-sm font-semibold text-red-500">{String(9 + index).padStart(2, '0')}: {String(45 - index * 5).padStart(2, '0')}</span>
+                  <span className="rounded-full bg-rose-50 px-2 py-1 text-center text-xs font-bold text-rose-600">{TYPE_LABELS[story.type] || '动态'}</span>
+                  <span className="min-w-0 truncate text-sm text-slate-700">{story.title}</span>
+                  <ChevronRight className="h-4 w-4 text-slate-300" />
+                </button>
+              ))}
+              {!morningReport.loading && morningReport.stories.length === 0 && <p className="py-8 text-center text-sm text-slate-400">暂无可用的市场动态</p>}
+            </div>
+            <button type="button" onClick={() => onNavigateToTab('ai-teacher')} className="mt-3 w-full text-center text-sm font-semibold text-indigo-600 hover:text-indigo-700">查看更多⌄</button>
+          </article>
+        </div>
+
+        <aside className="space-y-4">
+          <article className="rounded-[20px] border border-slate-200 bg-white p-5 shadow-sm">
+            <div className="flex items-center justify-between"><h2 className="text-lg font-bold text-slate-900">市场温度</h2><span className="text-xs text-slate-400">ⓘ</span></div>
+            <div className="mt-6 text-center"><span className="text-5xl font-bold tracking-tight text-red-500">{cachedWeather.temp}°</span><p className="mt-1 text-sm font-semibold text-slate-600">{cachedWeather.label}</p></div>
+            <div className="relative mt-5 h-3 overflow-hidden rounded-full bg-gradient-to-r from-emerald-400 via-amber-400 to-rose-400"><span className="absolute top-[-5px] h-6 w-1.5 rounded-full border border-slate-300 bg-white shadow" style={{ left: `calc(${cachedWeather.temp}% - 3px)` }} /></div>
+            <div className="mt-2 flex justify-between text-[11px] text-slate-400"><span>市场偏冷</span><span>多空平衡</span><span>市场活跃</span></div>
+            <p className="mt-5 text-center text-xs leading-5 text-slate-500">{cachedWeather.desc || '市场热度数据正在更新。'}</p>
+          </article>
+
+          <article className="rounded-[20px] border border-slate-200 bg-white p-5 shadow-sm">
+            <div className="flex items-center justify-between"><h2 className="text-base font-bold text-slate-900">成交额 / 涨跌家数</h2><span className="text-xs text-slate-400">实时</span></div>
+            <p className="mt-5 text-xs text-slate-500">今日{turnoverText}</p>
+            <p className="mt-1 text-2xl font-bold text-slate-900">{turnoverText.replace('成交额 ', '')}</p>
+            <div className="mt-5 h-2 overflow-hidden rounded-full bg-slate-100"><div className="h-full bg-red-500" style={{ width: `${Math.min(92, Math.max(8, ((marketOverview?.marketBreath?.up || 1) / Math.max(1, (marketOverview?.marketBreath?.up || 0) + (marketOverview?.marketBreath?.down || 0))) * 100))}%` }} /></div>
+            <div className="mt-2 flex justify-between text-xs"><span className="text-red-500">涨 {marketOverview?.marketBreath?.up ?? '--'} 家</span><span className="text-emerald-600">跌 {marketOverview?.marketBreath?.down ?? '--'} 家</span></div>
+          </article>
+
+          <article className="rounded-[20px] border border-slate-200 bg-white p-5 shadow-sm">
+            <div className="flex items-center justify-between"><h2 className="text-base font-bold text-slate-900">今日强势吸金板块</h2><button type="button" onClick={() => onNavigateToTab('market-map')} className="text-xs font-semibold text-indigo-600">更多</button></div>
+            <div className="mt-4 space-y-3">
+              {(marketOverview?.topSectors || []).slice(0, 5).map((sector, index) => <button type="button" key={sector.name} onClick={() => onNavigateToTab('market-map')} className="grid w-full grid-cols-[24px_minmax(0,1fr)_54px] items-center gap-2 text-left"><span className="font-mono text-xs text-slate-400">{index + 1}</span><span className="truncate text-sm font-medium text-slate-700">{sector.name}</span><span className="text-right font-mono text-xs font-bold text-red-500">+{sector.changePercent.toFixed(2)}%</span></button>)}
+              {!marketOverview?.topSectors?.length && <p className="py-3 text-center text-sm text-slate-400">板块数据待更新</p>}
+            </div>
+          </article>
+        </aside>
+      </div>
+    </section>
+  );
+
   return (
     <div id="home-tab-view" className="space-y-5 pb-24">
+      {desktopDashboard}
       {/* Search Bar Header */}
-      <div id="home-header-row" className="flex justify-between items-center px-4 pt-2">
+      <div id="home-header-row" className="flex justify-between items-center px-4 pt-2 lg:hidden">
         {!isSearching ? (
           <>
             <h1 id="app-brand-title" className="text-2xl font-bold font-sans tracking-tight text-gray-950 flex items-center gap-1.5">
@@ -627,7 +728,7 @@ export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStoc
 
       {/* 市场状态 Banner - 非交易时段醒目提示 */}
       {marketStatus && !marketStatus.isOpen && (
-        <div className="mx-4">
+        <div className="mx-4 lg:hidden">
           <div className={`flex items-center gap-2 px-4 py-2.5 rounded-2xl text-xs font-semibold ${
             marketStatus.phase === 'weekend'
               ? 'bg-purple-50 text-purple-700 border border-purple-200'
@@ -646,7 +747,7 @@ export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStoc
       )}
 
       {/* 顶部区域: AI老师每日早报 */}
-      <div id="paopao-greeting-hero" className="mx-4 bg-white border border-slate-100 rounded-[32px] p-5 shadow-sm space-y-4">
+      <div id="paopao-greeting-hero" className="mx-4 bg-white border border-slate-100 rounded-[32px] p-5 shadow-sm space-y-4 lg:hidden">
         {/* Card Header with Module Title and Dynamic Weather */}
         <div className="flex justify-between items-center border-b border-slate-50 pb-2">
           <div className="text-xs font-bold text-gray-400 flex items-center gap-1.5">
@@ -721,7 +822,7 @@ export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStoc
       </div>
 
       {/* 核心区域: 今日市场概览 */}
-      <div id="today-market-overview-card" className="mx-4 bg-white border border-slate-100 rounded-[32px] p-5 shadow-sm space-y-5">
+      <div id="today-market-overview-card" className="mx-4 bg-white border border-slate-100 rounded-[32px] p-5 shadow-sm space-y-5 lg:hidden">
         <div className="flex justify-between items-baseline">
           <h3 className="text-base font-bold text-gray-950 flex items-center gap-1.5">
             <BarChart2 className="w-4.5 h-4.5 text-indigo-600" />
@@ -838,7 +939,7 @@ export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStoc
         </div>
       </div>
 
-      <section id="what-happened-section" className="px-4 space-y-3 scroll-mt-4">
+      <section id="what-happened-section" className="px-4 space-y-3 scroll-mt-4 lg:hidden">
         <div className="flex items-center justify-between gap-3">
           <h3 id="events-heading" className="text-base font-bold text-slate-950 flex items-center gap-2">
             <Activity className="w-4 h-4 text-indigo-600" />
@@ -1241,7 +1342,7 @@ export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStoc
       </div>}
 
       {/* 今日一句话成长 */}
-      <div id="growth-quote-card" className="mx-4 px-5 py-4 bg-gradient-to-r from-indigo-50 to-purple-50 border border-indigo-100 rounded-3xl shadow-sm">
+      <div id="growth-quote-card" className="mx-4 px-5 py-4 bg-gradient-to-r from-indigo-50 to-purple-50 border border-indigo-100 rounded-3xl shadow-sm lg:hidden">
         <div className="flex items-start gap-3">
           <div className="w-9 h-9 bg-indigo-100 rounded-xl flex items-center justify-center flex-shrink-0 text-lg">
             💡
@@ -1256,7 +1357,7 @@ export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStoc
       </div>
 
       {/* 今日学习（泡泡老师指导）- 放在页面最底部 */}
-      <div id="paopao-daily-learning-card" className="mx-4 bg-white border border-slate-100 rounded-[32px] p-5 shadow-sm space-y-3.5">
+      <div id="paopao-daily-learning-card" className="mx-4 bg-white border border-slate-100 rounded-[32px] p-5 shadow-sm space-y-3.5 lg:hidden">
         <div className="flex justify-between items-center border-b border-slate-50 pb-2">
           <div className="text-xs font-bold text-gray-800 flex items-center gap-1.5">
             <GraduationCap className="w-4 h-4 text-indigo-600" />

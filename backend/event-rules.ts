@@ -7,6 +7,83 @@ export type StockEventDirection = 'positive' | 'negative' | 'mixed' | 'unknown';
 export type StockEventImpactHorizon = 'immediate' | 'short_term' | 'medium_term' | 'long_term' | 'unknown';
 export type StockEventStatus = 'new' | 'ongoing' | 'settled' | 'expired' | 'unconfirmed';
 
+export type StockEventMateriality = {
+  score: number;
+  level: 'high' | 'medium' | 'low';
+  isRoutine: boolean;
+  reasons: string[];
+};
+
+type MaterialityInput = {
+  category: StockEventCategory;
+  publishedAt?: string | null;
+  verification?: string;
+  impactScope?: string;
+  status?: StockEventStatus | string;
+  clusterSize?: number;
+  sourceCount?: number;
+  factStatus?: string;
+  lifecycleState?: string;
+  superseded?: boolean;
+};
+
+const ROUTINE_ANNOUNCEMENT = /召开.*股东大会|股东大会.*(通知|提示)|董事会.*(会议通知|会议决议)|监事会.*(会议通知|会议决议)|投资者关系活动记录表|内部控制.*报告|独立董事.*意见|审计报告|证券事务代表|公司章程|管理制度|授权(公告|议案)|日常关联交易.*预计|募集资金.*使用情况/;
+const MATERIAL_KEYWORDS = /重大|业绩预告|业绩快报|年度报告|半年度报告|季度报告|中标|订单|合同|收购|并购|重组|定增|融资|可转债|回购|增持|减持|监管|处罚|问询|立案|诉讼|仲裁|停产|复产|涨价|降价|澄清|辟谣|风险提示/;
+
+/**
+ * 个股事件的确定性重大性评分。用于排序与降权，不直接推导多空或交易结论。
+ * 例行治理/会议公告只有在同时包含业绩、融资、监管等实质关键词时才不降权。
+ */
+export function eventMateriality(title: string, input: MaterialityInput): StockEventMateriality {
+  const text = String(title || '');
+  const reasons: string[] = [];
+  const categoryScore: Record<StockEventCategory, number> = {
+    earnings: 46, forecast: 46, contract: 44, m_and_a: 50, financing: 38,
+    shareholder: 32, governance: 15, regulatory: 48, litigation: 48,
+    production: 36, dividend: 26, clarification: 40, other: 14,
+  };
+  let score = categoryScore[input.category] || 14;
+  const isRoutine = ROUTINE_ANNOUNCEMENT.test(text) && !MATERIAL_KEYWORDS.test(text);
+  if (isRoutine) {
+    score = Math.min(score, 8);
+    reasons.push('例行公告降权');
+  } else if (MATERIAL_KEYWORDS.test(text)) {
+    score += 10;
+    reasons.push('命中实质事项关键词');
+  }
+
+  if (input.verification === 'official_verified' || input.verification === 'official_document_only') {
+    score += 18;
+    reasons.push('官方披露/核验');
+  } else if (input.factStatus === 'credible_media_only') {
+    score += 5;
+    reasons.push('可信媒体线索');
+  }
+  if (['company', 'policy'].includes(String(input.impactScope))) score += 8;
+  else if (input.impactScope === 'industry') score += 5;
+  if (Number(input.clusterSize) > 1 || Number(input.sourceCount) > 1) {
+    score += Math.min(8, Math.max(Number(input.clusterSize) || 0, Number(input.sourceCount) || 0) * 2);
+    reasons.push('多来源/同类披露聚合');
+  }
+
+  const time = Date.parse(String(input.publishedAt || ''));
+  if (Number.isFinite(time)) {
+    const ageDays = Math.max(0, (Date.now() - time) / 86_400_000);
+    if (ageDays <= 7) score += 12;
+    else if (ageDays <= 30) score += 8;
+    else if (ageDays <= 90) score += 4;
+  }
+  if (input.status === 'unconfirmed') score -= 8;
+  if (input.status === 'expired') score -= 18;
+  if (input.superseded || input.lifecycleState === 'invalidated') score -= 40;
+  if (input.factStatus === 'officially_clarified') reasons.push('官方澄清，原传闻不再作为催化');
+
+  score = Math.max(0, Math.min(100, Math.round(score)));
+  const level = score >= 70 ? 'high' : score >= 40 ? 'medium' : 'low';
+  if (!reasons.length) reasons.push('按事件类别、时效与来源质量计算');
+  return { score, level, isRoutine, reasons };
+}
+
 export function eventDate(value: unknown): string | null {
   const text = String(value || '').trim();
   if (!text) return null;

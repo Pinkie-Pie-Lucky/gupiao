@@ -166,7 +166,7 @@ export function AiTeacherTab({ prefilledStock, onClearPrefilledStock, pendingPro
   return (
     <div id="ai-teacher-tab-view" className="flex flex-col h-[calc(100vh-135px)] bg-gray-50/50">
       {/* Mini Title bar with disclaimer */}
-      <div id="teacher-header-banner" className="bg-white border-b border-gray-100 p-3.5 flex items-center justify-between flex-shrink-0">
+      <div id="teacher-header-banner" className="bg-white border-b border-gray-100 p-3.5 pr-16 flex items-center justify-between flex-shrink-0">
         <div className="flex items-center gap-2">
           <div className="w-9 h-9 bg-indigo-100 rounded-xl flex items-center justify-center relative">
             <svg viewBox="0 0 120 120" className="w-7 h-7">

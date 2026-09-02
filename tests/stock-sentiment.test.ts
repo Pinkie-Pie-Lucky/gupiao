@@ -38,18 +38,18 @@ function makeSnapshot({ events = true, heat = true } = {}) {
     evidence: events ? [{ evidenceId: eventEvidence }, { evidenceId: negativeEvent.evidenceIds[0] }] : [],
     evidenceIds: events ? [eventEvidence, negativeEvent.evidenceIds[0]] : [],
     dataGaps: ['缺少个股热度历史序列，暂不判断关注度上升或下降。', '缺少事件前后行情窗口，暂不判断市场是否形成确认反应。'],
-    snapshotMeta: { sentimentVersion: 'stock-sentiment-v3' },
+    snapshotMeta: { sentimentVersion: 'stock-sentiment-v4' },
   };
 }
 
 function validateSnapshot(snapshot: any) {
-  assert.equal(snapshot.snapshotMeta?.sentimentVersion, 'stock-sentiment-v3');
+  assert.equal(snapshot.snapshotMeta?.sentimentVersion, 'stock-sentiment-v4');
   assert.ok(['rising', 'stable', 'falling', 'unavailable'].includes(snapshot.attention));
   assert.ok(['positive', 'negative', 'mixed', 'neutral', 'unavailable'].includes(snapshot.tone));
   assert.ok(['low', 'medium', 'high', 'unavailable'].includes(snapshot.disagreement));
   assert.equal(snapshot.evidenceDirectionDisagreement, snapshot.disagreement);
-  assert.equal(snapshot.communityViewpointDisagreement, 'unavailable');
-  assert.ok(['event_direction_evidence', 'unavailable'].includes(snapshot.viewpointScope));
+  assert.ok(['low', 'medium', 'high', 'unavailable'].includes(snapshot.communityViewpointDisagreement));
+  assert.ok(['community_content', 'event_direction_evidence', 'unavailable'].includes(snapshot.viewpointScope));
   assert.ok(['official_led', 'media_led', 'community_led', 'mixed', 'insufficient'].includes(snapshot.sourceQuality));
   assert.ok(['official_and_media', 'official_primary', 'media_only', 'community_heat_only', 'insufficient'].includes(snapshot.propagationQuality));
   assert.ok(['confirmed_reaction', 'weak_reaction', 'divergent_reaction', 'not_evaluable'].includes(snapshot.eventReaction));

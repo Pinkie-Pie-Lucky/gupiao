@@ -34,14 +34,6 @@ export function LoginScreen({ onAuthenticated }: LoginScreenProps) {
       setError('密码至少 6 位。');
       return;
     }
-    if (mode === 'register') {
-      const normalizedNickname = nickname.trim();
-      if (normalizedNickname.length < 2 || normalizedNickname.length > 16) {
-        setError('昵称长度为 2–16 个字符。');
-        return;
-      }
-    }
-
     setSubmitting(true);
     try {
       const user = mode === 'register'
@@ -49,7 +41,9 @@ export function LoginScreen({ onAuthenticated }: LoginScreenProps) {
         : await apiLogin(normalizedPhone, password);
       onAuthenticated(user);
     } catch (e) {
-      setError(e instanceof ApiError ? e.message : '网络异常，请稍后重试。');
+      setError(e instanceof ApiError
+        ? e.message
+        : '无法连接登录服务。请确认本地预览服务正在运行后重试。');
     } finally {
       setSubmitting(false);
     }
@@ -77,10 +71,10 @@ export function LoginScreen({ onAuthenticated }: LoginScreenProps) {
           </label>
 
           {mode === 'register' && <label className="block">
-            <span className="text-xs font-semibold text-slate-700">给自己起个昵称</span>
+            <span className="text-xs font-semibold text-slate-700">昵称（选填）</span>
             <span className="relative mt-2 block">
               <UserRound className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
-              <input value={nickname} onChange={(event) => { setNickname(event.target.value.slice(0, 16)); setError(''); }} autoComplete="nickname" placeholder="例如：刚学看盘的小陈" className="min-h-12 w-full rounded-xl border border-slate-200 bg-white py-3 pl-10 pr-3 text-sm outline-none transition focus:border-indigo-600 focus:ring-2 focus:ring-indigo-100" />
+              <input value={nickname} onChange={(event) => { setNickname(event.target.value.slice(0, 16)); setError(''); }} autoComplete="nickname" placeholder="例如：刚学看盘的小陈（不填则显示为手机号）" className="min-h-12 w-full rounded-xl border border-slate-200 bg-white py-3 pl-10 pr-3 text-sm outline-none transition focus:border-indigo-600 focus:ring-2 focus:ring-indigo-100" />
             </span>
           </label>}
 

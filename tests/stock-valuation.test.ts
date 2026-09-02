@@ -1,5 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
 
 function makeSnapshot({ market = true, financial = true } = {}): any {
   const marketEvidence = 'valuation_market:600519:pb:2026-08-08';
@@ -74,6 +76,13 @@ test('history and peer percentile data are explicit comparison evidence', () => 
   assert.equal(snapshot.comparison.historyPercentile.pe.percentile, 78.5);
 });
 
+test('historical valuation percentile is independent from industry membership and peer failures', () => {
+  const server = fs.readFileSync(path.resolve('backend/server.ts'), 'utf8');
+  const adapter = fs.readFileSync(path.resolve('scripts/python/valuation_comparison.py'), 'utf8');
+  for (const text of ['Promise.allSettled([', "runValuationComparisonScript(symbol, [], 'history')", "runValuationComparisonScript(symbol, members, 'peers')", '缺少可用行业成员，暂不计算同行估值分位']) assert.ok(server.includes(text), `missing independent comparison behavior: ${text}`);
+  for (const text of ['mode in ("history", "all")', 'mode in ("peers", "all")', '历史分位与同行比较必须彼此独立']) assert.ok(adapter.includes(text), `missing valuation adapter isolation: ${text}`);
+});
+
 test('DCF stays unavailable when free cash flow or net debt is missing', () => {
   const snapshot = makeSnapshot();
   assert.equal(snapshot.scenarioModel.dcf.status, 'unavailable');
@@ -117,6 +126,13 @@ test('DCF complete-input scenario returns model values without becoming a target
   assert.ok(Number.isFinite(enterpriseValue) && enterpriseValue > 0);
   assert.ok(discountRate > terminalGrowthRate);
   assert.equal(/目标价|确定内在价值/.test(JSON.stringify({ enterpriseValue, discountRate, terminalGrowthRate })), false);
+});
+
+test('DCF uses a complete annual cash-flow basis and exposes scenario sensitivity inputs', () => {
+  const server = fs.readFileSync(path.resolve('backend/server.ts'), 'utf8');
+  const modules = fs.readFileSync(path.resolve('frontend/src/components/StockResearchModules.tsx'), 'utf8');
+  for (const text of ['latest_complete_annual_report', 'sensitivityDiscountRates', 'sensitivityTerminalGrowthRates', 'calculateDcfValue', 'annualCashFlowBasis', 'cells:']) assert.ok(server.includes(text), `missing DCF contract: ${text}`);
+  for (const text of ['DcfScenarioVisual', '三种增长情景', '基准情景价值桥', '敏感性矩阵', 'sensitivity.cells', 'DCF 模型每股价值敏感性矩阵']) assert.ok(modules.includes(text), `missing DCF visualization: ${text}`);
 });
 
 test('DCF degrades when discount rate is not greater than terminal growth', () => {

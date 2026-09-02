@@ -1,11 +1,9 @@
 /**
  * A 股交易日主动数据刷新调度器。
  *
- * 仅在上海时区交易时段内工作，每分钟 tick 一次：
- *   - 每 5 分钟刷新三大指数（refreshIndices）
- *   - 每 15 分钟刷新全量行情 + AI 报告（refreshAll，早报 / 市场动态 / 泡泡精选）
- * 上午 9:30-11:30、下午 13:00-15:00 执行；午休 11:30-13:00 与收盘后、周末不执行。
- * 每次触发的数据都会由调用方写入数据库，页面展示数据库中的最新数据。
+ * 默认调度器每天上海时区 09:30 执行一次完整刷新：
+ * 真实行情、早报、市场动态和泡泡精选均由调用方写入数据库。
+ * 周末与法定节假日也执行一次，保证休市日页面有当日可追溯快照。
  */
 export interface ShanghaiClock {
   dayOfWeek: number; // 0=Sun, 6=Sat
@@ -16,6 +14,11 @@ export interface MarketRefreshPlan {
   active: boolean;
   refreshIndices: boolean;
   refreshAll: boolean;
+}
+
+/** 每日一次刷新计划；570 = 09:30。 */
+export function planDailyMarketRefresh(minutes: number): boolean {
+  return minutes === 9 * 60 + 30;
 }
 
 // A-share market closures published by SSE for 2026. Future years can be
@@ -97,55 +100,27 @@ export interface MarketSchedulerCallbacks {
 }
 
 /**
- * 启动调度器，返回 stop 函数。
- * 立即执行一次 tick（避免服务启动恰好错过整点），之后每分钟一次。
+ * 启动每日一次的低成本调度器，返回 stop 函数。
+ *
+ * LEGACY（保留以便恢复）：原交易时段内每 5 分钟指数、每 15 分钟全量+AI 的
+ * planMarketRefresh 分支不再由本函数调用，避免产品测试期持续消耗数据源与 AI 额度。
  */
 export function startMarketScheduler(callbacks: MarketSchedulerCallbacks): () => void {
   let running = false;
-  let lastIndicesMinute = -1;
-  let lastAllMinute = -1;
-  let lastNonTradingRefreshDate = '';
+  let lastDailyRefreshDate = '';
 
   const tick = async () => {
     if (running) return;
     const now = new Date();
     const clock = getShanghaiClock(now);
     const marketDate = getShanghaiDate(now);
-    const nonTradingDay = clock.dayOfWeek === 0 || clock.dayOfWeek === 6 || isChinaMarketHoliday(marketDate);
-    if (nonTradingDay) {
-      if (lastNonTradingRefreshDate === marketDate) return;
-      lastNonTradingRefreshDate = marketDate;
-      running = true;
-      try {
-        callbacks.log(`[scheduler] ${marketDate} non-trading daily refreshAll`);
-        await callbacks.refreshAll();
-      } catch (error: any) {
-        callbacks.log(`[scheduler] non-trading refresh failed: ${error?.message}`);
-      } finally {
-        running = false;
-      }
-      return;
-    }
-    const plan = planMarketRefresh(clock.dayOfWeek, clock.minutes);
-    if (!plan.active || (!plan.refreshIndices && !plan.refreshAll)) return;
-    if (plan.refreshIndices && lastIndicesMinute === clock.minutes) return;
-    if (plan.refreshAll && lastAllMinute === clock.minutes) return;
-
-    const shouldIndices = plan.refreshIndices;
-    const shouldAll = plan.refreshAll;
-    if (shouldIndices) lastIndicesMinute = clock.minutes;
-    if (shouldAll) lastAllMinute = clock.minutes;
+    if (!planDailyMarketRefresh(clock.minutes) || lastDailyRefreshDate === marketDate) return;
+    lastDailyRefreshDate = marketDate;
 
     running = true;
     try {
-      if (shouldIndices) {
-        callbacks.log(`[scheduler] ${String(clock.minutes)} refreshIndices`);
-        await callbacks.refreshIndices();
-      }
-      if (shouldAll) {
-        callbacks.log(`[scheduler] ${String(clock.minutes)} refreshAll`);
-        await callbacks.refreshAll();
-      }
+      callbacks.log(`[scheduler] ${marketDate} 09:30 daily refreshAll`);
+      await callbacks.refreshAll();
     } catch (error: any) {
       callbacks.log(`[scheduler] tick failed: ${error?.message}`);
     } finally {

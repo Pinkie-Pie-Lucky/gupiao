@@ -77,7 +77,9 @@ def main():
     benefit_rows = rows_by_period(benefit)
     debt_rows = rows_by_period(debt)
     cash_rows = rows_by_period(cash)
-    periods = sorted(set(abstract_rows) | set(benefit_rows) | set(debt_rows) | set(cash_rows), reverse=True)[:12]
+    # 保留足够长的报告期：近 5 个完整年度与最近季度序列需要同时存在。
+    # 后续由 Node 端分别构造年度值和“单季度”值，不能把累计季报直接连成趋势。
+    periods = sorted(set(abstract_rows) | set(benefit_rows) | set(debt_rows) | set(cash_rows), reverse=True)[:24]
     reports = []
     for period in periods:
         a, b, d, c = (abstract_rows.get(period, {}), benefit_rows.get(period, {}), debt_rows.get(period, {}), cash_rows.get(period, {}))
@@ -96,6 +98,8 @@ def main():
             "creditImpairment": metric(b, ["信用减值损失"]),
             "assets": metric(d, ["*资产合计", "资产合计"]),
             "liabilities": metric(d, ["*负债合计", "负债合计"]),
+            "currentAssets": metric(d, ["*流动资产合计", "流动资产合计"]),
+            "currentLiabilities": metric(d, ["*流动负债合计", "流动负债合计"]),
             "equity": metric(d, ["*归属于母公司所有者权益合计", "归属于母公司所有者权益合计", "*所有者权益（或股东权益）合计", "所有者权益（或股东权益）合计"]),
             "loans": metric(d, ["发放贷款及垫款"]),
             "deposits": metric(d, ["吸收存款"]),

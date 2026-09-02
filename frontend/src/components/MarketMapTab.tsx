@@ -8,12 +8,14 @@ import {
   Activity,
   AlertTriangle,
   ArrowUpRight,
+  ChevronRight,
   Compass,
   Heart,
   Layers3,
   MessageCircle,
   Search,
   Sparkles,
+  Star,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { SectorIntelligence, BubbleSignalItem, BubbleSelectionResponse } from '../types';
@@ -24,6 +26,7 @@ interface MarketMapTabProps {
   onSelectSectorId: (sectorId: string | null) => void;
   onNavigateToTab: (tabId: string) => void;
   onAskTeacherAboutSector: (name: string, question: string) => void;
+  refreshVersion?: number;
 }
 
 interface IntelligenceResponse {
@@ -67,7 +70,7 @@ const tagStyles: Record<string, string> = {
   与我有关: 'bg-rose-100 text-rose-700',
 };
 
-export function MarketMapTab({ selectedSectorId, onSelectSectorId, onNavigateToTab, onAskTeacherAboutSector }: MarketMapTabProps) {
+export function MarketMapTab({ selectedSectorId, onSelectSectorId, onNavigateToTab, onAskTeacherAboutSector, refreshVersion = 0 }: MarketMapTabProps) {
   const PAGE_SIZE = 40;
   const [sectors, setSectors] = useState<SectorIntelligence[]>([]);
   const [activeSector, setActiveSector] = useState<SectorIntelligence | null>(null);
@@ -85,6 +88,7 @@ export function MarketMapTab({ selectedSectorId, onSelectSectorId, onNavigateToT
   const [bubbleError, setBubbleError] = useState<string | null>(null);
   const [bubbleFallback, setBubbleFallback] = useState(false);
   const [currentPage, setCurrentPage] = useState(1);
+  const [selectedBubbleSectorName, setSelectedBubbleSectorName] = useState<string | null>(null);
 
   // 已发起过请求的标记。不放进 state，否则它变化会触发 effect 重跑并中断在途请求。
   const bubbleRequestedRef = useRef(false);
@@ -118,8 +122,9 @@ export function MarketMapTab({ selectedSectorId, onSelectSectorId, onNavigateToT
   // 泡泡精选走 P5，单次生成要拉板块内部数据并调用 AI，耗时较长。
   // 因此只在用户首次切到该 tab 时请求，不在挂载时预加载。服务端已有缓存，重复进入不会重复生成。
   useEffect(() => {
+    if (refreshVersion > 0) bubbleRequestedRef.current = false;
     if (mapFilter === 'featured' && !bubbleRequestedRef.current) loadBubbleSelection();
-  }, [mapFilter, loadBubbleSelection]);
+  }, [mapFilter, loadBubbleSelection, refreshVersion]);
 
   // Fetch market overview
   useEffect(() => {
@@ -134,7 +139,7 @@ export function MarketMapTab({ selectedSectorId, onSelectSectorId, onNavigateToT
         });
       }
     }).catch(()=>{});
-  }, []);
+  }, [refreshVersion]);
   useEffect(() => {
     let live = true;
     async function load() {
@@ -158,7 +163,7 @@ export function MarketMapTab({ selectedSectorId, onSelectSectorId, onNavigateToT
     }
     load();
     return () => { live = false; };
-  }, [selectedSectorId]);
+  }, [selectedSectorId, refreshVersion]);
 
   useEffect(() => {
     try {
@@ -245,12 +250,134 @@ export function MarketMapTab({ selectedSectorId, onSelectSectorId, onNavigateToT
     return q ? bubbleItems.filter(i => i.sectorName.toLowerCase().includes(q)) : bubbleItems;
   }, [bubbleItems, filterQuery]);
 
+  useEffect(() => {
+    if (!filteredBubbleItems.length) {
+      setSelectedBubbleSectorName(null);
+      return;
+    }
+    if (!selectedBubbleSectorName || !filteredBubbleItems.some(item => item.sectorName === selectedBubbleSectorName)) {
+      setSelectedBubbleSectorName(filteredBubbleItems[0].sectorName);
+    }
+  }, [filteredBubbleItems, selectedBubbleSectorName]);
+
+  const selectedBubbleItem = useMemo(
+    () => filteredBubbleItems.find(item => item.sectorName === selectedBubbleSectorName) || filteredBubbleItems[0] || null,
+    [filteredBubbleItems, selectedBubbleSectorName],
+  );
+
+  const selectedBubbleSector = useMemo(
+    () => selectedBubbleItem ? sectors.find(sector => sector.sector === selectedBubbleItem.sectorName) || null : null,
+    [sectors, selectedBubbleItem],
+  );
+
+  const selectBubbleItem = (item: BubbleSignalItem) => {
+    setSelectedBubbleSectorName(item.sectorName);
+    const matched = sectors.find(sector => sector.sector === item.sectorName);
+    if (matched) {
+      setActiveSector(matched);
+      onSelectSectorId(matched.sectorId);
+    }
+  };
+
   const isUp = (pct: number) => pct >= 0;
   // P5 的 todayChange 是格式化字符串（如 "+5.20%"），按符号判断涨跌
   const bubbleIsUp = (change: string) => !change.trim().startsWith('-');
 
-  return (
-    <div className="space-y-4 px-3 pb-24 pt-3">
+  const desktopFilterLabel = (filter: MapFilter) => (
+    filter === 'featured' ? '泡泡精选' : filter === 'gainers' ? '领涨' : filter === 'losers' ? '领跌' : '全部'
+  );
+
+  return (<>
+    <div className="hidden space-y-4 pb-10 lg:block">
+      <section className="rounded-2xl border border-slate-200 bg-white px-5 py-4 shadow-sm">
+        <div className="grid grid-cols-[repeat(3,minmax(0,1fr))_minmax(170px,.9fr)_minmax(155px,.75fr)_minmax(185px,1fr)] divide-x divide-slate-100">
+          {(marketSummary?.indices || []).slice(0, 3).map(index => (
+            <div key={index.name} className="px-4 first:pl-0">
+              <p className="text-xs font-medium text-slate-500">{index.name}</p>
+              <p className={`mt-1 text-xl font-bold ${index.changePercent >= 0 ? 'text-red-500' : 'text-emerald-600'}`}>{index.changePercent >= 0 ? '+' : ''}{index.changePercent.toFixed(2)}%</p>
+              <p className="mt-1 text-[11px] text-slate-400">实时行情</p>
+            </div>
+          ))}
+          <div className="px-4">
+            <p className="text-xs font-medium text-slate-500">市场情绪</p>
+            <p className="mt-1 text-xl font-bold text-amber-500">{marketSummary?.temperature ?? '--'}</p>
+            <p className="mt-1 text-[11px] text-slate-400">{marketSummary?.temperatureLabel || '等待更新'}</p>
+          </div>
+          <div className="px-4">
+            <p className="text-xs font-medium text-slate-500">涨跌家数</p>
+            <p className="mt-1 text-sm font-bold"><span className="text-red-500">涨 {marketSummary?.upSectors ?? '--'}</span><span className="mx-2 text-slate-200">|</span><span className="text-emerald-600">跌 {marketSummary?.downSectors ?? '--'}</span></p>
+            <p className="mt-1 text-[11px] text-slate-400">板块表现</p>
+          </div>
+          <div className="px-4 last:pr-0">
+            <p className="text-xs font-medium text-slate-500">数据状态</p>
+            <p className="mt-1 text-sm font-bold text-slate-800">盘中更新</p>
+            <p className="mt-1 text-[11px] text-slate-400">{updatedAt ? new Date(updatedAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }) : '等待行情返回'}</p>
+          </div>
+        </div>
+      </section>
+
+      {dataError && <div className="rounded-xl bg-amber-50 px-4 py-3 text-sm text-amber-800"><AlertTriangle className="mr-1 inline h-4 w-4" />{dataError}</div>}
+
+      <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+        <div className="flex items-center justify-between border-b border-slate-100 px-5 py-3">
+          <nav className="flex items-center gap-2" aria-label="市场地图筛选">
+            {visibleMapFilters.map(filter => (
+              <button key={filter} type="button" onClick={() => setMapFilter(filter)} className={`min-h-10 rounded-xl px-4 text-sm font-semibold transition ${mapFilter === filter ? 'bg-indigo-600 text-white shadow-sm' : 'text-slate-600 hover:bg-slate-50 hover:text-indigo-600'}`}>
+                {desktopFilterLabel(filter)}{filterCounts[filter] === null ? '' : <span className="ml-1.5 text-xs opacity-75">{filterCounts[filter]}</span>}
+              </button>
+            ))}
+          </nav>
+          <label className="relative block w-72">
+            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+            <input type="search" value={filterQuery} onChange={event => setFilterQuery(event.target.value)} placeholder="搜索板块或关键词" className="h-10 w-full rounded-xl border border-slate-200 bg-slate-50 pl-9 pr-3 text-sm text-slate-700 outline-none transition placeholder:text-slate-400 focus:border-indigo-300 focus:bg-white" />
+          </label>
+        </div>
+
+        {mapFilter === 'featured' ? <div className="grid min-h-[650px] grid-cols-[minmax(0,1.45fr)_minmax(360px,.85fr)]">
+          <section className="border-r border-slate-100 px-5 py-5">
+            <div className="mb-4 flex items-end justify-between">
+              <div><div className="flex items-center gap-2"><Star className="h-4 w-4 fill-amber-400 text-amber-400" /><h2 className="text-xl font-bold text-slate-950">泡泡精选</h2></div><p className="mt-1 text-sm text-slate-500">今日值得关注的板块与入选理由</p></div>
+              <p className="text-xs text-slate-400">{updatedAt ? `更新于 ${new Date(updatedAt).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })}` : '正在获取数据'}</p>
+            </div>
+
+            {bubbleLoading && <div className="space-y-3">{[0, 1, 2, 3, 4].map(item => <div key={item} className="h-24 animate-pulse rounded-xl bg-slate-100" />)}</div>}
+            {!bubbleLoading && bubbleError && <div className="rounded-xl bg-amber-50 p-4 text-sm text-amber-800"><AlertTriangle className="mr-1 inline h-4 w-4" />{bubbleError}<button type="button" onClick={loadBubbleSelection} className="ml-2 font-semibold underline">重试</button></div>}
+            {!bubbleLoading && !bubbleError && bubbleFallback && <p className="mb-3 rounded-xl bg-slate-50 px-3 py-2 text-xs text-slate-600">当前精选基于行情规则排序，AI 解读尚未生成，仅供参考。</p>}
+            {!bubbleLoading && !bubbleError && <div className="space-y-2.5">
+              {filteredBubbleItems.map((item, index) => {
+                const selected = selectedBubbleItem?.sectorName === item.sectorName;
+                return <button key={item.sectorName} type="button" onClick={() => selectBubbleItem(item)} className={`grid w-full grid-cols-[34px_minmax(130px,.72fr)_minmax(110px,.55fr)_minmax(0,1.7fr)_auto] items-center gap-3 rounded-xl border px-4 py-3.5 text-left transition ${selected ? 'border-indigo-500 bg-indigo-50/50 shadow-sm ring-1 ring-indigo-100' : 'border-slate-200 bg-white hover:border-indigo-200 hover:bg-slate-50/70'}`}>
+                  <span className={`grid h-7 w-7 place-items-center rounded-lg text-xs font-bold ${selected ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-500'}`}>{index + 1}</span>
+                  <span><span className="block text-base font-bold text-slate-900">{item.sectorName}</span><span className={`mt-1 block text-sm font-bold ${bubbleIsUp(item.todayChange) ? 'text-red-500' : 'text-emerald-600'}`}>{item.todayChange}</span></span>
+                  <span className="border-l border-slate-100 pl-3"><span className="block text-[11px] text-slate-400">入选信号</span><span className={`mt-1 inline-flex rounded-md px-2 py-1 text-[11px] font-semibold ${signalTypeLabels[item.signalType].className}`}>{signalTypeLabels[item.signalType].text}</span></span>
+                  <span><span className="block text-xs text-slate-400">入选理由</span><span className="mt-1 block text-sm leading-5 text-slate-700">{item.rankReason || item.bubbleExplanation || '板块数据正在补充中。'}</span></span>
+                  <ChevronRight className={`h-4 w-4 ${selected ? 'text-indigo-600' : 'text-slate-300'}`} />
+                </button>;
+              })}
+              {!filteredBubbleItems.length && <div className="py-16 text-center text-sm text-slate-400">{filterQuery.trim() ? '没有找到匹配的精选板块。' : '今天暂时没有筛选出值得关注的板块。'}</div>}
+            </div>}
+          </section>
+
+          <aside className="bg-slate-50/70 px-5 py-5">
+            {selectedBubbleItem ? <div className="sticky top-24">
+              <div className="flex items-start justify-between gap-3"><div><p className="text-xs font-semibold text-indigo-600">已选板块</p><h2 className="mt-1 text-2xl font-bold text-slate-950">{selectedBubbleItem.sectorName}</h2><p className={`mt-1 text-2xl font-bold ${bubbleIsUp(selectedBubbleItem.todayChange) ? 'text-red-500' : 'text-emerald-600'}`}>{selectedBubbleItem.todayChange}</p></div><span className={`rounded-lg px-2.5 py-1.5 text-xs font-semibold ${healthStatusLabels[selectedBubbleItem.healthStatus].className}`}>{healthStatusLabels[selectedBubbleItem.healthStatus].text}</span></div>
+              <section className="mt-5 rounded-xl border border-indigo-100 bg-indigo-50 p-4"><p className="text-xs font-bold text-indigo-700">AI 精选摘要</p><p className="mt-2 text-sm leading-6 text-indigo-950">{selectedBubbleItem.bubbleExplanation || selectedBubbleItem.rankReason}</p><p className="mt-3 border-t border-indigo-100 pt-3 text-sm leading-6 text-slate-700"><span className="font-semibold text-slate-900">入选理由：</span>{selectedBubbleItem.rankReason || '暂无补充说明'}</p></section>
+              <section className="mt-4 grid grid-cols-3 gap-2"><div className="rounded-xl border border-slate-200 bg-white p-3"><p className="text-[11px] text-slate-400">涨跌幅</p><p className={`mt-1 text-base font-bold ${bubbleIsUp(selectedBubbleItem.metrics.priceChange) ? 'text-red-500' : 'text-emerald-600'}`}>{selectedBubbleItem.metrics.priceChange}</p></div><div className="rounded-xl border border-slate-200 bg-white p-3"><p className="text-[11px] text-slate-400">上涨占比</p><p className="mt-1 text-base font-bold text-slate-800">{selectedBubbleItem.metrics.upStockRatio}</p></div><div className="rounded-xl border border-slate-200 bg-white p-3"><p className="text-[11px] text-slate-400">成交变化</p><p className="mt-1 text-base font-bold text-slate-800">{selectedBubbleItem.metrics.volumeChange}</p></div></section>
+              {selectedBubbleItem.supportingSignals.length > 0 && <section className="mt-4"><p className="text-sm font-bold text-slate-900">支撑信号</p><ul className="mt-2 space-y-2">{selectedBubbleItem.supportingSignals.slice(0, 3).map(signal => <li key={signal} className="flex gap-2 text-sm leading-5 text-slate-600"><ArrowUpRight className="mt-0.5 h-4 w-4 shrink-0 text-indigo-500" />{signal}</li>)}</ul></section>}
+              {selectedBubbleItem.riskSignals.length > 0 && <section className="mt-4 rounded-xl bg-amber-50 p-3"><p className="text-xs font-bold text-amber-800">需要留意</p><p className="mt-1 text-xs leading-5 text-amber-800">{selectedBubbleItem.riskSignals[0]}</p></section>}
+              {selectedBubbleItem.evidence.length > 0 && <section className="mt-4 border-t border-slate-200 pt-4"><p className="text-sm font-bold text-slate-900">关联线索</p><div className="mt-2 space-y-2">{selectedBubbleItem.evidence.slice(0, 2).map(evidence => <p key={evidence.id} className="text-xs leading-5 text-slate-500"><span className="font-semibold text-slate-700">{evidence.sourceName}</span> · {evidence.title}</p>)}</div></section>}
+              <div className="mt-5 grid grid-cols-2 gap-2"><button type="button" onClick={() => openBubbleDetail(selectedBubbleItem.sectorName)} className="min-h-11 rounded-xl bg-indigo-600 px-3 text-sm font-semibold text-white transition hover:bg-indigo-700">查看板块详情</button><button type="button" onClick={() => selectedBubbleSector && toggleFollowedSector(selectedBubbleSector.sectorId)} disabled={!selectedBubbleSector} className="min-h-11 rounded-xl border border-indigo-200 bg-white px-3 text-sm font-semibold text-indigo-700 transition hover:bg-indigo-50 disabled:cursor-not-allowed disabled:opacity-50">{selectedBubbleSector && followedSectorIds.includes(selectedBubbleSector.sectorId) ? '已加入自选' : '加入自选'}</button></div>
+              <p className="mt-3 text-center text-[11px] text-slate-400">数据仅供参考，不构成投资建议</p>
+            </div> : <div className="grid min-h-[420px] place-items-center text-center text-sm text-slate-400">选择左侧板块，查看完整入选依据</div>}
+          </aside>
+        </div> : <div className="p-5">
+          <div className="mb-4 flex items-end justify-between"><div><h2 className="text-xl font-bold text-slate-950">{desktopFilterLabel(mapFilter)}板块</h2><p className="mt-1 text-sm text-slate-500">按当前行情表现筛选，可点击查看板块详情。</p></div><span className="text-xs text-slate-400">共 {filteredSectors.length} 个板块</span></div>
+          {loading ? <div className="grid grid-cols-4 gap-3">{[0, 1, 2, 3, 4, 5, 6, 7].map(item => <div key={item} className="h-32 animate-pulse rounded-xl bg-slate-100" />)}</div> : <div className="grid grid-cols-4 gap-3">{visibleSectors.map(sector => <button key={sector.sectorId} type="button" onClick={() => selectSector(sector)} className={`rounded-xl border p-4 text-left transition hover:-translate-y-0.5 hover:shadow-sm ${isUp(sector.changePercent) ? 'border-red-100 bg-red-50/50' : 'border-emerald-100 bg-emerald-50/50'}`}><p className="font-bold text-slate-900">{sector.sector}</p><p className={`mt-2 text-xl font-bold ${isUp(sector.changePercent) ? 'text-red-500' : 'text-emerald-600'}`}>{sector.change}</p><div className="mt-3 flex flex-wrap gap-1">{sector.signalTags.slice(0, 2).map(tag => <span key={tag} className={`rounded-md px-2 py-1 text-[10px] font-semibold ${tagStyles[tag] || 'bg-slate-100 text-slate-600'}`}>{tag}</span>)}</div></button>)}</div>}
+        </div>}
+      </section>
+    </div>
+
+    <div className="space-y-4 px-3 pb-24 pt-3 lg:hidden">
       <header className="flex items-center gap-2 px-1">
         <div className="grid h-8 w-8 place-items-center rounded-xl bg-indigo-600 text-white"><Compass className="h-4 w-4" /></div>
         <h2 className="text-xl font-bold">市场地图</h2>
@@ -499,5 +626,5 @@ export function MarketMapTab({ selectedSectorId, onSelectSectorId, onNavigateToT
         )}
       </AnimatePresence>
     </div>
-  );
+  </>);
 }

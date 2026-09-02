@@ -1,6 +1,14 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { planMarketRefresh, getShanghaiClock, getShanghaiDate, isAshareTradingTime, isChinaMarketHoliday } from '../backend/lib/scheduler.js';
+import { planMarketRefresh, planDailyMarketRefresh, getShanghaiClock, getShanghaiDate, isAshareTradingTime, isChinaMarketHoliday } from '../backend/lib/scheduler.js';
+
+describe('planDailyMarketRefresh', () => {
+  it('只在上海时区 09:30 触发一次完整刷新', () => {
+    assert.equal(planDailyMarketRefresh(569), false);
+    assert.equal(planDailyMarketRefresh(570), true);
+    assert.equal(planDailyMarketRefresh(571), false);
+  });
+});
 
 describe('planMarketRefresh', () => {
   it('周末不执行任何刷新', () => {

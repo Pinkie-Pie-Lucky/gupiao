@@ -1,20 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import {
-  Activity,
-  ArrowLeft,
-  ChevronDown,
-  Database,
-  Landmark,
-  MessageCircle,
-  Network,
-  RefreshCw,
-  Scale,
-  ShieldAlert,
-} from 'lucide-react';
-import { createResearchViewModel, normalizeResearchSymbol, researchItemText, type ResearchSectionKey } from '../lib/stockResearch';
+import { ArrowLeft, Database, MessageCircle, RefreshCw, Scale, ShieldAlert } from 'lucide-react';
+import { createResearchViewModel, normalizeResearchSymbol, researchItemText } from '../lib/stockResearch';
 import { StockResearchOverview } from './StockResearchOverview';
 import { StockResearchPicker } from './StockResearchPicker';
-import { StockResearchModules } from './StockResearchModules';
+import { StockResearchWorkspace, type ResearchWorkspaceView } from './StockResearchWorkspace';
 import type { StockItem } from '../types';
 
 interface StockResearchTabProps {
@@ -26,31 +15,6 @@ interface StockResearchTabProps {
   onAskTeacher: () => void;
 }
 
-type SectionKey = Exclude<ResearchSectionKey, 'evidence'>;
-type IconType = typeof Landmark;
-
-const sectionMeta: Record<SectionKey, { title: string; subtitle: string; icon: IconType }> = {
-  fundamental: { title: '基本面', subtitle: '盈利质量、财务信号和否决项', icon: Landmark },
-  technical: { title: '技术与市场', subtitle: '趋势、结构和市场环境', icon: Activity },
-  events: { title: '事件', subtitle: '公告、事件事实和影响方向', icon: MessageCircle },
-  industry: { title: '行业与产业链', subtitle: '同业位置、上下游和行业/政策事件', icon: Network },
-  sentiment: { title: '舆情', subtitle: '讨论热度、情绪和传播质量', icon: MessageCircle },
-  valuation: { title: '估值', subtitle: '估值状态与可比数据', icon: Scale },
-  risk: { title: '风险与反方', subtitle: '否决项、风险项和观察条件', icon: ShieldAlert },
-};
-
-const visibleSectionKeys: SectionKey[] = [
-  'fundamental',
-  'technical',
-  'events',
-  'industry',
-  // 舆情 Agent 的数据源与解释层尚待完善；保留模块与后端链路，恢复展示时取消下一行注释即可。
-  // 'sentiment',
-  'valuation',
-  'risk',
-];
-
-// 保留返回逻辑，恢复时改为 true；当前个股分析页不展示左上角返回按钮。
 const SHOW_RESEARCH_BACK_BUTTON = false;
 
 function FactList({ items, tone = 'slate', emptyText = '暂无可用数据' }: { items: any[]; tone?: 'slate' | 'emerald' | 'rose' | 'amber'; emptyText?: string }) {
@@ -66,8 +30,8 @@ export function StockResearchTab({ stock, followedStocks, onSelectStock, onFollo
   const [refreshing, setRefreshing] = useState(false);
   const [refreshError, setRefreshError] = useState<string | null>(null);
   const [marketQuote, setMarketQuote] = useState<any>(null);
+  const [activeView, setActiveView] = useState<ResearchWorkspaceView>('overview');
   const requestSequence = useRef(0);
-  const [openSections, setOpenSections] = useState<Record<SectionKey, boolean>>({ fundamental: true, technical: false, events: false, industry: false, sentiment: false, valuation: false, risk: true });
 
   const load = useCallback(async (refresh = false) => {
     const requestId = ++requestSequence.current;
@@ -83,18 +47,9 @@ export function StockResearchTab({ stock, followedStocks, onSelectStock, onFollo
     try {
       const symbol = normalizeResearchSymbol(stock.code);
       const suffix = refresh ? '&refresh=1' : '';
-      // 报价、CIO、行业 Agent 相互独立，并发请求；报价失败不能阻塞研究结论。
-      const [response, industryResponse, quoteResponse] = await Promise.all([
-        fetch(`/api/stock-agents/cio-manager?symbol=${encodeURIComponent(symbol)}${suffix}`),
-        fetch(`/api/stock-agents/industry-chain?symbol=${encodeURIComponent(symbol)}${suffix}`),
-        fetch(`/api/stock-quote?symbol=${encodeURIComponent(symbol)}`).catch(() => null),
-      ]);
-      const result = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(result?.detail || result?.error || '研究快照暂不可用');
-      const industryResult = industryResponse.ok ? await industryResponse.json().catch(() => null) : null;
-      const quoteResult = quoteResponse?.ok ? await quoteResponse.json().catch(() => null) : null;
-      if (industryResult?.industrySnapshot) {
-        result.managerSnapshot = result.managerSnapshot || {};
+      const mergeIndustryResult = (base: any, industryResult: any) => {
+        if (!industryResult?.industrySnapshot) return base;
+        const result = { ...base, managerSnapshot: { ...(base?.managerSnapshot || {}) }, opinion: { ...(base?.opinion || {}) } };
         result.managerSnapshot.agentOutputs = result.managerSnapshot.agentOutputs || {};
         result.managerSnapshot.agentOutputs.industry = {
           ...(result.managerSnapshot.agentOutputs.industry || {}),
@@ -103,7 +58,6 @@ export function StockResearchTab({ stock, followedStocks, onSelectStock, onFollo
           industryAgentMeta: industryResult.agentMeta || null,
         };
         const industryOpinion = industryResult.opinion || {};
-        result.opinion = result.opinion || {};
         result.opinion.moduleExplanations = {
           ...(result.opinion.moduleExplanations || {}),
           industry: {
@@ -114,11 +68,113 @@ export function StockResearchTab({ stock, followedStocks, onSelectStock, onFollo
           },
         };
         result.managerSnapshot.dataGaps = [...new Set([...(result.managerSnapshot.dataGaps || []), ...(industryOpinion.dataGaps || industryResult.industrySnapshot.dataGaps || [])])];
-      }
+        return result;
+      };
+      const mergeSentimentResult = (base: any, sentimentResult: any) => {
+        if (!sentimentResult?.opinion && !sentimentResult?.sentimentSnapshot) return base;
+        const result = { ...base, managerSnapshot: { ...(base?.managerSnapshot || {}) }, opinion: { ...(base?.opinion || {}) } };
+        result.managerSnapshot.agentOutputs = result.managerSnapshot.agentOutputs || {};
+        const snapshot = sentimentResult.sentimentSnapshot || {};
+        const sentimentOpinion = sentimentResult.opinion || {};
+        const aiInterpretation = sentimentResult.aiInterpretation || {};
+        result.managerSnapshot.agentOutputs.sentiment = {
+          ...(result.managerSnapshot.agentOutputs.sentiment || {}),
+          ...sentimentResult.deterministicSentiment,
+          items: snapshot.items || [],
+          contentClusters: snapshot.clusters || snapshot.contentClusters || [],
+          eventReactions: snapshot.eventReactions || [],
+          hotTopics: snapshot.hotTopics || [],
+          marketContextHotTopics: snapshot.marketContextHotTopics || [],
+          metrics: snapshot.metrics || {},
+          viewpoints: aiInterpretation.viewpoints || sentimentOpinion.viewpoints || [],
+          aiInterpretation,
+          sourceMeta: snapshot.snapshotMeta || null,
+          sentimentAgentMeta: sentimentResult.agentMeta || null,
+        };
+        result.opinion.moduleExplanations = {
+          ...(result.opinion.moduleExplanations || {}),
+          sentiment: {
+            conclusion: aiInterpretation.summary || sentimentOpinion.conclusion || '',
+            why: [aiInterpretation.notice || sentimentOpinion.eventSummary].filter(Boolean).map((text: string) => ({ text, evidenceIds: sentimentOpinion.evidenceIds || [] })),
+            supporting: aiInterpretation.catalysts || sentimentOpinion.positives || sentimentOpinion.catalysts || [],
+            counter: aiInterpretation.risks || sentimentOpinion.negatives || sentimentOpinion.risks || [],
+          },
+        };
+        result.managerSnapshot.dataGaps = [...new Set([...(result.managerSnapshot.dataGaps || []), ...(sentimentOpinion.dataGaps || snapshot.dataGaps || [])])];
+        return result;
+      };
+      const deterministicPayload = (managerSnapshot: any) => ({
+        symbol,
+        managerSnapshot,
+        deterministicManager: {
+          researchStatus: managerSnapshot?.researchStatus,
+          riskDecision: managerSnapshot?.riskDecision,
+          riskLevel: managerSnapshot?.riskLevel,
+          managerStance: managerSnapshot?.managerStance,
+          conflicts: managerSnapshot?.conflicts || [],
+          requiredConditions: managerSnapshot?.requiredConditions || [],
+          researchPriorities: managerSnapshot?.researchPriorities || [],
+        },
+        opinion: {
+          conclusion: managerSnapshot?.researchStatus === 'blocked'
+            ? '核心研究输入暂不完整，当前先展示已获得的确定性研究结果。'
+            : `当前研究状态为 ${managerSnapshot?.researchStatus || '待汇总'}；AI 解读将在后台补充，不影响下方事实数据。`,
+          supportingCase: managerSnapshot?.supportingCase || [],
+          counterCase: managerSnapshot?.counterCase || [],
+          requiredConditions: managerSnapshot?.requiredConditions || [],
+          researchPriorities: managerSnapshot?.researchPriorities || [],
+          moduleExplanations: {},
+        },
+        agentMeta: { source: 'deterministic_snapshot', aiStatus: 'pending', generatedAt: new Date().toISOString() },
+      });
+      const mergeCioResult = (base: any, cioResult: any) => ({
+        ...cioResult,
+        managerSnapshot: {
+          ...(base?.managerSnapshot || {}),
+          ...(cioResult?.managerSnapshot || {}),
+          agentOutputs: {
+            ...(cioResult?.managerSnapshot?.agentOutputs || {}),
+            // 行业、舆情独立接口可能已完成；避免 CIO 的旧快照覆盖当前页面结果。
+            ...(base?.managerSnapshot?.agentOutputs || {}),
+          },
+          dataGaps: [...new Set([...(base?.managerSnapshot?.dataGaps || []), ...(cioResult?.managerSnapshot?.dataGaps || [])])],
+        },
+      });
+      // 先加载不调用 AI 的管理层快照。它是页面的事实底座；CIO、行业和舆情解释随后独立补入。
+      const [snapshotResponse, quoteResponse] = await Promise.all([
+        fetch(`/api/stock-manager-snapshot?symbol=${encodeURIComponent(symbol)}${suffix}`),
+        fetch(`/api/stock-quote?symbol=${encodeURIComponent(symbol)}`).catch(() => null),
+      ]);
+      const managerSnapshot = await snapshotResponse.json().catch(() => ({}));
+      if (!snapshotResponse.ok) throw new Error(managerSnapshot?.detail || managerSnapshot?.error || '研究快照暂不可用');
+      const result = deterministicPayload(managerSnapshot);
+      const quoteResult = quoteResponse?.ok ? await quoteResponse.json().catch(() => null) : null;
       if (requestId === requestSequence.current) {
         setPayload(result);
         if (quoteResult?.quote) setMarketQuote(quoteResult);
       }
+      // AI 请求依赖同一份已完成的确定性快照，因此不再阻塞首屏，也不会在刷新时重复回源。
+      const industryPromise = fetch(`/api/stock-agents/industry-chain?symbol=${encodeURIComponent(symbol)}`)
+        .then((response) => response.ok ? response.json().catch(() => null) : null)
+        .catch(() => null);
+      const sentimentPromise = fetch(`/api/stock-agents/sentiment?symbol=${encodeURIComponent(symbol)}`)
+        .then((response) => response.ok ? response.json().catch(() => null) : null)
+        .catch(() => null);
+      const cioPromise = fetch(`/api/stock-agents/cio-manager?symbol=${encodeURIComponent(symbol)}`)
+        .then((response) => response.ok ? response.json().catch(() => null) : null)
+        .catch(() => null);
+      void cioPromise.then((cioResult) => {
+        if (requestId !== requestSequence.current || !cioResult) return;
+        setPayload((current: any) => current ? mergeCioResult(current, cioResult) : current);
+      });
+      void industryPromise.then((industryResult) => {
+        if (requestId !== requestSequence.current || !industryResult?.industrySnapshot) return;
+        setPayload((current: any) => current ? mergeIndustryResult(current, industryResult) : current);
+      });
+      void sentimentPromise.then((sentimentResult) => {
+        if (requestId !== requestSequence.current || !sentimentResult) return;
+        setPayload((current: any) => current ? mergeSentimentResult(current, sentimentResult) : current);
+      });
     } catch (loadError: any) {
       if (requestId !== requestSequence.current) return;
       const message = loadError?.message || '研究快照暂不可用';
@@ -132,15 +188,25 @@ export function StockResearchTab({ stock, followedStocks, onSelectStock, onFollo
   }, [stock.code]);
 
   useEffect(() => {
+    setActiveView('overview');
     void load();
     return () => { requestSequence.current += 1; };
   }, [load]);
 
   const { manager, opinion, snapshot, outputs, evidence, supporting, counter, required, dataGaps } = createResearchViewModel(payload);
   const stance = manager.managerStance || snapshot.managerStance || opinion.managerStance;
-  // “limited” means some upstream facts are missing, not that the AI/API call failed.
-  // Keep the usable conclusion visible and surface those missing facts in the unified data-gaps section.
-  const aiFailed = Boolean(payload?.agentMeta?.aiStatus === 'fallback');
+  const aiStatus = String(payload?.agentMeta?.aiStatus || (loading ? 'pending' : 'not_requested'));
+  const aiFallback = aiStatus === 'fallback' || aiStatus === 'failed';
+  const aiFailureStage = aiFallback ? String(payload?.agentMeta?.ai?.failureStage || '') : '';
+  const aiStatusView = aiStatus === 'completed'
+    ? { text: 'AI 解读已生成', tone: 'border-emerald-200 bg-emerald-50 text-emerald-800' }
+    : aiStatus === 'partial'
+      ? { text: 'AI 解读部分生成', tone: 'border-amber-200 bg-amber-50 text-amber-800' }
+      : aiFallback
+        ? { text: 'AI 解读本次失败，事实结果仍可用', tone: 'border-rose-200 bg-rose-50 text-rose-800' }
+        : aiStatus === 'pending'
+          ? { text: 'AI 解读生成中，事实结果可先查看', tone: 'border-indigo-200 bg-indigo-50 text-indigo-800' }
+          : { text: '当前展示程序计算的事实结果', tone: 'border-slate-200 bg-slate-50 text-slate-700' };
   const evidenceSet = useMemo(() => new Set(snapshot.evidenceIds || []), [snapshot.evidenceIds]);
   const isFollowed = useMemo(() => {
     const currentCode = normalizeResearchSymbol(stock.code);
@@ -158,15 +224,20 @@ export function StockResearchTab({ stock, followedStocks, onSelectStock, onFollo
       turnover: Number.isFinite(quote.amount) ? `${(Number(quote.amount) / 1e8).toFixed(2)}亿` : stock.turnover,
     };
   }, [marketQuote, stock]);
-  const toggle = (key: SectionKey) => setOpenSections((current) => ({ ...current, [key]: !current[key] }));
 
   return <div className="space-y-4 px-3 pb-24 pt-2">
     <header className="grid grid-cols-[44px_minmax(0,1fr)_44px] items-center gap-2"><div>{SHOW_RESEARCH_BACK_BUTTON && <button onClick={onBack} aria-label="返回自选列表" className="grid h-11 w-11 place-items-center rounded-xl bg-white text-slate-600 shadow-sm hover:text-indigo-600"><ArrowLeft className="h-4 w-4" /></button>}</div><div className="min-w-0 text-center"><p className="text-sm font-bold text-slate-900">个股分析</p><div className="mt-0.5 flex items-center justify-center gap-2"><p className="truncate font-mono text-[10px] text-slate-500">{displayStock.name} · {normalizeResearchSymbol(displayStock.code)}</p><button onClick={() => onFollowStock(displayStock)} disabled={isFollowed} className="min-h-7 shrink-0 rounded-md border border-indigo-200 bg-indigo-50 px-2 text-[10px] font-bold text-indigo-700 disabled:border-slate-200 disabled:bg-slate-100 disabled:text-slate-500">{isFollowed ? '已在自选' : '加入自选'}</button></div></div><button onClick={() => void load(true)} disabled={refreshing} aria-label="刷新研究快照（重新请求数据源）" className="grid h-11 w-11 place-items-center rounded-xl bg-white text-slate-600 shadow-sm hover:text-indigo-600 disabled:opacity-50"><RefreshCw className={`h-4 w-4 ${refreshing ? 'animate-spin' : ''}`} /></button></header>
+    {!loading && <p role="status" className={`mx-auto w-fit max-w-full rounded-full border px-2.5 py-1 text-center text-[9px] font-semibold ${aiStatusView.tone}`}>{aiStatusView.text}{aiFailureStage ? ` · ${aiFailureStage}` : ''}</p>}
     <StockResearchPicker selectedStock={displayStock} followedStocks={followedStocks} onSelectStock={onSelectStock} />
-    <StockResearchOverview stock={displayStock} stance={stance} researchStatus={manager.researchStatus} riskLevel={manager.riskLevel} conclusion={opinion.conclusion} evidenceCount={evidenceSet.size} loading={loading} error={error} aiFailed={aiFailed} />
+    <StockResearchOverview stock={displayStock} stance={stance} researchStatus={manager.researchStatus} riskLevel={manager.riskLevel} conclusion={opinion.conclusion} evidenceCount={evidenceSet.size} loading={loading} error={error} aiFallback={aiFallback} />
     {error && <section role="alert" className="rounded-xl border border-rose-200 bg-rose-50 p-4"><div className="flex items-start gap-3"><ShieldAlert className="mt-0.5 h-4 w-4 shrink-0 text-rose-700" /><div className="min-w-0 flex-1"><h2 className="text-xs font-bold text-rose-900">研究数据加载失败</h2><p className="mt-1 break-words text-[11px] leading-relaxed text-rose-800">{error}</p></div></div><button onClick={() => void load()} className="mt-3 min-h-11 w-full rounded-lg bg-rose-700 px-4 text-xs font-bold text-white hover:bg-rose-800 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-rose-700">重新加载</button></section>}
     {refreshError && !error && <section role="status" className="flex items-start justify-between gap-3 rounded-xl border border-amber-200 bg-amber-50 p-3"><div className="min-w-0"><p className="text-[11px] font-bold text-amber-900">刷新失败，当前仍显示上一次结果</p><p className="mt-1 break-words text-[10px] text-amber-800">{refreshError}</p></div><button onClick={() => void load(true)} className="min-h-10 shrink-0 rounded-lg px-3 text-[11px] font-bold text-amber-900 hover:bg-amber-100">重试</button></section>}
     {loading && <section aria-label="正在加载研究模块" aria-busy="true" className="rounded-xl border border-slate-200 bg-white p-4"><span className="sr-only">正在加载研究模块</span><div className="h-3 w-24 animate-pulse rounded bg-slate-200" /><div className="mt-4 space-y-3">{[72, 92, 64].map((width) => <div className="h-11 animate-pulse rounded-lg bg-slate-100" key={width} style={{ width: `${width}%` }} />)}</div></section>}
-    {!loading && !error && <><section className="space-y-3"><div className="flex flex-wrap items-center justify-between gap-2"><h2 className="text-sm font-bold text-slate-900">支持与反方</h2><span className="text-[10px] text-slate-500">不构成交易建议</span></div><FactList items={supporting.slice(0, 2)} tone="emerald" emptyText="暂无有证据支持的正向观点" /><FactList items={counter.slice(0, 2)} tone="rose" emptyText="暂无有证据支持的反方观点" /></section><section className="overflow-hidden rounded-xl border border-slate-200 bg-white">{visibleSectionKeys.map((key) => { const meta = sectionMeta[key]; const Icon = meta.icon; const isOpen = openSections[key]; return <div key={key} className="border-b border-slate-100 last:border-0"><button onClick={() => toggle(key)} className="flex min-h-14 w-full items-center gap-3 px-3 text-left hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-inset focus-visible:outline-indigo-600 sm:px-4" aria-expanded={isOpen}><span className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-indigo-50 text-indigo-700"><Icon className="h-4 w-4" /></span><span className="min-w-0 flex-1"><span className="block text-xs font-bold text-slate-900">{meta.title}</span><span className="mt-0.5 block text-[10px] leading-snug text-slate-600">{meta.subtitle}</span></span><ChevronDown className={`h-4 w-4 shrink-0 text-slate-500 transition-transform ${isOpen ? 'rotate-180' : ''}`} /></button>{isOpen && <div className="bg-slate-50/60 px-3 pb-4 pt-1 sm:px-4"><StockResearchModules sectionKey={key} outputs={outputs} counterCase={counter} evidence={evidence} dataGaps={dataGaps} agentMeta={{ ...payload?.agentMeta, moduleExplanations: opinion?.moduleExplanations }} /></div>}</div>; })}</section><section className="rounded-xl border border-amber-200 bg-amber-50/60 p-3"><div className="flex items-center gap-2 text-xs font-bold text-amber-900"><Scale className="h-4 w-4" />下一步核验</div><div className="mt-3"><FactList items={required.slice(0, 3)} tone="amber" emptyText="暂无新增核验条件" /></div></section>{dataGaps.length > 0 && <section className="rounded-xl border border-slate-200 bg-slate-100/70 p-3"><div className="flex items-center justify-between gap-3"><div className="flex items-center gap-2 text-xs font-bold text-slate-800"><Database className="h-4 w-4" />数据缺口</div><span className="text-[10px] text-slate-500">{dataGaps.length} 项</span></div><ul className="mt-2 space-y-1.5">{dataGaps.map((gap: string) => <li className="flex gap-2 text-[11px] leading-relaxed text-slate-700" key={gap}><span aria-hidden="true">•</span><span className="min-w-0 break-words">{gap}</span></li>)}</ul></section>}<button onClick={onAskTeacher} className="flex min-h-11 w-full items-center justify-center gap-2 rounded-xl bg-indigo-600 px-4 py-3 text-xs font-bold text-white hover:bg-indigo-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600"><MessageCircle className="h-4 w-4" />带着这份研究去问 AI 泡泡</button></>}
+    {!loading && !error && <>
+      <StockResearchWorkspace activeView={activeView} onChangeView={setActiveView} onRefresh={() => void load(true)} refreshing={refreshing} outputs={outputs} supporting={supporting} counter={counter} evidence={evidence} dataGaps={dataGaps} agentMeta={payload?.agentMeta} moduleExplanations={opinion?.moduleExplanations} />
+      <section className="rounded-xl border border-amber-200 bg-amber-50/60 p-3"><div className="flex items-center gap-2 text-xs font-bold text-amber-900"><Scale className="h-4 w-4" />下一步核验</div><div className="mt-3"><FactList items={required.slice(0, 3)} tone="amber" emptyText="暂无新增核验条件" /></div></section>
+      {dataGaps.length > 0 && <section className="rounded-xl border border-slate-200 bg-slate-100/70 p-3"><div className="flex items-center justify-between gap-3"><div className="flex items-center gap-2 text-xs font-bold text-slate-800"><Database className="h-4 w-4" />数据缺口</div><span className="text-[10px] text-slate-500">{dataGaps.length} 项</span></div><ul className="mt-2 space-y-1.5">{dataGaps.map((gap: string) => <li className="flex gap-2 text-[11px] leading-relaxed text-slate-700" key={gap}><span aria-hidden="true">•</span><span className="min-w-0 break-words">{gap}</span></li>)}</ul></section>}
+      <button onClick={onAskTeacher} className="flex min-h-11 w-full items-center justify-center gap-2 rounded-xl bg-indigo-600 px-4 py-3 text-xs font-bold text-white hover:bg-indigo-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600"><MessageCircle className="h-4 w-4" />带着这份研究去问 AI 泡泡</button>
+    </>}
   </div>;
 }

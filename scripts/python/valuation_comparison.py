@@ -82,20 +82,39 @@ def peers(symbol, peer_symbols):
     return result, len(rows)
 
 
+def empty_history():
+    return {metric: {"current": None, "percentile": None, "sampleCount": 0, "lastDate": None} for metric in ("pe", "pb", "ps")}
+
+
+def empty_peers():
+    return {metric: {"target": None, "peerMedian": None, "peerPercentile": None, "peerCount": 0} for metric in ("pe", "pb", "ps")}
+
+
 def main():
-    if len(sys.argv) != 3 or not re.fullmatch(r"\d{6}", sys.argv[1]):
-        raise ValueError("用法：valuation_comparison.py <6位代码> <同行代码逗号列表>")
+    if len(sys.argv) not in (3, 4) or not re.fullmatch(r"\d{6}", sys.argv[1]):
+        raise ValueError("用法：valuation_comparison.py <6位代码> <同行代码逗号列表> [history|peers|all]")
     symbol = sys.argv[1]
     peer_symbols = [item for item in sys.argv[2].split(",") if re.fullmatch(r"\d{6}", item)]
-    history_result = historical(symbol)
+    mode = sys.argv[3] if len(sys.argv) == 4 else "all"
+    if mode not in ("history", "peers", "all"):
+        raise ValueError("mode 应为 history、peers 或 all")
     errors = []
-    try:
-        peer_result, matched_count = peers(symbol, peer_symbols)
-    except Exception as exc:
-        errors.append(f"peers: {type(exc).__name__}: {str(exc)[:160]}")
-        peer_result = {metric: {"target": None, "peerMedian": None, "peerPercentile": None, "peerCount": 0} for metric in ("pe", "pb", "ps")}
-        matched_count = 0
-    print(json.dumps({"symbol": symbol, "history": history_result, "peers": peer_result, "matchedCount": matched_count, "sourceMeta": {"source": "akshare_stock_value_em", "fetchedAt": dt.datetime.now(dt.timezone.utc).isoformat(), "freshness": "delayed", "confidence": "market", "errors": errors}}, ensure_ascii=False))
+    history_result = empty_history()
+    peer_result = empty_peers()
+    matched_count = 0
+    # 历史分位与同行比较必须彼此独立：行业归属或同行行情失败时，
+    # 仍返回可用的自身历史 PE/PB 序列，而不是整份估值比较失败。
+    if mode in ("history", "all"):
+        try:
+            history_result = historical(symbol)
+        except Exception as exc:
+            errors.append(f"history: {type(exc).__name__}: {str(exc)[:160]}")
+    if mode in ("peers", "all"):
+        try:
+            peer_result, matched_count = peers(symbol, peer_symbols)
+        except Exception as exc:
+            errors.append(f"peers: {type(exc).__name__}: {str(exc)[:160]}")
+    print(json.dumps({"symbol": symbol, "history": history_result, "peers": peer_result, "matchedCount": matched_count, "sourceMeta": {"source": "akshare_stock_value_em", "mode": mode, "fetchedAt": dt.datetime.now(dt.timezone.utc).isoformat(), "freshness": "delayed", "confidence": "market", "errors": errors}}, ensure_ascii=False))
 
 
 if __name__ == "__main__":

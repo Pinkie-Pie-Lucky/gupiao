@@ -4,6 +4,9 @@ FROM ubuntu:24.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV NODE_ENV=production
+# ECS 访问官方 PyPI 大文件可能较慢；可通过构建参数覆盖，默认使用清华镜像。
+ARG PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
+ENV PIP_INDEX_URL=${PIP_INDEX_URL}
 
 # ---------- 1. 系统依赖 + Node.js 20 + Python 3.12 ----------
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -30,9 +33,12 @@ RUN python3 -m venv .venv && \
 
 # ---------- 4. 复制源码并构建 ----------
 COPY . .
+# Rollup 并发已在 Vite 配置中限制，兼容低 nofile 的容器构建环境。
 RUN npm run build
 
 # ---------- 5. 启动 ----------
+# 每次容器启动先执行幂等数据库迁移，避免新表在发布后缺失而服务静默降级。
+# 迁移失败时容器不会启动，便于由健康检查和日志明确发现问题。
 ENV PORT=8080
 EXPOSE 8080
-CMD ["node", "dist/server.cjs"]
+CMD ["sh", "-c", "npm run db:migrate && node dist/server.cjs"]

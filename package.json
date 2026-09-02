@@ -13,6 +13,8 @@
     "test:event-agent": "tsx --test tests/event-agent.test.ts",
     "test:stock-sentiment": "tsx --test tests/stock-sentiment.test.ts",
     "test:sentiment-agent": "tsx --test tests/sentiment-agent.test.ts",
+    "test:public-hotlists": "tsx --test tests/public-hotlists.test.ts",
+    "test:mx-screener": "tsx --test tests/mx-screener-client.test.ts",
     "test:stock-valuation": "tsx --test tests/stock-valuation.test.ts",
     "test:valuation-agent": "tsx --test tests/valuation-agent.test.ts",
     "test:stock-manager": "tsx --test tests/stock-manager.test.ts",
@@ -43,6 +45,7 @@
     "react": "^19.0.1",
     "react-dom": "^19.0.1",
     "recharts": "^3.9.2",
+    "three": "^0.185.1",
     "vite": "^6.2.3"
   },
   "devDependencies": {
