@@ -3770,7 +3770,12 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
       });
     }
     activeMcpRequests += 1;
-    const mcpServer = createMcpServer();
+    // MCP 与产品页面共用同一套事实构建器，避免外部调用得到另一套口径。
+    // 仅把程序生成的市场/个股事实注入 MCP；AI 解读不属于事实快照。
+    const mcpServer = createMcpServer({
+      getMarketObservation: async () => buildMarketOverviewPayload(await fetchMarketData()),
+      getStockFactSnapshot: async (symbol) => buildStockFactSnapshot(symbol),
+    });
     const mcpTransport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined, // 无状态：Vercel Serverless 每次请求独立，不维护 session
       enableJsonResponse: true, // 直接返回 JSON（而非 SSE 流），适配 Serverless 与评测平台

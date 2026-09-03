@@ -25,6 +25,7 @@
     "test:stock-research-frontend": "tsx --test tests/stock-research-frontend.test.ts",
     "test:manager-stance": "tsx --test tests/manager-stance.test.ts",
     "test:auth": "tsx --test tests/auth-service.test.ts",
+    "test:mcp-skills": "tsx --test tests/mcp-skill-contracts.test.ts",
     "db:migrate": "tsx backend/db/migrate.ts",
     "release:check": "node dev-tools/release-readiness.mjs",
     "clean": "rm -rf dist server.js",

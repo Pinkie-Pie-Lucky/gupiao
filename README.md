@@ -44,6 +44,17 @@
 - **可观测性**：记录模型、耗时、重试次数及失败阶段（超时、空输出、JSON 异常、证据校验失败等）。
 - **来源与回退**：接口返回来源、时间、新鲜度和数据缺口；外部数据源异常时按链路回退或标识不可用。
 
+### 内置 Skills
+
+项目将高频、可复用的金融工作流封装为可随代码一起维护的 Skill，并通过 Streamable HTTP MCP 暴露对应工具。二者均只输出可核验事实，不替代投资判断。
+
+| Skill | 适用场景 | 对应 MCP 工具 | 输出边界 |
+| --- | --- | --- | --- |
+| [市场观察 Skill](skills/market-observation/SKILL.md) | 首页、早晚报、市场日常观察 | `get_market_observation` | 三大指数、市场广度、市场温度、热点板块、时间/来源/缺口；不预测涨跌。 |
+| [个股事实快照 Skill](skills/stock-fact-snapshot/SKILL.md) | 个股研究、条件筛选复核、多个 Agent 的共同输入 | `search_stock` → `get_stock_fact_snapshot` | 行情、财务、技术、公告、证据 ID 与数据缺口；不包含 AI 结论或交易建议。 |
+
+MCP 地址为 `GET/POST /api/mcp`。在产品服务内调用时，两个工具复用页面同一套市场数据与个股事实快照；独立 MCP 部署未注入完整数据提供器时，个股工具会明确降级为行情快照并返回数据缺口。
+
 ## 数据源与回退
 
 | 数据类别 | 主要来源与策略 |
@@ -142,6 +153,7 @@ npm run test:stock-valuation
 npm run test:cio-manager-scenarios
 npm run test:public-hotlists
 npm run test:mx-screener
+npm run test:mcp-skills
 npm run db:migrate
 ```
 
@@ -157,7 +169,7 @@ npm run db:migrate
 | 资讯与公告 | `GET /api/stock-events`、`GET /api/stock-event-chains`、`GET /api/cninfo/announcements`、`GET /api/cninfo/document` |
 | 条件选股 | `/api/stock-screeners/*` |
 | AI 与内容 | `POST /api/chat`、`POST /api/market-report`、`POST /api/market-refresh` |
-| MCP | `GET/POST /api/mcp` |
+| MCP | `GET/POST /api/mcp`；`get_stock_quote`、`search_stock`、`get_market_overview`、`get_market_observation`、`get_stock_fact_snapshot` |
 
 ## 部署
 
@@ -179,6 +191,7 @@ gupiao-main0805/
 ├── backend/                     # Express API、认证、数据源、调度和数据库仓储
 ├── shared/                      # 前后端共享的确定性研究规则
 ├── scripts/python/              # 行情、财务、估值、行业等 Python 数据脚本
+├── skills/                      # 可复用金融工作流 Skill（市场观察、个股事实快照等）
 ├── tests/                       # Agent、数据链路、前端和权限测试
 ├── deploy/                      # Podman/Docker Compose、Nginx、部署与备份脚本
 ├── docs/                        # 产品、Agent、数据链路和部署设计文档

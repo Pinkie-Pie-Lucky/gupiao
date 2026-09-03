@@ -132,6 +132,144 @@ function isValidStockCode(input: string) {
   return /^\d{6}$/.test(normalizeSymbol(input));
 }
 
+export type McpDataProviders = {
+  /** 由宿主应用注入的完整市场观察数据；未注入时使用轻量行情源。 */
+  getMarketObservation?: () => Promise<unknown>;
+  /** 由宿主应用注入的个股事实快照；不得包含 AI 结论。 */
+  getStockFactSnapshot?: (symbol: string) => Promise<unknown>;
+};
+
+function round(value: number, digits = 2) {
+  const factor = 10 ** digits;
+  return Math.round(value * factor) / factor;
+}
+
+/** 将指数与板块原始行情转换为可复核、无预测性的市场观察。 */
+export function buildMarketObservation(overview: any) {
+  const indices = Array.isArray(overview?.indices) ? overview.indices : [];
+  const usableIndices = indices.filter((item: any) => Number.isFinite(Number(item?.changePercent)));
+  const upCount = usableIndices.filter((item: any) => Number(item.changePercent) > 0).length;
+  const downCount = usableIndices.filter((item: any) => Number(item.changePercent) < 0).length;
+  const averageChange = usableIndices.length
+    ? usableIndices.reduce((sum: number, item: any) => sum + Number(item.changePercent), 0) / usableIndices.length
+    : null;
+  const marketState = !usableIndices.length
+    ? '数据有限'
+    : upCount === usableIndices.length && Number(averageChange) >= 0.5
+      ? '指数普遍走强'
+      : downCount === usableIndices.length && Number(averageChange) <= -0.5
+        ? '指数普遍走弱'
+        : upCount > 0 && downCount > 0
+          ? '指数表现分歧'
+          : Number(averageChange) > 0
+            ? '指数偏强'
+            : Number(averageChange) < 0
+              ? '指数偏弱'
+              : '指数平稳';
+  const topSectors = Array.isArray(overview?.topSectors) ? overview.topSectors : [];
+  const sourceMeta = overview?.sourceMeta || null;
+  const dataGaps: string[] = [];
+  if (usableIndices.length < 3) dataGaps.push(`三大指数仅取得 ${usableIndices.length}/3 条有效涨跌数据。`);
+  if (!topSectors.length) dataGaps.push('未取得当日领涨板块数据。');
+
+  return {
+    observation: {
+      marketState,
+      indexBreadth: { up: upCount, down: downCount, flat: Math.max(0, usableIndices.length - upCount - downCount), total: usableIndices.length },
+      averageIndexChangePercent: averageChange === null ? null : round(averageChange),
+      indices,
+      topSectors,
+      bottomSectors: Array.isArray(overview?.bottomSectors) ? overview.bottomSectors : [],
+      marketBreadth: overview?.marketBreath || overview?.marketBreadth || null,
+      marketTemperature: overview?.marketTemperature ?? null,
+      marketStatus: overview?.marketStatus || null,
+    },
+    dataAsOf: overview?.timestamp || overview?.fetchedAt || new Date().toISOString(),
+    sourceMeta,
+    dataGaps,
+    scope: '仅反映当前已取得的市场事实，不预测后续涨跌，也不构成交易建议。',
+  };
+}
+
+/** MCP 只输出研究底座所需的紧凑字段，避免内部缓存、原文和 AI 输出泄露。 */
+export function compactStockFactSnapshot(raw: any) {
+  const reports = Array.isArray(raw?.facts?.financialReports) ? raw.facts.financialReports.slice(0, 4) : [];
+  const announcements = Array.isArray(raw?.facts?.announcements) ? raw.facts.announcements.slice(0, 10) : [];
+  const evidence = Array.isArray(raw?.evidence) ? raw.evidence.slice(0, 80) : [];
+  const quote = raw?.facts?.quote || null;
+  const profile = raw?.company?.profile || {};
+  const technical = raw?.facts?.technical || null;
+  const financialTrends = raw?.facts?.financialTrends || null;
+
+  return {
+    symbol: String(raw?.symbol || quote?.code || ''),
+    company: {
+      name: String(raw?.company?.name || quote?.name || ''),
+      financialTemplate: raw?.company?.financialTemplate || null,
+      industry: profile?.industry || profile?.industry_name || null,
+      mainBusiness: profile?.main_operation_business || profile?.business_scope || null,
+    },
+    facts: {
+      quote,
+      financialReports: reports,
+      financialCalculations: raw?.facts?.financialCalculations || null,
+      financialTrends: financialTrends ? {
+        annual: Array.isArray(financialTrends.annual) ? financialTrends.annual.slice(0, 6) : [],
+        annualSummary: financialTrends.annualSummary || null,
+        quality: financialTrends.quality || null,
+        dataGaps: Array.isArray(financialTrends.dataGaps) ? financialTrends.dataGaps.slice(0, 12) : [],
+      } : null,
+      technical: technical ? {
+        latestBar: technical.latestBar || null,
+        period: technical.period || null,
+        metrics: technical.metrics || null,
+        sourceMeta: technical.sourceMeta || null,
+      } : null,
+      announcements: announcements.map((item: any) => ({
+        title: item?.title || null,
+        publishedAt: item?.publishedAt || null,
+        url: item?.url || null,
+        category: item?.category || null,
+      })),
+    },
+    evidence: evidence.map((item: any) => ({
+      evidenceId: item?.evidenceId || null,
+      type: item?.type || null,
+      title: item?.title || null,
+      value: item?.value ?? null,
+      period: item?.period || null,
+      source: item?.source || null,
+      sourceUrl: item?.sourceUrl || null,
+      fetchedAt: item?.fetchedAt || null,
+      publishedAt: item?.publishedAt || null,
+      freshness: item?.freshness || null,
+      verification: item?.verification || null,
+    })),
+    dataGaps: Array.isArray(raw?.dataGaps) ? raw.dataGaps.slice(0, 30) : [],
+    snapshotMeta: raw?.snapshotMeta || { generatedAt: new Date().toISOString(), source: 'mcp-quote-fallback', freshness: 'realtime' },
+    scope: '为后续研究提供可核验事实、来源与证据 ID；不包含 AI 结论、估值判断或交易建议。',
+  };
+}
+
+async function buildQuoteFactSnapshot(symbol: string) {
+  const quote = await fetchStockQuote(symbol);
+  const fetchedAt = new Date().toISOString();
+  return compactStockFactSnapshot({
+    symbol: quote.code,
+    company: { name: quote.name, profile: {}, financialTemplate: null },
+    facts: { quote, financialReports: [], financialCalculations: null, financialTrends: null, technical: null, announcements: [] },
+    evidence: Object.entries(quote)
+      .filter(([key, value]) => !['code', 'name', 'source'].includes(key) && value !== null && value !== undefined)
+      .map(([key, value]) => ({
+        evidenceId: `market:${quote.code}:${key}:${fetchedAt.replace(/[^0-9]/g, '')}`,
+        type: 'market', title: `${quote.name} ${key}`, value, source: quote.source,
+        fetchedAt, freshness: 'realtime', verification: 'third_party',
+      })),
+    dataGaps: ['当前 MCP 实例未注入应用的财务、技术与公告快照提供器，仅返回实时行情事实。'],
+    snapshotMeta: { generatedAt: fetchedAt, source: 'mcp-quote-fallback', freshness: 'realtime' },
+  });
+}
+
 /** 查询 A 股实时行情（腾讯为主，新浪兜底） */
 async function fetchStockQuote(symbol: string) {
   const code = normalizeSymbol(symbol);
@@ -269,7 +407,7 @@ async function fetchMarketOverview() {
   return { indices, topSectors: sectors, fetchedAt: new Date().toISOString() };
 }
 
-export function createMcpServer(): McpServer {
+export function createMcpServer(providers: McpDataProviders = {}): McpServer {
   const server = new McpServer({
     name: 'gupiao-market-data',
     version: '1.0.0',
@@ -340,6 +478,49 @@ export function createMcpServer(): McpServer {
           isError: true,
           content: [{ type: 'text' as const, text: JSON.stringify(toMcpError(error)) }],
         };
+      }
+    },
+  );
+
+  server.registerTool(
+    'get_market_observation',
+    {
+      title: '获取 A 股市场观察快照',
+      description: '获取可核验的 A 股市场观察快照：三大指数、板块广度、领涨/领跌板块、市场温度、数据时间、来源和数据缺口。仅陈述当前市场事实，不预测涨跌、不提供交易建议。适合首页、早晚报和日常市场观察。',
+      inputSchema: {},
+    },
+    async () => {
+      try {
+        const raw = providers.getMarketObservation
+          ? await providers.getMarketObservation()
+          : await fetchMarketOverview();
+        const observation = buildMarketObservation(raw);
+        return { content: [{ type: 'text' as const, text: JSON.stringify(observation, null, 2) }] };
+      } catch (error: any) {
+        return { isError: true, content: [{ type: 'text' as const, text: JSON.stringify(toMcpError(error)) }] };
+      }
+    },
+  );
+
+  server.registerTool(
+    'get_stock_fact_snapshot',
+    {
+      title: '获取 A 股个股事实快照',
+      description: '获取单只 A 股的可核验研究底座：身份、实时行情、财务报告与趋势、技术输入、公告、来源、证据 ID 和数据缺口。symbol 必须为明确的 6 位代码；若只有名称，先调用 search_stock。结果只包含事实，不包含 AI 结论、估值判断或交易建议。',
+      inputSchema: {
+        symbol: z.string().trim().min(1).max(MAX_STOCK_IDENTIFIER_LENGTH).regex(/^(?:(?:SH|SZ|BJ)?\d{6}|\d{6}\.(?:SH|SZ|BJ))$/i, 'symbol 必须是 6 位 A 股代码，可带 SH/SZ/BJ 前后缀').describe('明确的股票代码，例如 002230、002230.SZ 或 SH600519；若只有名称，请先用 search_stock。'),
+      },
+    },
+    async ({ symbol }) => {
+      try {
+        const code = normalizeSymbol(symbol);
+        const raw = providers.getStockFactSnapshot
+          ? await providers.getStockFactSnapshot(code)
+          : await buildQuoteFactSnapshot(code);
+        const snapshot = compactStockFactSnapshot(raw);
+        return { content: [{ type: 'text' as const, text: JSON.stringify(snapshot, null, 2) }] };
+      } catch (error: any) {
+        return { isError: true, content: [{ type: 'text' as const, text: JSON.stringify(toMcpError(error)) }] };
       }
     },
   );
