@@ -1,10 +1,10 @@
 import { useState } from 'react';
 import { AlertTriangle, CheckCircle2, Clock3, Database, ShieldAlert } from 'lucide-react';
-import type { Direction, HoldAssessment, HorizonView } from '../../../shared/managerStance';
+import type { Direction, HoldAssessment, HorizonView, ResearchScoreBand } from '../../../shared/managerStance';
 
 interface Props {
   stock: { name: string; code: string; price: number; changePercent: number };
-  stance?: { direction: Direction; holdAssessment: HoldAssessment; confidence: number | null; horizons?: { short?: HorizonView; medium?: HorizonView; long?: HorizonView } };
+  stance?: { direction: Direction; holdAssessment: HoldAssessment; researchScore?: number | null; scoreBand?: ResearchScoreBand; evidenceCoverage?: number; confidence: number | null; horizons?: { short?: HorizonView; medium?: HorizonView; long?: HorizonView } };
   researchStatus?: string;
   riskLevel?: string;
   conclusion?: string;
@@ -14,10 +14,10 @@ interface Props {
   aiFallback?: boolean;
 }
 
-const directions: Record<Direction, { label: string; tone: string }> = {
-  bullish: { label: '看多', tone: 'text-rose-700' }, lean_bullish: { label: '偏多', tone: 'text-rose-700' },
-  neutral: { label: '中性', tone: 'text-slate-800' }, lean_bearish: { label: '偏空', tone: 'text-emerald-700' },
-  bearish: { label: '看空', tone: 'text-emerald-700' }, unknown: { label: '暂不可判断', tone: 'text-slate-600' },
+const scoreBands: Record<ResearchScoreBand, { label: string; tone: string }> = {
+  strong: { label: '信号较强', tone: 'text-indigo-700' }, positive: { label: '证据偏积极', tone: 'text-sky-700' },
+  mixed: { label: '信息分歧', tone: 'text-slate-800' }, cautious: { label: '偏谨慎', tone: 'text-amber-800' },
+  risk: { label: '风险偏高', tone: 'text-rose-800' }, insufficient: { label: '资料不足', tone: 'text-slate-600' },
 };
 const holds: Record<HoldAssessment, { label: string; tone: string; surface: string }> = {
   hold: { label: '可继续持有', tone: 'text-rose-700', surface: 'border-rose-100 bg-rose-50' },
@@ -34,12 +34,12 @@ const statuses: Record<string, { label: string; tone: string; icon: typeof Check
 const riskLevels: Record<string, string> = { high: '高', medium: '中', low: '低', clear: '未触发' };
 
 function Horizon({ name, range, value }: { name: string; range: string; value?: HorizonView }) {
-  const direction = directions[value?.direction || 'unknown']; const hold = holds[value?.holdAssessment || 'unknown'];
-  return <div className="min-w-0 rounded-xl border border-slate-200 bg-white p-3"><div className="flex flex-wrap items-center justify-between gap-1"><span className="text-[11px] font-bold text-slate-800">{name}</span><span className="text-[9px] text-slate-500">{range}</span></div><div className="mt-2 flex flex-wrap items-baseline gap-x-3 gap-y-1"><p className={`text-lg font-bold ${direction.tone}`}>倾向：{direction.label}</p><p className={`text-[11px] font-semibold ${hold.tone}`}>持有评估：{hold.label}</p></div><div className="mt-2 flex items-center justify-between text-[10px] text-slate-500"><span>置信度</span><span className="font-mono font-semibold text-slate-700">{value?.confidence == null ? '--' : `${value.confidence}%`}</span></div>{(value?.rationale || []).length > 0 && <div className="mt-3 border-t border-slate-100 pt-2"><p className="text-[10px] font-bold text-slate-600">依据</p><ul className="mt-1 space-y-1">{value!.rationale.slice(0, 3).map((item, index) => <li className="flex gap-1.5 text-[10px] leading-relaxed text-slate-700" key={`${item}-${index}`}><span aria-hidden="true">•</span><span className="min-w-0 break-words">{item}</span></li>)}</ul></div>}{(value?.invalidationConditions || []).length > 0 && <div className="mt-3 rounded-lg bg-amber-50 p-2"><p className="text-[10px] font-bold text-amber-900">失效条件</p><ul className="mt-1 space-y-1">{value!.invalidationConditions.slice(0, 2).map((item, index) => <li className="flex gap-1.5 text-[10px] leading-relaxed text-amber-900" key={`${item}-${index}`}><span aria-hidden="true">•</span><span className="min-w-0 break-words">{item}</span></li>)}</ul></div>}</div>;
+  const scoreBand = scoreBands[value?.scoreBand || 'insufficient']; const hold = holds[value?.holdAssessment || 'unknown'];
+  return <div className="min-w-0 rounded-xl border border-slate-200 bg-white p-3"><div className="flex flex-wrap items-center justify-between gap-1"><span className="text-[11px] font-bold text-slate-800">{name}</span><span className="text-[9px] text-slate-500">{range}</span></div><div className="mt-2 flex flex-wrap items-baseline gap-x-3 gap-y-1"><p className={`text-lg font-bold ${scoreBand.tone}`}>研究信号：{value?.researchScore == null ? '资料不足' : `${value.researchScore} / 100`}</p><p className={`text-[11px] font-semibold ${scoreBand.tone}`}>状态：{scoreBand.label}</p><p className={`text-[11px] font-semibold ${hold.tone}`}>持有评估：{hold.label}</p></div><div className="mt-2 grid grid-cols-2 gap-2 text-[10px] text-slate-500"><div className="flex items-center justify-between"><span>证据覆盖</span><span className="font-mono font-semibold text-slate-700">{value?.evidenceCoverage == null ? '--' : `${value.evidenceCoverage}%`}</span></div><div className="flex items-center justify-between"><span>置信度</span><span className="font-mono font-semibold text-slate-700">{value?.confidence == null ? '--' : `${value.confidence}%`}</span></div></div>{(value?.rationale || []).length > 0 && <div className="mt-3 border-t border-slate-100 pt-2"><p className="text-[10px] font-bold text-slate-600">依据</p><ul className="mt-1 space-y-1">{value!.rationale.slice(0, 3).map((item, index) => <li className="flex gap-1.5 text-[10px] leading-relaxed text-slate-700" key={`${item}-${index}`}><span aria-hidden="true">•</span><span className="min-w-0 break-words">{item}</span></li>)}</ul></div>}{(value?.invalidationConditions || []).length > 0 && <div className="mt-3 rounded-lg bg-amber-50 p-2"><p className="text-[10px] font-bold text-amber-900">失效条件</p><ul className="mt-1 space-y-1">{value!.invalidationConditions.slice(0, 2).map((item, index) => <li className="flex gap-1.5 text-[10px] leading-relaxed text-amber-900" key={`${item}-${index}`}><span aria-hidden="true">•</span><span className="min-w-0 break-words">{item}</span></li>)}</ul></div>}</div>;
 }
 
 export function StockResearchOverview({ stock, stance, researchStatus, riskLevel, conclusion, evidenceCount, loading, error, aiFallback = false }: Props) {
-  const direction = directions[stance?.direction || 'unknown']; const hold = holds[stance?.holdAssessment || 'unknown']; const status = statuses[researchStatus || 'blocked'] || statuses.blocked; const StatusIcon = status.icon;
+  const scoreBand = scoreBands[stance?.scoreBand || 'insufficient']; const hold = holds[stance?.holdAssessment || 'unknown']; const status = statuses[researchStatus || 'blocked'] || statuses.blocked; const StatusIcon = status.icon;
   const hasQuote = Number.isFinite(stock.price) && stock.price > 0;
   const [selectedHorizon, setSelectedHorizon] = useState<'short' | 'medium' | 'long'>('short');
   const horizons = [
@@ -66,11 +66,13 @@ export function StockResearchOverview({ stock, stance, researchStatus, riskLevel
       <span className={`inline-flex shrink-0 items-center gap-1 rounded-full bg-white/70 px-2.5 py-1 text-[10px] font-bold ${status.tone}`}><StatusIcon className="h-3.5 w-3.5" />{loading ? '正在加载' : status.label}</span>
     </div>
     <div className="mt-4 border-t border-black/5 pt-3">
-      <p className="text-[10px] font-bold text-slate-600">持有评估</p>
+      <p className="text-[10px] font-bold text-slate-600">研究信号</p>
       <div className="mt-1 flex flex-wrap items-baseline gap-x-3 gap-y-1">
-        <h1 className={`text-2xl font-bold ${hold.tone}`}>{loading ? '正在评估' : hold.label}</h1>
-        <span className={`text-sm font-semibold ${direction.tone}`}>综合倾向：{loading ? '汇总中' : direction.label}</span>
+        <h1 className={`text-2xl font-bold ${scoreBand.tone}`}>{loading ? '正在评估' : stance?.researchScore == null ? '资料不足' : `${stance.researchScore} / 100`}</h1>
+        <span className={`text-sm font-semibold ${scoreBand.tone}`}>状态：{loading ? '汇总中' : scoreBand.label}</span>
+        <span className={`text-xs font-semibold ${hold.tone}`}>持有评估：{loading ? '汇总中' : hold.label}</span>
       </div>
+      <p className="mt-1 text-[10px] text-slate-500">证据覆盖：{loading || stance?.evidenceCoverage == null ? '--' : `${stance.evidenceCoverage}%`} · 置信度：{loading || stance?.confidence == null ? '--' : `${stance.confidence}%`}</p>
       <p className={`mt-2 break-words text-xs leading-relaxed ${error ? 'text-rose-800' : 'text-slate-700'}`}>{loading ? '正在汇总基本面、技术、事件和风险信号。' : error || conclusionText || '当前暂无确定性结论。'}</p>
       {aiFallbackText && <p className="mt-2 break-words rounded-lg bg-amber-50 px-3 py-2 text-xs font-medium leading-relaxed text-amber-900">{aiFallbackText}</p>}
     </div>

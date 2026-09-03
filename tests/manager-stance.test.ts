@@ -21,6 +21,8 @@ test('builds horizon-specific hold assessments from deterministic signals', () =
   });
   assert.equal(stance.horizons.short.direction, 'bullish');
   assert.equal(stance.horizons.medium.holdAssessment, 'hold');
+  assert.ok((stance.horizons.medium.researchScore || 0) > 50);
+  assert.ok(['positive', 'strong'].includes(stance.horizons.medium.scoreBand));
   assert.ok(stance.horizons.long.confidence !== null);
 });
 
@@ -29,6 +31,7 @@ test('risk veto caps the stance at avoid across every horizon', () => {
   for (const horizon of Object.values(stance.horizons)) {
     assert.equal(horizon.direction, 'bearish');
     assert.equal(horizon.holdAssessment, 'avoid');
+    assert.ok((horizon.researchScore || 0) <= 35);
   }
 });
 
@@ -37,6 +40,8 @@ test('blocked input never becomes a bullish or bearish guess', () => {
   assert.equal(stance.direction, 'unknown');
   assert.equal(stance.holdAssessment, 'unknown');
   assert.equal(stance.horizons.short.direction, 'unknown');
+  assert.equal(stance.horizons.short.researchScore, null);
+  assert.equal(stance.horizons.short.scoreBand, 'insufficient');
 });
 
 test('can present different conclusions for short, medium and long horizons', () => {

@@ -10,126 +10,19 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { randomUUID } from 'node:crypto';
+import { OPEN_SOURCE_SCHEMA_VERSION, resultEnvelope } from '../core/contracts.js';
+import { buildQuoteFactSnapshot as buildQuoteFactSnapshotCore } from '../core/factSnapshotFallback.js';
+import { buildMarketObservation as buildMarketObservationCore } from '../core/marketObservation.js';
+import { fetchMarketOverview as fetchMarketOverviewAdapter, fetchStockQuote as fetchStockQuoteAdapter, InvalidStockIdentifierError, isValidStockCode, normalizeSymbol, searchStocks as searchStocksAdapter } from '../dataSources/publicMarket.js';
 
 const MAX_STOCK_IDENTIFIER_LENGTH = 16;
 const MAX_STOCK_SEARCH_LENGTH = 64;
-const MAX_UPSTREAM_RESPONSE_BYTES = 1024 * 1024;
-
-class UpstreamResponseTooLargeError extends Error {
-  constructor() {
-    super('上游响应超过安全大小限制');
-    this.name = 'UpstreamResponseTooLargeError';
-  }
-}
-
-function httpGetText(urlStr: string, referer = 'https://gu.qq.com/', encoding = 'utf-8'): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const u = new URL(urlStr);
-    const mod = u.protocol === 'http:' ? import('node:http').then((m) => m.default) : import('node:https').then((m) => m.default);
-    mod.then((httpMod) => {
-      const req = httpMod.get(
-        {
-          hostname: u.hostname,
-          path: u.pathname + u.search,
-          headers: { 'User-Agent': 'Mozilla/5.0', Referer: referer },
-        },
-        (res: any) => {
-          const chunks: Buffer[] = [];
-          let receivedBytes = 0;
-          res.on('data', (chunk: Buffer) => {
-            const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-            receivedBytes += buffer.length;
-            if (receivedBytes > MAX_UPSTREAM_RESPONSE_BYTES) {
-              req.destroy(new UpstreamResponseTooLargeError());
-              return;
-            }
-            chunks.push(buffer);
-          });
-          res.on('end', () => {
-            if (res.statusCode && res.statusCode >= 400) {
-              reject(new Error(`HTTP ${res.statusCode}`));
-              return;
-            }
-            resolve(new TextDecoder(encoding).decode(Buffer.concat(chunks)));
-          });
-        },
-      );
-      req.on('error', reject);
-      req.setTimeout(10000, () => {
-        req.destroy();
-        reject(new Error('Timeout'));
-      });
-    });
-  });
-}
-
-function httpGetJSON(urlStr: string): Promise<any> {
-  return new Promise((resolve, reject) => {
-    const u = new URL(urlStr);
-    const mod = u.protocol === 'http:' ? import('node:http').then((m) => m.default) : import('node:https').then((m) => m.default);
-    mod.then((httpMod) => {
-      const req = httpMod.get(
-        {
-          hostname: u.hostname,
-          family: 4,
-          path: u.pathname + u.search,
-          headers: { 'User-Agent': 'Mozilla/5.0' },
-        },
-        (res: any) => {
-          let data = '';
-          let receivedBytes = 0;
-          res.setEncoding('utf8');
-          res.on('data', (chunk: string) => {
-            receivedBytes += Buffer.byteLength(chunk, 'utf8');
-            if (receivedBytes > MAX_UPSTREAM_RESPONSE_BYTES) {
-              req.destroy(new UpstreamResponseTooLargeError());
-              return;
-            }
-            data += chunk;
-          });
-          res.on('end', () => {
-            if (res.statusCode && res.statusCode >= 400) {
-              reject(new Error(`HTTP ${res.statusCode}`));
-              return;
-            }
-            try {
-              resolve(JSON.parse(data));
-            } catch {
-              reject(new Error('JSON parse failed'));
-            }
-          });
-        },
-      );
-      req.on('error', reject);
-      req.setTimeout(10000, () => {
-        req.destroy();
-        reject(new Error('Timeout'));
-      });
-    });
-  });
-}
-
-function normalizeSymbol(input: string): string {
-  return String(input || '').trim().toUpperCase().replace(/\.(SH|SZ|BJ)$|^(SH|SZ|BJ)/, '');
-}
-
-class InvalidStockIdentifierError extends Error {
-  constructor(input: string) {
-    const raw = String(input || '').trim();
-    const preview = raw.length > 32 ? `${raw.slice(0, 32)}…` : raw || '空值';
-    super(`请提供具体 A 股代码或股票名称，例如“002230”或“科大讯飞”。“${preview}”不是可查询的证券标识。`);
-    this.name = 'InvalidStockIdentifierError';
-  }
-}
 
 function toMcpError(error: unknown) {
   const message = String((error as Error)?.message || '未知错误');
   if (error instanceof InvalidStockIdentifierError) return { error: 'invalid_argument', message, retryable: false };
+  if (error instanceof McpFeatureUnavailableError) return { error: 'feature_unavailable', message, retryable: false };
   return { error: 'upstream_error', trace_id: randomUUID(), message, retryable: true };
-}
-
-function isValidStockCode(input: string) {
-  return /^\d{6}$/.test(normalizeSymbol(input));
 }
 
 export type McpDataProviders = {
@@ -137,58 +30,19 @@ export type McpDataProviders = {
   getMarketObservation?: () => Promise<unknown>;
   /** 由宿主应用注入的个股事实快照；不得包含 AI 结论。 */
   getStockFactSnapshot?: (symbol: string) => Promise<unknown>;
+  /** 由宿主应用注入的妙想条件筛选能力；密钥只保留在宿主服务端。 */
+  screenStocks?: (query: string, forceRefresh: boolean) => Promise<unknown>;
 };
 
-function round(value: number, digits = 2) {
-  const factor = 10 ** digits;
-  return Math.round(value * factor) / factor;
+class McpFeatureUnavailableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'McpFeatureUnavailableError';
+  }
 }
 
-/** 将指数与板块原始行情转换为可复核、无预测性的市场观察。 */
 export function buildMarketObservation(overview: any) {
-  const indices = Array.isArray(overview?.indices) ? overview.indices : [];
-  const usableIndices = indices.filter((item: any) => Number.isFinite(Number(item?.changePercent)));
-  const upCount = usableIndices.filter((item: any) => Number(item.changePercent) > 0).length;
-  const downCount = usableIndices.filter((item: any) => Number(item.changePercent) < 0).length;
-  const averageChange = usableIndices.length
-    ? usableIndices.reduce((sum: number, item: any) => sum + Number(item.changePercent), 0) / usableIndices.length
-    : null;
-  const marketState = !usableIndices.length
-    ? '数据有限'
-    : upCount === usableIndices.length && Number(averageChange) >= 0.5
-      ? '指数普遍走强'
-      : downCount === usableIndices.length && Number(averageChange) <= -0.5
-        ? '指数普遍走弱'
-        : upCount > 0 && downCount > 0
-          ? '指数表现分歧'
-          : Number(averageChange) > 0
-            ? '指数偏强'
-            : Number(averageChange) < 0
-              ? '指数偏弱'
-              : '指数平稳';
-  const topSectors = Array.isArray(overview?.topSectors) ? overview.topSectors : [];
-  const sourceMeta = overview?.sourceMeta || null;
-  const dataGaps: string[] = [];
-  if (usableIndices.length < 3) dataGaps.push(`三大指数仅取得 ${usableIndices.length}/3 条有效涨跌数据。`);
-  if (!topSectors.length) dataGaps.push('未取得当日领涨板块数据。');
-
-  return {
-    observation: {
-      marketState,
-      indexBreadth: { up: upCount, down: downCount, flat: Math.max(0, usableIndices.length - upCount - downCount), total: usableIndices.length },
-      averageIndexChangePercent: averageChange === null ? null : round(averageChange),
-      indices,
-      topSectors,
-      bottomSectors: Array.isArray(overview?.bottomSectors) ? overview.bottomSectors : [],
-      marketBreadth: overview?.marketBreath || overview?.marketBreadth || null,
-      marketTemperature: overview?.marketTemperature ?? null,
-      marketStatus: overview?.marketStatus || null,
-    },
-    dataAsOf: overview?.timestamp || overview?.fetchedAt || new Date().toISOString(),
-    sourceMeta,
-    dataGaps,
-    scope: '仅反映当前已取得的市场事实，不预测后续涨跌，也不构成交易建议。',
-  };
+  return buildMarketObservationCore(overview);
 }
 
 /** MCP 只输出研究底座所需的紧凑字段，避免内部缓存、原文和 AI 输出泄露。 */
@@ -202,6 +56,7 @@ export function compactStockFactSnapshot(raw: any) {
   const financialTrends = raw?.facts?.financialTrends || null;
 
   return {
+    schemaVersion: OPEN_SOURCE_SCHEMA_VERSION,
     symbol: String(raw?.symbol || quote?.code || ''),
     company: {
       name: String(raw?.company?.name || quote?.name || ''),
@@ -251,160 +106,45 @@ export function compactStockFactSnapshot(raw: any) {
   };
 }
 
-async function buildQuoteFactSnapshot(symbol: string) {
-  const quote = await fetchStockQuote(symbol);
-  const fetchedAt = new Date().toISOString();
-  return compactStockFactSnapshot({
-    symbol: quote.code,
-    company: { name: quote.name, profile: {}, financialTemplate: null },
-    facts: { quote, financialReports: [], financialCalculations: null, financialTrends: null, technical: null, announcements: [] },
-    evidence: Object.entries(quote)
-      .filter(([key, value]) => !['code', 'name', 'source'].includes(key) && value !== null && value !== undefined)
-      .map(([key, value]) => ({
-        evidenceId: `market:${quote.code}:${key}:${fetchedAt.replace(/[^0-9]/g, '')}`,
-        type: 'market', title: `${quote.name} ${key}`, value, source: quote.source,
-        fetchedAt, freshness: 'realtime', verification: 'third_party',
-      })),
-    dataGaps: ['当前 MCP 实例未注入应用的财务、技术与公告快照提供器，仅返回实时行情事实。'],
-    snapshotMeta: { generatedAt: fetchedAt, source: 'mcp-quote-fallback', freshness: 'realtime' },
-  });
-}
-
-/** 查询 A 股实时行情（腾讯为主，新浪兜底） */
-async function fetchStockQuote(symbol: string) {
-  const code = normalizeSymbol(symbol);
-  if (!/^\d{6}$/.test(code)) throw new InvalidStockIdentifierError(symbol);
-  const market = code.startsWith('6') || code.startsWith('5') || code.startsWith('9') ? 'sh' : 'sz';
-
-  // 腾讯
-  const tencentText = await httpGetText(`https://qt.gtimg.cn/q=${market}${code}`, 'https://gu.qq.com/', 'gb18030');
-  const tMatch = tencentText.match(new RegExp(`v_${market}${code}="([^"]*)"`));
-  const t = tMatch?.[1]?.split('~') || [];
-  const tPrice = Number(t[3]);
-  if (Number.isFinite(tPrice) && tPrice > 0) {
-    return {
-      code,
-      name: t[1] || code,
-      price: Math.round(tPrice * 100) / 100,
-      change: Math.round((Number(t[31]) || 0) * 100) / 100,
-      changePercent: Math.round((Number(t[32]) || 0) * 100) / 100,
-      high: Number(t[33]) || null,
-      low: Number(t[34]) || null,
-      open: Number(t[5]) || null,
-      previousClose: Number(t[4]) || null,
-      volume: Number(t[6]) || 0,
-      amount: Number(t[37]) || 0,
-      source: 'tencent',
-    };
-  }
-
-  // 新浪兜底
-  const sinaSymbol = `${market === 'sh' ? 'sh' : 'sz'}${code}`;
-  const sinaText = await httpGetText(`https://hq.sinajs.cn/list=${sinaSymbol}`, 'https://finance.sina.com.cn/', 'gb18030');
-  const sMatch = sinaText.match(new RegExp(`hq_str_${sinaSymbol}="([^"]*)"`));
-  const s = sMatch?.[1]?.split(',') || [];
-  const sPrice = Number(s[3]);
-  if (!Number.isFinite(sPrice) || sPrice <= 0) throw new Error('行情源均不可用');
-  const prevClose = Number(s[2]);
+/** 条件筛选输出只保留研究候选与数据口径，不把服务端配置暴露给 MCP 调用方。 */
+export function compactStockScreeningResult(raw: any) {
+  const columns = Array.isArray(raw?.columns) ? raw.columns.slice(0, 30) : [];
+  const rows = Array.isArray(raw?.rows) ? raw.rows.slice(0, 100) : [];
   return {
-    code,
-    name: s[0] || code,
-    price: Math.round(sPrice * 100) / 100,
-    change: Math.round((sPrice - prevClose) * 100) / 100,
-    changePercent: prevClose ? Math.round(((sPrice - prevClose) / prevClose) * 10000) / 100 : 0,
-    high: Number(s[4]) || null,
-    low: Number(s[5]) || null,
-    open: Number(s[1]) || null,
-    previousClose: prevClose || null,
-    volume: Number(s[8]) || 0,
-    amount: Number(s[9]) || 0,
-    source: 'sina',
+    schemaVersion: OPEN_SOURCE_SCHEMA_VERSION,
+    query: String(raw?.query || ''),
+    title: String(raw?.title || '条件筛选候选池'),
+    conditions: Array.isArray(raw?.conditions) ? raw.conditions.slice(0, 12) : [],
+    totalCondition: raw?.totalCondition || null,
+    selectLogic: raw?.selectLogic || null,
+    total: Number.isFinite(Number(raw?.total)) ? Number(raw.total) : rows.length,
+    columns,
+    rows,
+    displayedRows: rows.length,
+    dataSource: raw?.dataSource || 'empty',
+    sourceMeta: raw?.sourceMeta || null,
+    dataGaps: rows.length >= 100 ? ['MCP 响应最多展示前 100 条候选；总命中数见 total。'] : [],
+    scope: '结果仅表示条件命中形成的研究候选池，不构成买卖推荐、收益承诺或自动交易指令。',
   };
 }
 
-type StockSearchResult = { code: string; name: string; exchange: 'SH' | 'SZ' | 'BJ' };
-
-function normalizeSearchResult(code: unknown, name: unknown, exchange?: unknown): StockSearchResult | null {
-  const normalizedCode = String(code || '').replace(/\D/g, '');
-  const normalizedName = String(name || '').trim();
-  if (!/^\d{6}$/.test(normalizedCode) || !normalizedName) return null;
-  const rawExchange = String(exchange || '').toUpperCase();
-  const market: 'SH' | 'SZ' | 'BJ' = rawExchange === 'BJ' || /^[48]/.test(normalizedCode)
-    ? 'BJ' : rawExchange === 'SH' || /^(5|6|9)/.test(normalizedCode) ? 'SH' : 'SZ';
-  return { code: normalizedCode, name: normalizedName, exchange: market };
+export async function buildQuoteFactSnapshot(symbol: string) {
+  return buildQuoteFactSnapshotCore(symbol);
 }
 
-async function searchStocks(query: string): Promise<StockSearchResult[]> {
-  const keyword = String(query || '').trim();
-  if (!keyword || /^股票行情$|^行情$|^股市$/.test(keyword)) throw new InvalidStockIdentifierError(keyword);
-  const matches = new Map<string, StockSearchResult>();
-  try {
-    const payload = await httpGetJSON(`https://searchapi.eastmoney.com/api/suggest/get?input=${encodeURIComponent(keyword)}&type=14&token=D43BF722C1B2D6D0F3513D2F4B09D208&count=10`);
-    const rows = Array.isArray(payload?.QuotationCodeTable?.Data) ? payload.QuotationCodeTable.Data : [];
-    for (const item of rows) {
-      const kind = String(item?.Classify || item?.SecurityTypeName || '');
-      if (kind && !/AStock|A股|沪A|深A|北交/.test(kind)) continue;
-      const quoteId = String(item?.QuoteID || '');
-      const result = normalizeSearchResult(item?.Code || item?.UnifiedCode, item?.Name, quoteId.startsWith('1.') ? 'SH' : quoteId.startsWith('0.') ? 'SZ' : undefined);
-      if (result) matches.set(result.code, result);
-    }
-  } catch {
-    // Fall through to the Sina suggestion endpoint.
-  }
-  if (!matches.size) {
-    try {
-      const text = await httpGetText(`https://suggest3.sinajs.cn/suggest/type=11,12,13,14,15/&key=${encodeURIComponent(keyword)}`, 'https://finance.sina.com.cn/', 'gb18030');
-      for (const item of text.matchAll(/"([a-z]{2})(\d{6}),[^,]*,([^,]+),/gi)) {
-        const result = normalizeSearchResult(item[2], item[3], item[1].toUpperCase());
-        if (result) matches.set(result.code, result);
-      }
-    } catch {
-      // Error is normalized below.
-    }
-  }
-  if (!matches.size) throw new Error('股票搜索数据源暂不可用或未找到匹配证券');
-  return [...matches.values()].slice(0, 10);
+/** 查询 A 股实时行情（腾讯为主，新浪兜底） */
+export async function fetchStockQuote(symbol: string) {
+  return fetchStockQuoteAdapter(symbol);
+}
+
+export async function searchStocks(query: string) {
+  return searchStocksAdapter(query);
 }
 
 
 /** 市场概览（指数 + 领涨板块） */
-async function fetchMarketOverview() {
-  const indexDefs = [
-    { secid: '1.000001', name: '上证指数' },
-    { secid: '0.399001', name: '深证成指' },
-    { secid: '0.399006', name: '创业板指' },
-  ];
-  const indices = await Promise.all(
-    indexDefs.map(async (item) => {
-      try {
-        const d = await httpGetJSON(`https://push2.eastmoney.com/api/qt/stock/get?secid=${item.secid}&fields=f43,f44,f45,f46,f47,f48,f60,f170,f100`);
-        const q = d?.data || {};
-        const price = Number(q.f43) / 100;
-        return {
-          name: item.name,
-          price: Number.isFinite(price) ? Math.round(price * 100) / 100 : null,
-          changePercent: Math.round((Number(q.f170) || 0) * 100) / 100,
-        };
-      } catch {
-        return { name: item.name, price: null, changePercent: null };
-      }
-    }),
-  );
-
-  let sectors: { name: string; changePercent: number }[] = [];
-  try {
-    const sectorData = await httpGetJSON(
-      'https://push2.eastmoney.com/api/qt/clist/get?pn=1&pz=5&po=1&np=1&fltt=2&invt=2&fid=f3&fs=m:90+t:2&fields=f2,f3,f12,f14',
-    );
-    sectors = (sectorData?.data?.diff || []).map((row: any) => ({
-      name: String(row.f14 || ''),
-      changePercent: Math.round(Number(row.f3 || 0) * 100) / 100,
-    }));
-  } catch {
-    // 板块源失败不影响整体返回
-  }
-
-  return { indices, topSectors: sectors, fetchedAt: new Date().toISOString() };
+export async function fetchMarketOverview() {
+  return fetchMarketOverviewAdapter();
 }
 
 export function createMcpServer(providers: McpDataProviders = {}): McpServer {
@@ -427,7 +167,10 @@ export function createMcpServer(providers: McpDataProviders = {}): McpServer {
       try {
         const quote = await fetchStockQuote(symbol);
         return {
-          content: [{ type: 'text' as const, text: JSON.stringify(quote, null, 2) }],
+          content: [{ type: 'text' as const, text: JSON.stringify(resultEnvelope('stock_quote', quote, {
+            sourceMeta: { source: String(quote.source || 'unknown'), fetchedAt: new Date().toISOString(), freshness: 'live' },
+            scope: '仅为当前已取得的行情事实，不构成交易建议。',
+          }), null, 2) }],
         };
       } catch (error: any) {
         return {
@@ -452,7 +195,10 @@ export function createMcpServer(providers: McpDataProviders = {}): McpServer {
         const results = isValidStockCode(query)
           ? [{ code: normalizeSymbol(query), name: '代码已识别，可调用 get_stock_quote 查询实时行情', exchange: /^(5|6|9)/.test(normalizeSymbol(query)) ? 'SH' as const : 'SZ' as const }]
           : await searchStocks(query);
-        return { content: [{ type: 'text' as const, text: JSON.stringify({ query, results }, null, 2) }] };
+        return { content: [{ type: 'text' as const, text: JSON.stringify(resultEnvelope('stock_search', { query, results }, {
+          sourceMeta: { source: 'eastmoney_sina_search', fetchedAt: new Date().toISOString(), freshness: 'live' },
+          scope: '仅返回证券身份匹配，不构成交易建议。',
+        }), null, 2) }] };
       } catch (error: any) {
         return { isError: true, content: [{ type: 'text' as const, text: JSON.stringify(toMcpError(error)) }] };
       }
@@ -471,7 +217,10 @@ export function createMcpServer(providers: McpDataProviders = {}): McpServer {
       try {
         const overview = await fetchMarketOverview();
         return {
-          content: [{ type: 'text' as const, text: JSON.stringify(overview, null, 2) }],
+          content: [{ type: 'text' as const, text: JSON.stringify(resultEnvelope('market_overview', overview, {
+            sourceMeta: { source: 'eastmoney_public_market', fetchedAt: String(overview.fetchedAt || new Date().toISOString()), freshness: 'live' },
+            scope: '仅反映已取得的市场事实，不预测涨跌，也不构成交易建议。',
+          }), null, 2) }],
         };
       } catch (error: any) {
         return {
@@ -495,7 +244,12 @@ export function createMcpServer(providers: McpDataProviders = {}): McpServer {
           ? await providers.getMarketObservation()
           : await fetchMarketOverview();
         const observation = buildMarketObservation(raw);
-        return { content: [{ type: 'text' as const, text: JSON.stringify(observation, null, 2) }] };
+        return { content: [{ type: 'text' as const, text: JSON.stringify(resultEnvelope('market_observation', observation, {
+          sourceMeta: observation.sourceMeta || { source: 'public_market', fetchedAt: observation.dataAsOf, freshness: 'unknown' },
+          dataGaps: observation.dataGaps,
+          scope: observation.scope,
+          generatedAt: observation.dataAsOf,
+        }), null, 2) }] };
       } catch (error: any) {
         return { isError: true, content: [{ type: 'text' as const, text: JSON.stringify(toMcpError(error)) }] };
       }
@@ -518,7 +272,39 @@ export function createMcpServer(providers: McpDataProviders = {}): McpServer {
           ? await providers.getStockFactSnapshot(code)
           : await buildQuoteFactSnapshot(code);
         const snapshot = compactStockFactSnapshot(raw);
-        return { content: [{ type: 'text' as const, text: JSON.stringify(snapshot, null, 2) }] };
+        return { content: [{ type: 'text' as const, text: JSON.stringify(resultEnvelope('stock_fact_snapshot', snapshot, {
+          sourceMeta: snapshot.snapshotMeta ? { source: String(snapshot.snapshotMeta.source || 'unknown'), fetchedAt: String(snapshot.snapshotMeta.generatedAt || new Date().toISOString()), freshness: snapshot.snapshotMeta.freshness === 'realtime' ? 'live' : 'unknown' } : null,
+          dataGaps: snapshot.dataGaps,
+          scope: snapshot.scope,
+        }), null, 2) }] };
+      } catch (error: any) {
+        return { isError: true, content: [{ type: 'text' as const, text: JSON.stringify(toMcpError(error)) }] };
+      }
+    },
+  );
+
+  server.registerTool(
+    'screen_stocks',
+    {
+      title: '按自然语言筛选 A 股候选池',
+      description: '使用服务端配置的东方财富妙想能力，根据行情、估值、财务、行业或指数成分等自然语言条件筛选 A 股研究候选池。仅返回条件命中、字段、数据时点和来源；不把候选池表述为买入推荐。',
+      inputSchema: {
+        query: z.string().trim().min(1).max(180).describe('自然语言筛选条件，例如“ROE 大于 15%，净利润持续增长的 A 股”；长度 1 至 180 字符。'),
+        refresh: z.boolean().optional().default(false).describe('是否绕过服务端缓存并回源请求；仅在用户明确要求刷新时设为 true。'),
+      },
+    },
+    async ({ query, refresh }) => {
+      try {
+        if (!providers.screenStocks) {
+          throw new McpFeatureUnavailableError('当前 MCP 实例未配置条件筛选提供器。请在产品服务中配置 MX_APIKEY 后调用。');
+        }
+        const raw = await providers.screenStocks(query, refresh);
+        const result = compactStockScreeningResult(raw);
+        return { content: [{ type: 'text' as const, text: JSON.stringify(resultEnvelope('stock_screening', result, {
+          sourceMeta: result.sourceMeta ? { ...result.sourceMeta, freshness: result.sourceMeta.freshness as 'live' | 'cache' } : null,
+          dataGaps: result.dataGaps,
+          scope: result.scope,
+        }), null, 2) }] };
       } catch (error: any) {
         return { isError: true, content: [{ type: 'text' as const, text: JSON.stringify(toMcpError(error)) }] };
       }

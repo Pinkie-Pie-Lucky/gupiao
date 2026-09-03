@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "paopao-market": {
+      "command": "npm",
+      "args": ["run", "mcp:stdio"],
+      "cwd": "/absolute/path/to/gupiao-main0805"
+    }
+  }
+}

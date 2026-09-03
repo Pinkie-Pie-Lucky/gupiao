@@ -1,0 +1,45 @@
+# 开源一键运行：复制 .env.example 为 .env 并填好 POSTGRES_PASSWORD（AI、妙想等能力按需配置）。
+# 启动：docker compose -f docker-compose.open-source.yml up --build
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: production
+      PORT: "8080"
+      DATABASE_URL: postgresql://${POSTGRES_USER:-gupiao}:${POSTGRES_PASSWORD:?请先在 .env 中设置 POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-gupiao}
+    ports:
+      - "${APP_PORT:-8080}:8080"
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "node -e 'fetch(\"http://127.0.0.1:8080/health\").then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))'"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 45s
+
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-gupiao}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?请先在 .env 中设置 POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-gupiao}
+    volumes:
+      - paopao-open-source-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  paopao-open-source-db:

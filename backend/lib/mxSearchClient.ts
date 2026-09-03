@@ -1,3 +1,5 @@
+import { withRetry } from './resilience.js';
+
 export type MxSearchClientOptions = {
   apiKey?: string;
   baseUrl?: string;
@@ -55,12 +57,12 @@ export function createMxSearchClient(options: MxSearchClientOptions = {}) {
       health = { ...health, lastAttemptAt: attemptedAt };
       let response: Response;
       try {
-        response = await fetchImpl(baseUrl, {
+        response = await withRetry(() => fetchImpl(baseUrl, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json; charset=UTF-8', apikey: apiKey },
           body: JSON.stringify({ query: cleaned }),
           signal: AbortSignal.timeout(timeoutMs),
-        });
+        }), { attempts: Number(process.env.UPSTREAM_RETRY_ATTEMPTS) || 2 });
       } catch (error: any) {
         const message = String(error?.message || '网络错误').slice(0, 160);
         health = { ...health, status: 'degraded', lastError: message, consecutiveFailures: health.consecutiveFailures + 1 };

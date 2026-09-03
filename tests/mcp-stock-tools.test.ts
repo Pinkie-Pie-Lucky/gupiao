@@ -10,13 +10,17 @@ test('generic market phrase is not a stock code', () => {
 });
 
 test('MCP stock-tool source contains name lookup and typed invalid-input response', async () => {
-  const source = await (await import('node:fs/promises')).readFile(new URL('../backend/mcp/server.ts', import.meta.url), 'utf8');
-  assert.match(source, /'search_stock'/);
-  assert.match(source, /invalid_argument/);
-  assert.match(source, /InvalidStockIdentifierError/);
-  assert.match(source, /MAX_STOCK_IDENTIFIER_LENGTH/);
-  assert.match(source, /MAX_UPSTREAM_RESPONSE_BYTES/);
-  assert.match(source, /\.max\(MAX_STOCK_IDENTIFIER_LENGTH\)/);
+  const fs = await import('node:fs/promises');
+  const mcpSource = await fs.readFile(new URL('../backend/mcp/server.ts', import.meta.url), 'utf8');
+  const adapterSource = await fs.readFile(new URL('../backend/dataSources/publicMarket.ts', import.meta.url), 'utf8');
+  assert.match(mcpSource, /'search_stock'/);
+  assert.match(mcpSource, /invalid_argument/);
+  assert.match(mcpSource, /InvalidStockIdentifierError/);
+  assert.match(mcpSource, /MAX_STOCK_IDENTIFIER_LENGTH/);
+  assert.match(mcpSource, /\.max\(MAX_STOCK_IDENTIFIER_LENGTH\)/);
+  assert.match(adapterSource, /MAX_UPSTREAM_RESPONSE_BYTES/);
+  assert.match(adapterSource, /fetchStockQuote/);
+  assert.match(adapterSource, /searchStocks/);
 });
 
 test('MCP endpoint has bounded request size and concurrency', async () => {

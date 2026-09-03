@@ -1,0 +1,25 @@
+{
+  "schemaVersion": "paopao-open-source.v1",
+  "kind": "market_observation",
+  "generatedAt": "2026-01-02T01:30:00.000Z",
+  "data": {
+    "observation": {
+      "marketState": "示例数据",
+      "indexBreadth": { "up": 2, "down": 1, "flat": 0, "total": 3 },
+      "averageIndexChangePercent": 0.42,
+      "indices": [
+        { "name": "上证指数", "price": 3200.12, "changePercent": 0.35 },
+        { "name": "深证成指", "price": 10020.56, "changePercent": 0.62 },
+        { "name": "创业板指", "price": 2100.34, "changePercent": -0.11 }
+      ],
+      "topSectors": [{ "name": "示例板块", "changePercent": 1.2 }]
+    },
+    "dataAsOf": "2026-01-02T01:30:00.000Z",
+    "sourceMeta": { "source": "fixture", "fetchedAt": "2026-01-02T01:30:00.000Z", "freshness": "fixture" },
+    "dataGaps": ["这是离线示例，不代表真实市场。"],
+    "scope": "仅用于本地开发和接口联调。"
+  },
+  "sourceMeta": { "source": "fixture", "fetchedAt": "2026-01-02T01:30:00.000Z", "freshness": "fixture" },
+  "dataGaps": ["这是离线示例，不代表真实市场。"],
+  "scope": "仅用于本地开发和接口联调。"
+}

@@ -23,8 +23,9 @@ import { useDeviceLayout } from './hooks/useDeviceLayout';
 
 type TabId = 'home' | 'market-map' | 'watchlist' | 'ai-teacher' | 'mine' | 'stock-research' | 'stock-screener' | 'admin';
 
-// 个人中心与账号登录：基于服务端 PostgreSQL 存储（手机号 + 密码 + JWT）。
-const ACCOUNT_FEATURE_ENABLED = true;
+// 临时关闭登录/注册入口，供公开预览和功能验收使用。
+// 认证 API、数据库与 LoginScreen 均保留；恢复时改回 true 即可。
+const ACCOUNT_FEATURE_ENABLED = false;
 
 const normalizeWatchlistCode = (code: string) => String(code || '').trim().toUpperCase().replace(/^(SH|SZ)/, '').replace(/\.(SH|SZ)$/, '');
 
@@ -39,7 +40,7 @@ const formatQuoteAmount = (value: number | null | undefined) => Number.isFinite(
 export default function App() {
   const [darkMode, setDarkMode] = useState(() => window.localStorage.getItem('bubble-theme') === 'dark');
   const deviceLayout = useDeviceLayout();
-  const [account, setAccount] = useState<SessionUser | null>(() => getSessionUser());
+  const [account, setAccount] = useState<SessionUser | null>(() => ACCOUNT_FEATURE_ENABLED ? getSessionUser() : null);
   const [authReady, setAuthReady] = useState(false);
   const [activeTab, setActiveTab] = useState<TabId>('home');
   const [selectedSectorId, setSelectedSectorId] = useState<string | null>(null);
@@ -97,9 +98,13 @@ export default function App() {
   useEffect(() => {
     const handleAddStock = (e: Event) => {
       const customEvent = e as CustomEvent<StockItem>;
-      if (!customEvent.detail) return;
-      const newStock = customEvent.detail;
-      const symbol = normalizeWatchlistCode(newStock.code);
+    if (!customEvent.detail) return;
+    const newStock = customEvent.detail;
+    const symbol = normalizeWatchlistCode(newStock.code);
+      if (!ACCOUNT_FEATURE_ENABLED) {
+        setFollowedStocks((prev) => prev.some((stock) => normalizeWatchlistCode(stock.code) === symbol) ? prev : [newStock, ...prev]);
+        return;
+      }
       void apiWatchlistAdd(symbol, newStock.name)
         .then((entry) => {
           setFollowedStocks((prev) =>
@@ -116,7 +121,7 @@ export default function App() {
   // 登录/切换账号后从服务端加载自选股
   useEffect(() => {
     if (!account) {
-      setFollowedStocks([]);
+      if (ACCOUNT_FEATURE_ENABLED) setFollowedStocks([]);
       return;
     }
     let cancelled = false;
@@ -137,6 +142,11 @@ export default function App() {
 
   // 恢复会话：有本地 token 则向后端校验；失效则清理
   useEffect(() => {
+    if (!ACCOUNT_FEATURE_ENABLED) {
+      setAccount(null);
+      setAuthReady(true);
+      return;
+    }
     let cancelled = false;
     (async () => {
       if (!getSessionUser()) {
@@ -185,6 +195,10 @@ export default function App() {
 
   const handleFollowResearchStock = (stock: StockItem) => {
     const symbol = normalizeWatchlistCode(stock.code);
+    if (!ACCOUNT_FEATURE_ENABLED) {
+      setFollowedStocks((prev) => prev.some((item) => normalizeWatchlistCode(item.code) === symbol) ? prev : [stock, ...prev]);
+      return;
+    }
     void apiWatchlistAdd(symbol, stock.name)
       .then((entry) => {
         setFollowedStocks((prev) =>
@@ -196,6 +210,7 @@ export default function App() {
 
   const handleRemoveWatchStock = async (symbol: string) => {
     setFollowedStocks((prev) => prev.filter((s) => normalizeWatchlistCode(s.code) !== symbol));
+    if (!ACCOUNT_FEATURE_ENABLED) return;
     try {
       await apiWatchlistRemove(symbol);
     } catch {
@@ -325,7 +340,7 @@ export default function App() {
                   onOpenResearch={handleOpenResearch}
                 />
               )}
-              {activeTab === 'stock-screener' && <StockScreenerTab followedStocks={followedStocks} onOpenResearch={handleOpenResearch} onFollowStock={handleFollowResearchStock} />}
+              {activeTab === 'stock-screener' && <StockScreenerTab followedStocks={followedStocks} onOpenResearch={handleOpenResearch} onFollowStock={handleFollowResearchStock} accountFeaturesEnabled={ACCOUNT_FEATURE_ENABLED} />}
               {activeTab === 'stock-research' && (researchStock ? (
                 <StockResearchTab stock={researchStock} followedStocks={followedStocks} onSelectStock={setResearchStock} onFollowStock={handleFollowResearchStock} onBack={() => setActiveTab('watchlist')} onAskTeacher={() => { handleAskTeacherAboutStock(researchStock.name, researchStock.code); setActiveTab('ai-teacher'); }} />
               ) : (

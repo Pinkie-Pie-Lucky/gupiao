@@ -76,10 +76,11 @@ test('keeps critical stock research copy as valid UTF-8 Chinese', () => {
   for (const mojibake of ['鐮旂┒', '涓偂', '璇佹嵁']) assert.ok(!source.includes(mojibake), `mojibake found: ${mojibake}`);
 });
 
-test('puts the Manager hold assessment and switchable three horizons in the first-screen component', () => {
+test('puts the Manager score and switchable three horizons in the first-screen component', () => {
   const source = fs.readFileSync(path.resolve('frontend/src/components/StockResearchOverview.tsx'), 'utf8');
-  for (const text of ['持有评估', '综合倾向', '周期结论', '短期', '中期', '长期', '置信度']) assert.ok(source.includes(text), `missing overview copy: ${text}`);
-  for (const field of ['holdAssessment', 'direction', 'horizons?.short', 'horizons?.medium', 'horizons?.long', 'role="tablist"', 'aria-selected']) assert.ok(source.includes(field), `missing Manager field: ${field}`);
+  for (const text of ['持有评估', '研究信号', '证据覆盖', '周期结论', '短期', '中期', '长期', '置信度']) assert.ok(source.includes(text), `missing overview copy: ${text}`);
+  for (const field of ['holdAssessment', 'researchScore', 'scoreBand', 'horizons?.short', 'horizons?.medium', 'horizons?.long', 'role="tablist"', 'aria-selected']) assert.ok(source.includes(field), `missing Manager field: ${field}`);
+  assert.ok(!source.includes('综合倾向'), 'UI should not present a bullish/bearish summary label');
 });
 
 test('deduplicates the research stock universe and keeps watchlist priority', () => {

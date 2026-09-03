@@ -1,3 +1,5 @@
+import { withRetry } from './resilience.js';
+
 export type ZhihuSearchScope = 'zhihu' | 'global';
 
 export type ZhihuClientOptions = {
@@ -28,32 +30,42 @@ export function createZhihuClient(options: ZhihuClientOptions = {}) {
   const now = options.now || Date.now;
   const cache = new Map<string, CachedValue>();
   const inFlight = new Map<string, Promise<any>>();
+  let health = { status: 'unknown' as 'unknown' | 'healthy' | 'degraded' | 'disabled', lastAttemptAt: null as string | null, lastSuccessAt: null as string | null, lastError: null as string | null, consecutiveFailures: 0 };
 
   function metadata(source: string, freshness: 'live' | 'cache' = 'live') {
     return { source, fetchedAt: new Date(now()).toISOString(), freshness, confidence: 'third_party', provider: 'zhihu' };
   }
 
   async function request(pathname: string, params: URLSearchParams, cacheKey: string) {
-    if (!accessSecret) throw new ZhihuApiUnavailableError('知乎数据源尚未配置 ZHIHU_ACCESS_SECRET。', 'provider_disabled');
+    if (!accessSecret) {
+      health = { ...health, status: 'disabled', lastError: 'ZHIHU_ACCESS_SECRET 未配置' };
+      throw new ZhihuApiUnavailableError('知乎数据源尚未配置 ZHIHU_ACCESS_SECRET。', 'provider_disabled');
+    }
     const cached = cache.get(cacheKey);
     if (cached && cached.expiresAt > now()) return { data: cached.value, sourceMeta: metadata('zhihu_cache', 'cache') };
     const pending = inFlight.get(cacheKey);
     if (pending) return pending;
     const work = (async () => {
+      const attemptedAt = new Date(now()).toISOString();
+      health = { ...health, lastAttemptAt: attemptedAt };
       const url = new URL(`${baseUrl}/${pathname}`);
       params.forEach((value, key) => url.searchParams.set(key, value));
       let response: Response;
       try {
-        response = await fetchImpl(url, { headers: { Authorization: `Bearer ${accessSecret}`, 'X-Request-Timestamp': String(Math.floor(now() / 1000)), 'Content-Type': 'application/json' }, signal: AbortSignal.timeout(timeoutMs) });
+        response = await withRetry(() => fetchImpl(url, { headers: { Authorization: `Bearer ${accessSecret}`, 'X-Request-Timestamp': String(Math.floor(now() / 1000)), 'Content-Type': 'application/json' }, signal: AbortSignal.timeout(timeoutMs) }), { attempts: Number(process.env.UPSTREAM_RETRY_ATTEMPTS) || 2 });
       } catch (error: any) {
-        throw new ZhihuApiUnavailableError(`知乎接口请求失败：${String(error?.message || '网络错误').slice(0, 160)}`, 'upstream_error');
+        const message = String(error?.message || '网络错误').slice(0, 160);
+        health = { ...health, status: 'degraded', lastError: message, consecutiveFailures: health.consecutiveFailures + 1 };
+        throw new ZhihuApiUnavailableError(`知乎接口请求失败：${message}`, 'upstream_error');
       }
       const payload = await response.json().catch(() => null);
       if (!response.ok) {
         const detail = String((payload as any)?.message || (payload as any)?.error?.message || response.statusText || '未知错误').slice(0, 160);
+        health = { ...health, status: 'degraded', lastError: detail, consecutiveFailures: health.consecutiveFailures + 1 };
         throw new ZhihuApiUnavailableError(`知乎接口返回 HTTP ${response.status}：${detail}`, 'upstream_error');
       }
       cache.set(cacheKey, { expiresAt: now() + cacheTtlMs, value: payload });
+      health = { status: 'healthy', lastAttemptAt: attemptedAt, lastSuccessAt: new Date(now()).toISOString(), lastError: null, consecutiveFailures: 0 };
       return { data: payload, sourceMeta: metadata('zhihu_api') };
     })();
     inFlight.set(cacheKey, work);
@@ -73,6 +85,7 @@ export function createZhihuClient(options: ZhihuClientOptions = {}) {
       return request(scope === 'global' ? 'global_search' : 'zhihu_search', new URLSearchParams({ Query: cleaned }), `search:${scope}:${cleaned.toLowerCase()}`);
     },
     hotList() { return request('hot_list', new URLSearchParams(), 'hot-list'); },
+    health: () => ({ ...health }),
     clearCache() { cache.clear(); },
   };
 }

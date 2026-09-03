@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { buildMarketObservation, compactStockFactSnapshot } from '../backend/mcp/server.js';
+import { buildMarketObservation, compactStockFactSnapshot, compactStockScreeningResult } from '../backend/mcp/server.js';
 
 test('市场观察只依据已返回的行情计算当前状态，并标注缺口', () => {
   const result = buildMarketObservation({
@@ -40,4 +40,19 @@ test('个股事实快照保留证据和数据缺口，但不暴露内部 AI 输�
   assert.equal(snapshot.evidence[0].evidenceId, 'financial:002230:revenue:2025-12-31');
   assert.equal('opinion' in snapshot, false);
   assert.equal(snapshot.dataGaps[0].source, 'cninfo');
+});
+
+test('条件筛选快照保留查询、条件和来源，并限制 MCP 返回行数', () => {
+  const result = compactStockScreeningResult({
+    query: 'ROE 大于 15%', title: '高 ROE 候选', total: 156,
+    conditions: [{ description: 'ROE 大于 15%', stockCount: 156 }],
+    columns: [{ key: 'code', label: '代码' }],
+    rows: Array.from({ length: 120 }, (_, index) => ({ code: String(index).padStart(6, '0') })),
+    sourceMeta: { source: 'eastmoney_mx_screener', freshness: 'live' },
+  });
+
+  assert.equal(result.displayedRows, 100);
+  assert.equal(result.total, 156);
+  assert.match(result.dataGaps[0], /100/);
+  assert.match(result.scope, /不构成买卖推荐/);
 });

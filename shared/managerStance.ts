@@ -1,9 +1,14 @@
 export type Direction = 'bullish' | 'lean_bullish' | 'neutral' | 'lean_bearish' | 'bearish' | 'unknown';
 export type HoldAssessment = 'hold' | 'conditional_hold' | 'observe' | 'avoid' | 'unknown';
+export type ResearchScoreBand = 'strong' | 'positive' | 'mixed' | 'cautious' | 'risk' | 'insufficient';
 
 export interface HorizonView {
   direction: Direction;
   holdAssessment: HoldAssessment;
+  /** 由确定性信号归一化得到，不受 AI 文本生成结果影响。 */
+  researchScore: number | null;
+  scoreBand: ResearchScoreBand;
+  evidenceCoverage: number;
   confidence: number | null;
   rationale: string[];
   evidenceIds: string[];
@@ -48,10 +53,41 @@ function holdFor(direction: Direction, riskDecision: string): HoldAssessment {
   return 'unknown';
 }
 
+function clamp(value: number, min: number, max: number) {
+  return Math.max(min, Math.min(max, value));
+}
+
+function evidenceCoverage(available: boolean, evidenceCount: number, dataGapCount: number) {
+  if (!available) return 0;
+  return Math.round(clamp(45 + Math.min(35, evidenceCount * 4) - Math.min(30, dataGapCount * 6), 0, 100));
+}
+
+function researchScoreFor(rawScore: number, available: boolean, riskDecision: string, coverage: number) {
+  if (!available || coverage < 35) return null;
+  // 50 是证据均衡时的中位，不用“看多/看空”替代风险与证据本身。
+  let score = 50 + clamp(rawScore, -5, 5) * 8;
+  // 证据越少，分数越靠近中位；避免少量输入产生过强结论。
+  score = 50 + (score - 50) * (coverage / 100);
+  if (riskDecision === 'veto') score = Math.min(score, 35);
+  if (riskDecision === 'downgrade') score = Math.min(score, 49);
+  return Math.round(clamp(score, 0, 100));
+}
+
+function scoreBandFor(score: number | null): ResearchScoreBand {
+  if (score == null) return 'insufficient';
+  if (score >= 66) return 'strong';
+  if (score >= 56) return 'positive';
+  if (score >= 45) return 'mixed';
+  if (score >= 35) return 'cautious';
+  return 'risk';
+}
+
 function buildView(score: number, available: boolean, riskDecision: string, evidenceIds: string[], rationale: string[], invalidationConditions: string[], evidenceCount: number, dataGapCount: number): HorizonView {
   const direction = directionFor(score, available, riskDecision);
+  const coverage = evidenceCoverage(available, evidenceCount, dataGapCount);
+  const researchScore = researchScoreFor(score, available, riskDecision, coverage);
   const confidence = direction === 'unknown' ? Math.min(40, 20 + evidenceCount * 2) : Math.max(20, Math.min(90, 45 + evidenceCount * 3 - dataGapCount * 7 - (riskDecision === 'downgrade' ? 10 : 0)));
-  return { direction, holdAssessment: holdFor(direction, riskDecision), confidence, rationale: rationale.slice(0, 4), evidenceIds, invalidationConditions: invalidationConditions.slice(0, 4) };
+  return { direction, holdAssessment: holdFor(direction, riskDecision), researchScore, scoreBand: scoreBandFor(researchScore), evidenceCoverage: coverage, confidence, rationale: rationale.slice(0, 4), evidenceIds, invalidationConditions: invalidationConditions.slice(0, 4) };
 }
 
 export function buildManagerStance(snapshot: any) {
@@ -83,5 +119,5 @@ export function buildManagerStance(snapshot: any) {
   const medium = buildView(fundamentalScore * 1.5 + technicalScore + eventScore * 0.75 + valuationScore + riskPenalty, mediumAvailable, riskDecision, evidenceFrom(fundamental.signals, technical.signals, events.events, valuation, risk.vetoes), [...textFrom(fundamental.signals), ...textFrom(technical.signals), ...textFrom(events.events)], invalidation, evidenceCount, dataGapCount);
   const long = buildView(fundamentalScore * 2 + valuationScore * 2 + eventScore * 0.25 + riskPenalty, longAvailable, riskDecision, evidenceFrom(fundamental.signals, valuation, risk.vetoes), [...textFrom(fundamental.signals), ...textFrom(valuation.comparison?.reason ? [{ summary: valuation.comparison.reason }] : []), ...allRationale], invalidation, evidenceCount, dataGapCount);
   const overall = medium.direction === 'unknown' ? medium : medium;
-  return { direction: overall.direction, holdAssessment: overall.holdAssessment, riskLevel: snapshot?.riskLevel || risk.riskLevel || 'unavailable', confidence: overall.confidence, rationale: overall.rationale, evidenceIds: overall.evidenceIds, invalidationConditions: overall.invalidationConditions, horizons: { short, medium, long } };
+  return { direction: overall.direction, holdAssessment: overall.holdAssessment, researchScore: overall.researchScore, scoreBand: overall.scoreBand, evidenceCoverage: overall.evidenceCoverage, riskLevel: snapshot?.riskLevel || risk.riskLevel || 'unavailable', confidence: overall.confidence, rationale: overall.rationale, evidenceIds: overall.evidenceIds, invalidationConditions: overall.invalidationConditions, horizons: { short, medium, long } };
 }

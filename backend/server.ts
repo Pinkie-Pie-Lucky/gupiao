@@ -38,6 +38,8 @@ import { clusterSentimentItems } from './lib/sentimentAnalysis.js';
 import { buildEventLifecycle } from './lib/eventLifecycle.js';
 import { createPublicHotlistClient, matchHotTopicsForStock, selectMarketContextHotTopics } from './lib/publicHotlists.js';
 import { classifyStructuredAiFailure, filterEvidenceIds, parseStructuredAiJson } from './lib/structuredAi.js';
+import { createRequestRateLimiter } from './lib/resilience.js';
+import { buildOperationalHealth } from './lib/operationalHealth.js';
 
 dotenv.config();
 
@@ -175,9 +177,15 @@ function getAIClient(): OpenAI {
 async function startServer() {
   const app = express();
   const PORT = Number(process.env.PORT) || 8080;
+  app.set('trust proxy', 1);
 
   // Middleware for parsing JSON
   app.use(express.json({ limit: '64kb' }));
+  // 开源单实例默认限流；多实例部署可将该层替换为 Redis/API 网关的共享限流器。
+  app.use('/api', createRequestRateLimiter({
+    windowMs: Number(process.env.API_RATE_LIMIT_WINDOW_MS) || 60_000,
+    maxRequests: Number(process.env.API_RATE_LIMIT_MAX_REQUESTS) || 180,
+  }));
 
   // ---- 用户与会话（方案2：本地 Docker PG / 生产阿里云 PG；无 DATABASE_URL 时回退内存仓储） ----
   const dbRuntime = await createRuntime();
@@ -206,6 +214,20 @@ async function startServer() {
       version: process.env.APP_VERSION || 'local',
       database: dbRuntime.mode,
     });
+  });
+
+  // 不触发外部网络请求，避免探针消耗数据源额度；返回上一次调用留下的健康状态。
+  app.get('/api/health/sources', (_req, res) => {
+    res.json(buildOperationalHealth({
+      database: dbRuntime.mode,
+      aiProvider: AI_PROVIDER,
+      aiConfigured: AI_PROVIDER === 'glm'
+        ? Boolean(String(process.env.GLM_API_KEY || process.env.ZHIPU_API_KEY || '').trim())
+        : Boolean(String(process.env.DEEPSEEK_API_KEY || '').trim()),
+      mxSearch: { configured: mxSearchClient.isConfigured(), health: mxSearchClient.health() },
+      mxScreener: { configured: mxScreenerClient.isConfigured(), health: mxScreenerClient.health() },
+      zhihu: { configured: zhihuClient.isConfigured(), health: zhihuClient.health?.() },
+    }));
   });
 
   app.use('/api/auth', createAuthRouter(authService));
@@ -3775,6 +3797,7 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
     const mcpServer = createMcpServer({
       getMarketObservation: async () => buildMarketOverviewPayload(await fetchMarketData()),
       getStockFactSnapshot: async (symbol) => buildStockFactSnapshot(symbol),
+      screenStocks: async (query, forceRefresh) => mxScreenerClient.screen(query, forceRefresh),
     });
     const mcpTransport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined, // 无状态：Vercel Serverless 每次请求独立，不维护 session

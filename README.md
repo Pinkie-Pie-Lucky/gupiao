@@ -1,16 +1,28 @@
 # 泡泡看市（Paopao Market）
 
-面向个人投资者的 **A 股市场观察、企业信息阅读与条件筛选工具**。产品将可核验的行情、财报、公告、行业与舆情数据，与 AI 的可读解释分开处理：程序负责事实、指标和证据，AI 只负责组织已有信息，不以 AI 输出替代数据事实。
+面向个人研究者与开发者的 **A 股市场观察、企业信息阅读与条件筛选工具**。产品将可核验的行情、财报、公告、行业与舆情数据，与 AI 的可读解释分开处理：程序负责事实、指标和证据，AI 只负责组织已有信息，不以 AI 输出替代数据事实。
 
 > 本项目用于市场观察与学习研究，不构成投资建议，也不提供买卖指令或收益承诺。
 
 ## 产品能力
 
-### 多端界面
+### 可选界面
 
 - **移动端**：窄屏或手机设备使用底部导航，适合快速查看市场与研究结果。
 - **Web 端**：电脑端使用侧边栏、顶部操作区和更宽的研究工作区；中等宽度窗口会收缩为紧凑 Web 布局，而不会误切换成手机界面。
-- 两端复用同一套后端接口、账号、关注列表与研究数据。
+- 两端复用同一套后端接口、账号、关注列表与研究数据。界面是可选的演示层，开源使用可直接采用 CLI、MCP 或 HTTP API。
+
+### 开源工具入口
+
+| 方式 | 适合谁 | 命令 / 地址 |
+| --- | --- | --- |
+| 本地 stdio MCP | Codex、Claude Desktop、Cherry Studio 用户 | `npm run mcp:stdio` |
+| Streamable HTTP MCP | 远程 Agent、团队服务 | `GET/POST /api/mcp` |
+| CLI | 脚本、Cron、Notebook | `npm run cli -- market`、`quote 002230`、`snapshot 002230` |
+| HTTP API | 二次开发与自建界面 | `/api/*` 与 `/health` |
+| 离线 fixtures | 联调、演示、无网络开发 | `npm run cli -- market --offline` |
+
+各入口输出都应保留 schema 版本、来源、时点、数据缺口和能力边界。具体配置见[开源运行与合规说明](docs/开源运行与合规说明.md)。
 
 ### 市场与内容
 
@@ -52,6 +64,7 @@
 | --- | --- | --- | --- |
 | [市场观察 Skill](skills/market-observation/SKILL.md) | 首页、早晚报、市场日常观察 | `get_market_observation` | 三大指数、市场广度、市场温度、热点板块、时间/来源/缺口；不预测涨跌。 |
 | [个股事实快照 Skill](skills/stock-fact-snapshot/SKILL.md) | 个股研究、条件筛选复核、多个 Agent 的共同输入 | `search_stock` → `get_stock_fact_snapshot` | 行情、财务、技术、公告、证据 ID 与数据缺口；不包含 AI 结论或交易建议。 |
+| [条件筛选 Skill](skills/condition-screener/SKILL.md) | 自然语言选出研究候选池 | `screen_stocks` | 条件命中、字段、数据时点和来源；不把候选池写成买入推荐。 |
 
 MCP 地址为 `GET/POST /api/mcp`。在产品服务内调用时，两个工具复用页面同一套市场数据与个股事实快照；独立 MCP 部署未注入完整数据提供器时，个股工具会明确降级为行情快照并返回数据缺口。
 
@@ -141,6 +154,27 @@ npm run dev
 
 默认访问 `http://localhost:8080`。端口可通过 `PORT` 环境变量覆盖，例如 `PORT=8111 npm run dev`。
 
+### CLI 与本地 MCP
+
+```bash
+# 不启动 Web 服务也可用的命令行入口
+npm run cli -- market
+npm run cli -- quote 002230
+npm run cli -- snapshot 002230 --offline
+
+# 本地 MCP stdio（客户端配置示例见 examples/mcp/mcp.json）
+npm run mcp:stdio
+```
+
+### 一键容器运行
+
+```bash
+# 先复制 .env.example 为 .env，并至少替换 POSTGRES_PASSWORD
+docker compose -f docker-compose.open-source.yml up --build
+```
+
+启动后用 `GET /health` 检查进程与数据库；`GET /api/health/sources` 仅返回最近观测到的数据源状态，不会额外消耗第三方 API 配额。
+
 ## 常用命令
 
 ```bash
@@ -154,6 +188,8 @@ npm run test:cio-manager-scenarios
 npm run test:public-hotlists
 npm run test:mx-screener
 npm run test:mcp-skills
+npm run test:open-source-runtime
+npm run test:ci
 npm run db:migrate
 ```
 
@@ -162,6 +198,7 @@ npm run db:migrate
 | 类别 | 接口示例 |
 | --- | --- |
 | 健康检查 | `GET /health` |
+| 数据源健康 | `GET /api/health/sources`（不主动回源） |
 | 登录与自选 | `/api/auth/*`、`/api/watchlist/*` |
 | 市场数据 | `GET /api/market-overview`、`GET /api/sectors`、`GET /api/market-map/intelligence` |
 | 个股数据 | `GET /api/stock-search`、`GET /api/stock-quote`、`GET /api/stock-facts`、`GET /api/stock-financials`、`GET /api/stock-technical`、`GET /api/stock-valuation` |
@@ -169,7 +206,7 @@ npm run db:migrate
 | 资讯与公告 | `GET /api/stock-events`、`GET /api/stock-event-chains`、`GET /api/cninfo/announcements`、`GET /api/cninfo/document` |
 | 条件选股 | `/api/stock-screeners/*` |
 | AI 与内容 | `POST /api/chat`、`POST /api/market-report`、`POST /api/market-refresh` |
-| MCP | `GET/POST /api/mcp`；`get_stock_quote`、`search_stock`、`get_market_overview`、`get_market_observation`、`get_stock_fact_snapshot` |
+| MCP | `GET/POST /api/mcp`；`get_stock_quote`、`search_stock`、`get_market_overview`、`get_market_observation`、`get_stock_fact_snapshot`、`screen_stocks` |
 
 ## 部署
 
@@ -189,6 +226,9 @@ npm run db:migrate
 gupiao-main0805/
 ├── frontend/                    # React 前端与多端 UI 壳层
 ├── backend/                     # Express API、认证、数据源、调度和数据库仓储
+│   ├── core/                     # 稳定输出契约与确定性事实快照组合
+│   ├── dataSources/              # 行情/搜索等第三方协议适配器（不含 Agent 结论）
+│   └── mcp/                      # Streamable HTTP 与 stdio MCP 入口
 ├── shared/                      # 前后端共享的确定性研究规则
 ├── scripts/python/              # 行情、财务、估值、行业等 Python 数据脚本
 ├── skills/                      # 可复用金融工作流 Skill（市场观察、个股事实快照等）
@@ -207,7 +247,8 @@ gupiao-main0805/
 - [条件选股功能说明](docs/条件选股功能说明.md)
 - [待实施功能清单](docs/待实施功能清单.md)
 - [测试与正式环境部署方案](docs/测试与正式环境部署方案.md)
+- [开源运行与合规说明](docs/开源运行与合规说明.md)
 
 ## 授权与免责声明
 
-当前源代码仅供学习、个人非商业用途参考；如需商业使用，请先取得作者书面许可。所有行情、研究、AI 生成内容均仅作信息展示和学习参考，不构成任何投资、交易或收益承诺。
+代码以仓库内的 Apache-2.0 标识为准；第三方数据、模型、公开接口和商标不因本仓库开源而被再次授权。使用前请自行确认来源条款、使用频率、地域和商业限制。所有行情、研究、AI 生成内容均仅作信息展示和学习参考，不构成任何投资、交易或收益承诺。详见[开源运行与合规说明](docs/开源运行与合规说明.md)。

@@ -1,0 +1,17 @@
+{
+  "schemaVersion": "paopao-open-source.v1",
+  "kind": "stock_fact_snapshot",
+  "generatedAt": "2026-01-02T01:30:00.000Z",
+  "data": {
+    "symbol": "000001",
+    "company": { "name": "示例证券", "financialTemplate": null, "industry": "示例行业", "mainBusiness": null },
+    "facts": { "quote": { "code": "000001", "name": "示例证券", "price": 10.5, "changePercent": 0.8, "source": "fixture" }, "financialReports": [], "financialCalculations": null, "financialTrends": null, "technical": null, "announcements": [] },
+    "evidence": [{ "evidenceId": "fixture:quote:000001", "type": "market", "title": "示例行情", "value": 10.5, "source": "fixture", "fetchedAt": "2026-01-02T01:30:00.000Z", "freshness": "fixture", "verification": "fixture" }],
+    "dataGaps": ["这是离线示例，不包含真实财务、技术与公告。"],
+    "snapshotMeta": { "generatedAt": "2026-01-02T01:30:00.000Z", "source": "fixture", "freshness": "fixture" },
+    "scope": "仅用于本地开发和接口联调。"
+  },
+  "sourceMeta": { "source": "fixture", "fetchedAt": "2026-01-02T01:30:00.000Z", "freshness": "fixture" },
+  "dataGaps": ["这是离线示例，不包含真实财务、技术与公告。"],
+  "scope": "仅用于本地开发和接口联调。"
+}
