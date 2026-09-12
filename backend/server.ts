@@ -15,7 +15,7 @@ import OpenAI from 'openai';
 import dotenv from 'dotenv';
 import { eventCategory, eventDate, eventDirection, eventImpactHorizon, eventMateriality, eventStatus, normalizedEventKey } from './event-rules.js';
 import { buildManagerStance } from '../shared/managerStance.js';
-import { createMcpServer } from './mcp/server.js';
+import { createMcpServer, type McpHtmlReport } from './mcp/server.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { randomUUID } from 'node:crypto';
 import { createRuntime } from './lib/db/runtime.js';
@@ -40,6 +40,7 @@ import { createPublicHotlistClient, matchHotTopicsForStock, selectMarketContextH
 import { classifyStructuredAiFailure, filterEvidenceIds, parseStructuredAiJson } from './lib/structuredAi.js';
 import { createRequestRateLimiter } from './lib/resilience.js';
 import { buildOperationalHealth } from './lib/operationalHealth.js';
+import { renderMarketHotspotsReportHtml, renderStockAnalysisReportHtml } from './core/htmlReports.js';
 
 dotenv.config();
 
@@ -284,6 +285,206 @@ async function startServer() {
       .then(() => console.log(`[db-persist] ${label} saved`))
       .catch((error: any) => console.warn(`[db-persist] ${label} failed: ${error?.message}`));
   }
+
+  // HTML 报告是某一次研究/市场快照的不可变阅读副本。默认落到运行时目录，
+  // 不进入 Git；生产环境可用 REPORT_OUTPUT_DIR 挂载持久卷。
+  const REPORT_OUTPUT_DIR = path.resolve(process.env.REPORT_OUTPUT_DIR || path.join(process.cwd(), 'work', '.runtime', 'reports'));
+  const REPORT_TTL_MS = Math.max(60 * 60_000, Number(process.env.REPORT_TTL_MS) || 7 * 24 * 60 * 60_000);
+  let reportCleanupAt = 0;
+  type StoredHtmlReport = Omit<McpHtmlReport, 'url'>;
+  type StoredHtmlReportRecord = StoredHtmlReport & {
+    kind: 'stock-analysis' | 'market-hotspots';
+    /**
+     * 公开报告只保存已经生成时的冻结快照。打开链接不会再次请求行情、
+     * 财务或 AI，避免同一个报告因实时数据变化而前后不一致。
+     */
+    payload?: unknown;
+  };
+
+  async function cleanupExpiredHtmlReports() {
+    if (Date.now() - reportCleanupAt < 30 * 60_000) return;
+    reportCleanupAt = Date.now();
+    try {
+      const names = await fs.promises.readdir(REPORT_OUTPUT_DIR);
+      const cutoff = Date.now() - REPORT_TTL_MS;
+      await Promise.all(names.filter((name) => /^[0-9a-f-]{36}\.(html|json)$/i.test(name)).map(async (name) => {
+        const file = path.join(REPORT_OUTPUT_DIR, name);
+        const stat = await fs.promises.stat(file);
+        if (stat.mtimeMs < cutoff) await fs.promises.unlink(file);
+      }));
+    } catch (error: any) {
+      if (error?.code !== 'ENOENT') console.warn('[html-report] cleanup failed:', error?.message || error);
+    }
+  }
+
+  async function saveHtmlReport(
+    kind: 'stock-analysis' | 'market-hotspots',
+    title: string,
+    html: string,
+    dataGaps: unknown[] = [],
+    payload?: unknown,
+  ): Promise<StoredHtmlReport> {
+    const reportId = randomUUID();
+    const generatedAt = new Date().toISOString();
+    const stored: StoredHtmlReportRecord = {
+      reportId,
+      kind,
+      title,
+      generatedAt,
+      expiresAt: new Date(Date.now() + REPORT_TTL_MS).toISOString(),
+      dataGaps: dataGaps.map((item) => safeRuntimeDataGap(typeof item === 'string' ? item : String((item as any)?.reason || item))).filter(Boolean).slice(0, 20),
+      payload,
+    };
+    await fs.promises.mkdir(REPORT_OUTPUT_DIR, { recursive: true });
+    await Promise.all([
+      fs.promises.writeFile(path.join(REPORT_OUTPUT_DIR, `${reportId}.html`), html, { encoding: 'utf8', mode: 0o600 }),
+      fs.promises.writeFile(path.join(REPORT_OUTPUT_DIR, `${reportId}.json`), JSON.stringify(stored), { encoding: 'utf8', mode: 0o600 }),
+    ]);
+    void cleanupExpiredHtmlReports();
+    const { kind: _kind, payload: _payload, ...result } = stored;
+    return result;
+  }
+
+  function reportUrlFor(req: express.Request, reportId: string) {
+    const configured = String(process.env.PUBLIC_BASE_URL || '').trim().replace(/\/+$/, '');
+    if (configured) return `${configured}/reports/${reportId}`;
+    const host = String(req.get('host') || '');
+    // 防止 Host 头进入 MCP 输出形成任意跳转链接；本地开发无法识别时返回相对路径。
+    return /^[a-z0-9.-]+(?::\d{1,5})?$/i.test(host) ? `${req.protocol}://${host}/reports/${reportId}` : `/reports/${reportId}`;
+  }
+
+  async function createStockAnalysisHtmlReport(inputSymbol: string): Promise<StoredHtmlReport> {
+    const symbol = normalizeAshareSymbol(inputSymbol).code;
+    const [managerSnapshot, factSnapshot] = await Promise.all([buildStockManagerSnapshot(symbol), buildStockFactSnapshot(symbol)]);
+    const dataGaps = [...new Set([...(managerSnapshot?.dataGaps || []), ...(factSnapshot?.dataGaps || [])])];
+    const quote = factSnapshot?.facts?.quote || null;
+    const company = factSnapshot?.company || null;
+    const html = renderStockAnalysisReportHtml({
+      symbol,
+      managerSnapshot,
+      factSnapshot,
+      quote,
+      company,
+      dataGaps,
+      generatedAt: new Date().toISOString(),
+    });
+    return saveHtmlReport('stock-analysis', `${company?.name || symbol} 个股分析报告`, html, dataGaps, {
+      reportVersion: 1,
+      symbol,
+      quote,
+      company,
+      managerSnapshot,
+      factSnapshot,
+      dataGaps,
+      generatedAt: new Date().toISOString(),
+    });
+  }
+
+  async function createMarketHotspotsHtmlReport(focus: 'hotspots' | 'daily_sector_picks'): Promise<StoredHtmlReport> {
+    // 报告首页保存和产品首页同一份早报事件（Top 3）；板块精选仍单独服务市场地图。
+    // 三条独立链路并行启动，避免报告生成被串行请求拖慢。
+    const [marketDataResult, morningResult, selectionResult] = await Promise.allSettled([
+      fetchMarketData(),
+      generateMorningReport(),
+      focus === 'daily_sector_picks' ? generateBubbleSelection() : Promise.resolve(null),
+    ]);
+    if (marketDataResult.status !== 'fulfilled') throw marketDataResult.reason;
+    const marketData = marketDataResult.value;
+    const overview = buildMarketOverviewPayload(marketData);
+    const marketMap = { market: 'CN', generatedAt: new Date().toISOString(), timestamp: marketData.timestamp, sectors: buildMarketMapIntelligence(marketData) };
+    let dailyPicks: any[] = [];
+    const dataGaps: string[] = [];
+    const morningReport = morningResult.status === 'fulfilled' ? morningResult.value : null;
+    if (!Array.isArray(morningReport?.stories) || morningReport.stories.length === 0) {
+      dataGaps.push(safeRuntimeDataGap(`今日市场动态暂不可用：${morningResult.status === 'rejected' ? morningResult.reason?.message || '早报生成失败' : '早报未返回可展示事件'}`));
+    }
+    if (focus === 'daily_sector_picks') {
+      if (selectionResult.status === 'fulfilled') {
+        dailyPicks = Array.isArray(selectionResult.value?.bubbleSelection) ? selectionResult.value.bubbleSelection : [];
+      } else {
+        dataGaps.push(safeRuntimeDataGap(`每日板块精选暂不可用：${selectionResult.reason?.message || '未知原因'}`));
+      }
+    }
+    if (!dailyPicks.length) dailyPicks = marketMap.sectors.slice(0, 6).map((item: any) => ({ sectorName: item.sector, rankReason: item.beginnerExplanation }));
+    const html = renderMarketHotspotsReportHtml({ overview, marketMap, dailyPicks, dataGaps, generatedAt: new Date().toISOString() });
+    return saveHtmlReport('market-hotspots', focus === 'daily_sector_picks' ? '每日板块精选与市场热点' : '今日市场热点', html, dataGaps, {
+      reportVersion: 1,
+      focus,
+      overview,
+      marketMap,
+      morningReport,
+      dailyPicks,
+      dataGaps,
+      generatedAt: new Date().toISOString(),
+    });
+  }
+
+  app.get('/api/reports/:reportId', async (req, res) => {
+    const reportId = String(req.params.reportId || '');
+    if (!/^[0-9a-f-]{36}$/i.test(reportId)) return res.status(404).json({ error: '报告不存在或链接无效。' });
+    try {
+      const raw = await fs.promises.readFile(path.join(REPORT_OUTPUT_DIR, `${reportId}.json`), 'utf8');
+      const report = JSON.parse(raw) as StoredHtmlReportRecord;
+      if (!report.payload) return res.status(404).json({ error: '该报告暂不支持产品页阅读。' });
+      res.setHeader('Cache-Control', 'private, max-age=300');
+      return res.json({
+        reportId: report.reportId,
+        kind: report.kind,
+        title: report.title,
+        generatedAt: report.generatedAt,
+        expiresAt: report.expiresAt,
+        dataGaps: report.dataGaps,
+        payload: report.payload,
+      });
+    } catch (error: any) {
+      if (error?.code === 'ENOENT') return res.status(404).json({ error: '报告已过期或不存在，请重新生成。' });
+      console.error('[html-report] metadata read failed:', error?.message || error);
+      return res.status(500).json({ error: '报告暂时无法读取，请稍后重试。' });
+    }
+  });
+
+  app.get('/reports/:reportId', async (req, res) => {
+    const reportId = String(req.params.reportId || '');
+    if (!/^[0-9a-f-]{36}$/i.test(reportId)) return res.status(404).type('text').send('报告不存在或链接无效。');
+    try {
+      const metadataPath = path.join(REPORT_OUTPUT_DIR, `${reportId}.json`);
+      const raw = await fs.promises.readFile(metadataPath, 'utf8');
+      const report = JSON.parse(raw) as StoredHtmlReportRecord;
+      // 使用产品 React 组件阅读冻结快照；静态 HTML 仅保留给无 JS 环境或旧报告兜底。
+      if (report.payload) {
+        const query = report.kind === 'market-hotspots' ? 'marketReport' : 'report';
+        return res.redirect(302, `/?${query}=${encodeURIComponent(reportId)}`);
+      }
+      const html = await fs.promises.readFile(path.join(REPORT_OUTPUT_DIR, `${reportId}.html`), 'utf8');
+      res.setHeader('Cache-Control', 'private, max-age=300');
+      return res.type('html').send(html);
+    } catch (error: any) {
+      if (error?.code === 'ENOENT') return res.status(404).type('text').send('报告已过期或不存在，请重新生成。');
+      console.error('[html-report] read failed:', error?.message || error);
+      return res.status(500).type('text').send('报告暂时无法读取，请稍后重试。');
+    }
+  });
+
+  app.post('/api/reports/stock', async (req, res) => {
+    try {
+      const symbol = String(req.body?.symbol || '');
+      if (!symbol) return res.status(400).json({ error: 'symbol is required' });
+      const report = await createStockAnalysisHtmlReport(symbol);
+      return res.status(201).json({ ...report, url: reportUrlFor(req, report.reportId), kind: 'stock_analysis_html_report' });
+    } catch (error: any) {
+      return res.status(503).json({ error: error?.message || '个股分析 HTML 报告暂不可用', dataUnavailable: true });
+    }
+  });
+
+  app.post('/api/reports/market', async (req, res) => {
+    const focus = req.body?.focus === 'daily_sector_picks' ? 'daily_sector_picks' : 'hotspots';
+    try {
+      const report = await createMarketHotspotsHtmlReport(focus);
+      return res.status(201).json({ ...report, url: reportUrlFor(req, report.reportId), kind: 'market_hotspots_html_report' });
+    } catch (error: any) {
+      return res.status(503).json({ error: error?.message || '市场热点 HTML 报告暂不可用', dataUnavailable: true });
+    }
+  });
 
   // 个股分析 Agent 输出落库（按 symbol + agent 幂等更新）
   function persistStockAgentOutput(symbol: string, agent: string, output: unknown): void {
@@ -3798,6 +3999,14 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
       getMarketObservation: async () => buildMarketOverviewPayload(await fetchMarketData()),
       getStockFactSnapshot: async (symbol) => buildStockFactSnapshot(symbol),
       screenStocks: async (query, forceRefresh) => mxScreenerClient.screen(query, forceRefresh),
+       createStockAnalysisHtmlReport: async (symbol) => {
+         const report = await createStockAnalysisHtmlReport(symbol);
+         return { ...report, url: reportUrlFor(req, report.reportId) };
+      },
+      createMarketHotspotsHtmlReport: async (focus) => {
+         const report = await createMarketHotspotsHtmlReport(focus);
+         return { ...report, url: reportUrlFor(req, report.reportId) };
+       },
     });
     const mcpTransport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined, // 无状态：Vercel Serverless 每次请求独立，不维护 session
@@ -4443,7 +4652,7 @@ signalType 只能是 trend_start、trend_continue、leader_driven、event_driven
       const r = ranked.findIndex(x => x.id === s.id)+1, m = s.changePercent>0&&r<=3, sc = Math.round(Math.min(100,Math.max(0,Math.abs(s.changePercent)*15+Math.max(0,16-r)+(m?14:0))));
       const t = [];
       if(m) t.push('今日主线');
-      if(Math.abs(s.changePercent) >= th) t.push('异动上涨');
+      if(Math.abs(s.changePercent) >= th) t.push(s.changePercent >= 0 ? '异动上涨' : '异动下跌');
       if(sectorNewsMatches(s.name,md.newsItems||[]).length) t.push('新闻驱动');
       if(!m) t.push('值得观察');
       const n = sectorNewsMatches(s.name,md.newsItems||[]);

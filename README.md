@@ -65,6 +65,7 @@
 | [市场观察 Skill](skills/market-observation/SKILL.md) | 首页、早晚报、市场日常观察 | `get_market_observation` | 三大指数、市场广度、市场温度、热点板块、时间/来源/缺口；不预测涨跌。 |
 | [个股事实快照 Skill](skills/stock-fact-snapshot/SKILL.md) | 个股研究、条件筛选复核、多个 Agent 的共同输入 | `search_stock` → `get_stock_fact_snapshot` | 行情、财务、技术、公告、证据 ID 与数据缺口；不包含 AI 结论或交易建议。 |
 | [条件筛选 Skill](skills/condition-screener/SKILL.md) | 自然语言选出研究候选池 | `screen_stocks` | 条件命中、字段、数据时点和来源；不把候选池写成买入推荐。 |
+| [HTML 报告 Skill](skills/stock-analyze-reports/SKILL.md) | 生成可分享的个股研究或市场热点报告 | `generate_stock_analysis_html_report`、`generate_market_hotspots_html_report` | 独立 HTML 链接、生成时快照、来源与数据缺口；不输出交易指令。 |
 
 MCP 地址为 `GET/POST /api/mcp`。在产品服务内调用时，两个工具复用页面同一套市场数据与个股事实快照；独立 MCP 部署未注入完整数据提供器时，个股工具会明确降级为行情快照并返回数据缺口。
 
@@ -206,6 +207,7 @@ npm run db:migrate
 | 资讯与公告 | `GET /api/stock-events`、`GET /api/stock-event-chains`、`GET /api/cninfo/announcements`、`GET /api/cninfo/document` |
 | 条件选股 | `/api/stock-screeners/*` |
 | AI 与内容 | `POST /api/chat`、`POST /api/market-report`、`POST /api/market-refresh` |
+| HTML 报告 | `POST /api/reports/stock`、`POST /api/reports/market`、`GET /reports/:reportId` |
 | MCP | `GET/POST /api/mcp`；`get_stock_quote`、`search_stock`、`get_market_overview`、`get_market_observation`、`get_stock_fact_snapshot`、`screen_stocks` |
 
 ## 部署

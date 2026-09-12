@@ -27,7 +27,15 @@ interface MarketMapTabProps {
   onNavigateToTab: (tabId: string) => void;
   onAskTeacherAboutSector: (name: string, question: string) => void;
   refreshVersion?: number;
+  /** 公开报告传入的冻结快照；存在时禁止各类实时/AI 请求。 */
+  frozenSnapshot?: FrozenMarketMapSnapshot;
 }
+
+export type FrozenMarketMapSnapshot = {
+  overview?: any;
+  marketMap?: { sectors?: SectorIntelligence[]; timestamp?: string };
+  dailyPicks?: BubbleSignalItem[];
+};
 
 interface IntelligenceResponse {
   sectors: SectorIntelligence[];
@@ -70,20 +78,20 @@ const tagStyles: Record<string, string> = {
   与我有关: 'bg-rose-100 text-rose-700',
 };
 
-export function MarketMapTab({ selectedSectorId, onSelectSectorId, onNavigateToTab, onAskTeacherAboutSector, refreshVersion = 0 }: MarketMapTabProps) {
+export function MarketMapTab({ selectedSectorId, onSelectSectorId, onNavigateToTab, onAskTeacherAboutSector, refreshVersion = 0, frozenSnapshot }: MarketMapTabProps) {
   const PAGE_SIZE = 40;
-  const [sectors, setSectors] = useState<SectorIntelligence[]>([]);
-  const [activeSector, setActiveSector] = useState<SectorIntelligence | null>(null);
+  const [sectors, setSectors] = useState<SectorIntelligence[]>(() => frozenSnapshot?.marketMap?.sectors || []);
+  const [activeSector, setActiveSector] = useState<SectorIntelligence | null>(() => frozenSnapshot?.marketMap?.sectors?.find((item) => item.shouldHighlight) || frozenSnapshot?.marketMap?.sectors?.[0] || null);
   const [detailTarget, setDetailTarget] = useState<{ sectorId: string; sectorName: string } | null>(null);
   const [filterQuery, setFilterQuery] = useState('');
   const [mapFilter, setMapFilter] = useState<MapFilter>('featured');
   const [categoryScope, setCategoryScope] = useState<CategoryScope>('all');
   const [followedSectorIds, setFollowedSectorIds] = useState<string[]>([]);
   const [dataError, setDataError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [updatedAt, setUpdatedAt] = useState<string | null>(null);
-  const [marketSummary, setMarketSummary] = useState<{sentiment?:string; upSectors?:number; downSectors?:number; temperature?:number; temperatureLabel?:string; indices?:Array<{name:string;changePercent:number}>} | null>(null);
-  const [bubbleItems, setBubbleItems] = useState<BubbleSignalItem[] | null>(null);
+  const [loading, setLoading] = useState(!frozenSnapshot);
+  const [updatedAt, setUpdatedAt] = useState<string | null>(() => frozenSnapshot?.marketMap?.timestamp || null);
+  const [marketSummary, setMarketSummary] = useState<{sentiment?:string; upSectors?:number; downSectors?:number; temperature?:number; temperatureLabel?:string; indices?:Array<{name:string;changePercent:number}>} | null>(() => frozenSnapshot ? { indices: (frozenSnapshot.overview?.indices || []).slice(0, 3), upSectors: frozenSnapshot.overview?.marketBreath?.up, downSectors: frozenSnapshot.overview?.marketBreath?.down, temperature: frozenSnapshot.overview?.marketTemperature?.score, temperatureLabel: frozenSnapshot.overview?.marketTemperature?.text } : null);
+  const [bubbleItems, setBubbleItems] = useState<BubbleSignalItem[] | null>(() => frozenSnapshot?.dailyPicks || null);
   const [bubbleLoading, setBubbleLoading] = useState(false);
   const [bubbleError, setBubbleError] = useState<string | null>(null);
   const [bubbleFallback, setBubbleFallback] = useState(false);
@@ -122,12 +130,14 @@ export function MarketMapTab({ selectedSectorId, onSelectSectorId, onNavigateToT
   // 泡泡精选走 P5，单次生成要拉板块内部数据并调用 AI，耗时较长。
   // 因此只在用户首次切到该 tab 时请求，不在挂载时预加载。服务端已有缓存，重复进入不会重复生成。
   useEffect(() => {
+    if (frozenSnapshot) return;
     if (refreshVersion > 0) bubbleRequestedRef.current = false;
     if (mapFilter === 'featured' && !bubbleRequestedRef.current) loadBubbleSelection();
-  }, [mapFilter, loadBubbleSelection, refreshVersion]);
+  }, [frozenSnapshot, mapFilter, loadBubbleSelection, refreshVersion]);
 
   // Fetch market overview
   useEffect(() => {
+    if (frozenSnapshot) return;
     fetch('/api/market-overview').then(r=>r.json()).then(d=>{
       if (d && !d.error) {
         setMarketSummary({
@@ -139,8 +149,9 @@ export function MarketMapTab({ selectedSectorId, onSelectSectorId, onNavigateToT
         });
       }
     }).catch(()=>{});
-  }, [refreshVersion]);
+  }, [frozenSnapshot, refreshVersion]);
   useEffect(() => {
+    if (frozenSnapshot) return;
     let live = true;
     async function load() {
       try {
@@ -163,7 +174,7 @@ export function MarketMapTab({ selectedSectorId, onSelectSectorId, onNavigateToT
     }
     load();
     return () => { live = false; };
-  }, [selectedSectorId, refreshVersion]);
+  }, [frozenSnapshot, selectedSectorId, refreshVersion]);
 
   useEffect(() => {
     try {

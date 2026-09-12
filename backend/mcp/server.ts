@@ -32,6 +32,19 @@ export type McpDataProviders = {
   getStockFactSnapshot?: (symbol: string) => Promise<unknown>;
   /** 由宿主应用注入的妙想条件筛选能力；密钥只保留在宿主服务端。 */
   screenStocks?: (query: string, forceRefresh: boolean) => Promise<unknown>;
+  /** 由宿主生成并托管的个股研究 HTML；HTML 只包含冻结快照与安全转义后的文本。 */
+  createStockAnalysisHtmlReport?: (symbol: string) => Promise<McpHtmlReport>;
+  /** 由宿主生成并托管的市场热点/板块精选 HTML。 */
+  createMarketHotspotsHtmlReport?: (focus: 'hotspots' | 'daily_sector_picks') => Promise<McpHtmlReport>;
+};
+
+export type McpHtmlReport = {
+  reportId: string;
+  title: string;
+  url: string;
+  generatedAt: string;
+  expiresAt: string | null;
+  dataGaps?: string[];
 };
 
 class McpFeatureUnavailableError extends Error {
@@ -304,6 +317,54 @@ export function createMcpServer(providers: McpDataProviders = {}): McpServer {
           sourceMeta: result.sourceMeta ? { ...result.sourceMeta, freshness: result.sourceMeta.freshness as 'live' | 'cache' } : null,
           dataGaps: result.dataGaps,
           scope: result.scope,
+        }), null, 2) }] };
+      } catch (error: any) {
+        return { isError: true, content: [{ type: 'text' as const, text: JSON.stringify(toMcpError(error)) }] };
+      }
+    },
+  );
+
+  server.registerTool(
+    'generate_stock_analysis_html_report',
+    {
+      title: '生成个股分析 HTML 报告',
+      description: '基于产品服务已冻结的个股事实、程序信号、风险、证据和数据缺口生成可独立打开的 HTML 研究报告，并返回在线链接。symbol 必须是明确的 6 位代码；若只有名称，先调用 search_stock。报告不包含买卖指令或收益预测。',
+      inputSchema: {
+        symbol: z.string().trim().min(1).max(MAX_STOCK_IDENTIFIER_LENGTH).regex(/^(?:(?:SH|SZ|BJ)?\d{6}|\d{6}\.(?:SH|SZ|BJ))$/i, 'symbol 必须是 6 位 A 股代码，可带 SH/SZ/BJ 前后缀').describe('明确的股票代码，例如 159530、002230.SZ 或 SH600519。'),
+      },
+    },
+    async ({ symbol }) => {
+      try {
+        if (!providers.createStockAnalysisHtmlReport) throw new McpFeatureUnavailableError('当前 MCP 实例未配置在线 HTML 报告服务。请使用产品 HTTP MCP，并配置 REPORT_OUTPUT_DIR（可选）与 PUBLIC_BASE_URL（部署时建议）。');
+        const report = await providers.createStockAnalysisHtmlReport(normalizeSymbol(symbol));
+        return { content: [{ type: 'text' as const, text: JSON.stringify(resultEnvelope('stock_analysis_html_report', report, {
+          generatedAt: report.generatedAt,
+          dataGaps: report.dataGaps || [],
+          scope: '报告只呈现生成时已取得的事实、程序信号、来源与数据缺口；不构成投资建议。',
+        }), null, 2) }] };
+      } catch (error: any) {
+        return { isError: true, content: [{ type: 'text' as const, text: JSON.stringify(toMcpError(error)) }] };
+      }
+    },
+  );
+
+  server.registerTool(
+    'generate_market_hotspots_html_report',
+    {
+      title: '生成市场热点 HTML 报告',
+      description: '生成包含首页市场概览、三大指数、市场广度、市场地图热点和每日板块精选的独立 HTML 报告，并返回在线链接。只描述当前市场数据，不预测涨跌。',
+      inputSchema: {
+        focus: z.enum(['hotspots', 'daily_sector_picks']).optional().default('hotspots').describe('hotspots 展示今日市场热点；daily_sector_picks 同时请求每日板块精选。'),
+      },
+    },
+    async ({ focus }) => {
+      try {
+        if (!providers.createMarketHotspotsHtmlReport) throw new McpFeatureUnavailableError('当前 MCP 实例未配置在线 HTML 报告服务。请使用产品 HTTP MCP，并配置 REPORT_OUTPUT_DIR（可选）与 PUBLIC_BASE_URL（部署时建议）。');
+        const report = await providers.createMarketHotspotsHtmlReport(focus);
+        return { content: [{ type: 'text' as const, text: JSON.stringify(resultEnvelope('market_hotspots_html_report', report, {
+          generatedAt: report.generatedAt,
+          dataGaps: report.dataGaps || [],
+          scope: '报告仅反映生成时已获得的市场事实和数据缺口，不构成投资建议。',
         }), null, 2) }] };
       } catch (error: any) {
         return { isError: true, content: [{ type: 'text' as const, text: JSON.stringify(toMcpError(error)) }] };

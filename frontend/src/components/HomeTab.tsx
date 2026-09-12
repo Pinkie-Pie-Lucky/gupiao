@@ -21,6 +21,9 @@ const IMPACT_PATH_ENABLED = (import.meta as ImportMeta & { env?: Record<string, 
 // 保留旧模式切换与卡片内展开逻辑，后续需要时将两个开关改为 true 即可恢复。
 const SHOW_STORY_MODE_SWITCH = false;
 const SHOW_LEGACY_INLINE_REASONING = false;
+// 首页聚焦当天最值得理解的三件事；学习卡片暂时隐藏，后续只需改为 true 即可恢复。
+const MARKET_STORY_DISPLAY_LIMIT = 3;
+const SHOW_HOME_LEARNING_CARDS = false;
 
 const LEARNING_KNOWLEDGE = [
   {
@@ -57,6 +60,8 @@ interface HomeTabProps {
   homeCache?: HomeDashboardCache | null;
   onHomeCacheChange?: (cache: HomeDashboardCache) => void;
   refreshVersion?: number;
+  /** 已生成公开报告传入的冻结快照；存在时不再请求实时行情或 AI 内容。 */
+  frozenSnapshot?: FrozenHomeSnapshot;
 }
 
 type MorningReportState = {
@@ -77,10 +82,50 @@ export type HomeDashboardCache = {
   dataError: string | null;
 };
 
+export type FrozenHomeSnapshot = {
+  overview: any;
+  /** 公开报告保存的同一份早报快照，和产品首页使用相同的事件结构。 */
+  morningReport?: Partial<Omit<MorningReportState, 'loading'>>;
+  dailyPicks?: Array<{ sectorName?: string; rankReason?: string; bubbleExplanation?: string }>;
+};
+
 const emptyMorningReport = (): MorningReportState => ({ summaryText: '', reasonBrief: '', stories: [], sentiment: '中性', loading: true });
 
-export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStock, followedStocks = [], homeCache, onHomeCacheChange, refreshVersion = 0 }: HomeTabProps) {
-  const [indices, setIndices] = useState<MarketIndex[]>(() => homeCache?.indices || []);
+function frozenIndices(snapshot?: FrozenHomeSnapshot): MarketIndex[] {
+  return (snapshot?.overview?.indices || []).slice(0, 3).map((item: any) => {
+    const value = Number(item?.price) || 0;
+    const changePercent = Number(item?.changePercent) || 0;
+    return { name: String(item?.name || '指数'), code: String(item?.code || item?.name || ''), value, changePercent, changeValue: Number((value * changePercent / 100).toFixed(2)), history: [] };
+  });
+}
+
+function frozenMorningReport(snapshot?: FrozenHomeSnapshot): MorningReportState {
+  const storedReport = snapshot?.morningReport;
+  if (storedReport?.stories?.length) {
+    return {
+      summaryText: storedReport.summaryText || '本报告展示生成时冻结的市场快照。',
+      reasonBrief: storedReport.reasonBrief || storedReport.summaryText || '',
+      stories: storedReport.stories.slice(0, MARKET_STORY_DISPLAY_LIMIT),
+      sentiment: storedReport.sentiment || '中性',
+      loading: false,
+      promptVersion: storedReport.promptVersion,
+      promptVersions: storedReport.promptVersions,
+    };
+  }
+  const top = (snapshot?.overview?.topSectors || []).slice(0, 2).map((item: any) => item?.name).filter(Boolean);
+  const summaryText = top.length ? `当前市场热点集中在${top.join('、')}等方向。` : '本报告展示生成时冻结的市场快照。';
+  // 兼容旧版公开报告：只展示前三个板块候选，避免把板块榜误呈现为大量事件。
+  const stories = (snapshot?.dailyPicks || []).slice(0, MARKET_STORY_DISPLAY_LIMIT).map((item, index) => ({
+    storyId: `frozen-sector-${index}`, type: 'sector_driver', title: item.sectorName || '市场板块', what: item.rankReason || item.bubbleExplanation || '基于当前市场快照入选。', metrics: [], evidenceIds: [], relatedSectors: [item.sectorName || ''], evidence: [],
+    reasoning: { storyId: `frozen-sector-${index}`, steps: [], facts: [], changedVariables: [], mechanism: [], marketValidation: [], observationIndicators: [], uncertainty: '报告为冻结快照，后续需结合最新行情继续核验。', confidenceLevel: 'limited', validationStatus: 'limited' },
+    teacher: { storyId: `frozen-sector-${index}`, summary: item.rankReason || item.bubbleExplanation || '基于当前市场快照入选。', uncertaintyText: '报告为冻结快照，后续需结合最新行情继续核验。' },
+    professional: { conclusion: item.rankReason || item.bubbleExplanation || '基于当前市场快照入选。', confidence: { score: 50, level: 'limited', explanation: '公开报告未重新生成 AI 解读。' }, observationIndicators: [], supportingEvidence: [], evidenceGaps: [], alternativeExplanations: [], counterLogic: [] },
+  } as unknown as MarketStory));
+  return { summaryText, reasonBrief: summaryText, stories, sentiment: '中性', loading: false };
+}
+
+export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStock, followedStocks = [], homeCache, onHomeCacheChange, refreshVersion = 0, frozenSnapshot }: HomeTabProps) {
+  const [indices, setIndices] = useState<MarketIndex[]>(() => homeCache?.indices || frozenIndices(frozenSnapshot));
   const [selectedIndex, setSelectedIndex] = useState<MarketIndex | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [isSearching, setIsSearching] = useState(false);
@@ -96,14 +141,14 @@ export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStoc
   });
 
   // Morning report from AI pipeline
-  const [morningReport, setMorningReport] = useState<MorningReportState>(() => homeCache?.morningReport || emptyMorningReport());
+  const [morningReport, setMorningReport] = useState<MorningReportState>(() => homeCache?.morningReport || (frozenSnapshot ? frozenMorningReport(frozenSnapshot) : emptyMorningReport()));
 
   // 市场状态（交易时段判断）
   const [marketStatus, setMarketStatus] = useState<{
     isOpen: boolean;
     phase: string;
     label: string;
-  } | null>(() => homeCache?.marketStatus || null);
+  } | null>(() => homeCache?.marketStatus || frozenSnapshot?.overview?.marketStatus || null);
 
   // Market overview from rule engine
   const [marketOverview, setMarketOverview] = useState<{
@@ -137,7 +182,7 @@ export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStoc
         volatility: { score: number; averageAmplitude: number | null };
       };
     };
-  } | null>(() => homeCache?.marketOverview || null);
+  } | null>(() => homeCache?.marketOverview || frozenSnapshot?.overview || null);
 
   // 数据是否成功加载
   const [dataError, setDataError] = useState<string | null>(() => homeCache?.dataError || null);
@@ -230,6 +275,7 @@ export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStoc
   }
 
   useEffect(() => {
+    if (frozenSnapshot) return;
     let cancelled = false;
 
     // 首次加载 + 早报
@@ -263,7 +309,7 @@ export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStoc
     return () => {
       cancelled = true;
     };
-  }, [refreshVersion]);
+  }, [frozenSnapshot, refreshVersion]);
 
   const turnoverText = (() => {
     const amount = marketOverview?.marketTemperature?.components.turnover.amount || marketOverview?.totalVolume || 0;
@@ -547,7 +593,7 @@ export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStoc
           <article className="rounded-[20px] border border-slate-200 bg-white px-5 py-4 shadow-sm">
             <div className="mb-3 flex items-center justify-between"><div><h2 className="text-lg font-bold text-slate-900">今日市场动态</h2><p className="mt-1 text-xs text-slate-500">用一屏看懂事件和核心影响</p></div><button type="button" onClick={() => onNavigateToTab('ai-teacher')} className="text-xs font-semibold text-indigo-600 hover:text-indigo-700">查看详情</button></div>
             <div className="divide-y divide-slate-100">
-              {morningReport.stories.slice(0, 5).map((story, index) => (
+              {morningReport.stories.slice(0, MARKET_STORY_DISPLAY_LIMIT).map((story, index) => (
                 <button type="button" key={story.storyId} onClick={() => IMPACT_PATH_ENABLED ? setImpactStoryId(story.storyId) : setIsReasonOpen(true)} className="grid w-full grid-cols-[54px_68px_minmax(0,1fr)_18px] items-center gap-3 py-3 text-left transition hover:bg-slate-50">
                   <span className="font-mono text-sm font-semibold text-red-500">{String(9 + index).padStart(2, '0')}: {String(45 - index * 5).padStart(2, '0')}</span>
                   <span className="rounded-full bg-rose-50 px-2 py-1 text-center text-xs font-bold text-rose-600">{TYPE_LABELS[story.type] || '动态'}</span>
@@ -973,7 +1019,7 @@ export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStoc
           用一屏看懂事件和核心影响；想深究时可查看影响路径。
         </p>
 
-        {morningReport.stories.length > 0 ? morningReport.stories.map((story) => {
+        {morningReport.stories.length > 0 ? morningReport.stories.slice(0, MARKET_STORY_DISPLAY_LIMIT).map((story) => {
           const expanded = expandedStories.has(story.storyId);
           const reasoningSteps = storyMode === 'beginner' && story.teacher.simpleChain?.length
             ? story.teacher.simpleChain.map((text, index) => ({
@@ -1342,7 +1388,7 @@ export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStoc
       </div>}
 
       {/* 今日一句话成长 */}
-      <div id="growth-quote-card" className="mx-4 px-5 py-4 bg-gradient-to-r from-indigo-50 to-purple-50 border border-indigo-100 rounded-3xl shadow-sm lg:hidden">
+      {SHOW_HOME_LEARNING_CARDS && <div id="growth-quote-card" className="mx-4 px-5 py-4 bg-gradient-to-r from-indigo-50 to-purple-50 border border-indigo-100 rounded-3xl shadow-sm lg:hidden">
         <div className="flex items-start gap-3">
           <div className="w-9 h-9 bg-indigo-100 rounded-xl flex items-center justify-center flex-shrink-0 text-lg">
             💡
@@ -1354,10 +1400,10 @@ export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStoc
             </p>
           </div>
         </div>
-      </div>
+      </div>}
 
       {/* 今日学习（泡泡老师指导）- 放在页面最底部 */}
-      <div id="paopao-daily-learning-card" className="mx-4 bg-white border border-slate-100 rounded-[32px] p-5 shadow-sm space-y-3.5 lg:hidden">
+      {SHOW_HOME_LEARNING_CARDS && <div id="paopao-daily-learning-card" className="mx-4 bg-white border border-slate-100 rounded-[32px] p-5 shadow-sm space-y-3.5 lg:hidden">
         <div className="flex justify-between items-center border-b border-slate-50 pb-2">
           <div className="text-xs font-bold text-gray-800 flex items-center gap-1.5">
             <GraduationCap className="w-4 h-4 text-indigo-600" />
@@ -1389,7 +1435,7 @@ export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStoc
             </p>
           </div>
         </div>
-      </div>
+      </div>}
 
       {/* Interactive Modal Sheet for Index Detail Info */}
       <AnimatePresence>
@@ -1522,7 +1568,7 @@ export function HomeTab({ onSelectSector, onNavigateToTab, onAskTeacherAboutStoc
                   </div>
                 ) : (
                   <div className="space-y-3 pt-1">
-                    {morningReport.stories.length > 0 ? morningReport.stories.map((story, i) => (
+                    {morningReport.stories.length > 0 ? morningReport.stories.slice(0, MARKET_STORY_DISPLAY_LIMIT).map((story, i) => (
                       <div key={story.storyId} className="bg-slate-50 border border-slate-100 rounded-2xl p-4 space-y-1.5">
                         <div className="flex justify-between items-center">
                           <span className="text-[10px] font-bold text-indigo-600 bg-indigo-50 px-2 py-0.5 rounded-md">

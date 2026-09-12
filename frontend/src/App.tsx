@@ -11,6 +11,8 @@ import { AiTeacherTab } from './components/AiTeacherTab';
 import { MineTab } from './components/MineTab';
 import { StockResearchTab } from './components/StockResearchTab';
 import { StockResearchEmptyState } from './components/StockResearchEmptyState';
+import { PublicStockResearchReport } from './components/PublicStockResearchReport';
+import { PublicMarketHotspotsReport } from './components/PublicMarketHotspotsReport';
 import { StockScreenerTab } from './components/StockScreenerTab';
 import { LoginScreen } from './components/LoginScreen';
 import { AdminTab } from './components/AdminTab';
@@ -38,6 +40,10 @@ const formatQuoteAmount = (value: number | null | undefined) => Number.isFinite(
   : '--';
 
 export default function App() {
+  // /reports/:id 在服务端重定向到此公开只读视图；它不依赖登录态，
+  // 只读取生成报告时冻结的快照，因而不会在打开链接时再次消耗外部 API。
+  const publicReportId = new URLSearchParams(window.location.search).get('report');
+  const publicMarketReportId = new URLSearchParams(window.location.search).get('marketReport');
   const [darkMode, setDarkMode] = useState(() => window.localStorage.getItem('bubble-theme') === 'dark');
   const deviceLayout = useDeviceLayout();
   const [account, setAccount] = useState<SessionUser | null>(() => ACCOUNT_FEATURE_ENABLED ? getSessionUser() : null);
@@ -265,6 +271,13 @@ export default function App() {
       window.setTimeout(() => setGlobalRefreshMessage(null), 3600);
     }
   }, [account, globalRefreshing]);
+
+  if (publicReportId) {
+    return <PublicStockResearchReport reportId={publicReportId} />;
+  }
+  if (publicMarketReportId) {
+    return <PublicMarketHotspotsReport reportId={publicMarketReportId} />;
+  }
 
   if (ACCOUNT_FEATURE_ENABLED && !authReady) {
     return <div className="min-h-screen bg-slate-50" />;

@@ -20,6 +20,8 @@ interface ResponsiveAppShellProps {
   refreshing: boolean;
   refreshMessage: string | null;
   hideRefresh?: boolean;
+  /** Public reports use the shared shell but omit internal product chrome. */
+  hideProductMeta?: boolean;
   darkMode: boolean;
   onToggleTheme: () => void;
 }
@@ -43,6 +45,7 @@ export function ResponsiveAppShell({
   refreshing,
   refreshMessage,
   hideRefresh = false,
+  hideProductMeta = false,
   darkMode,
   onToggleTheme,
 }: ResponsiveAppShellProps) {
@@ -116,10 +119,10 @@ export function ResponsiveAppShell({
           <header className="sticky top-0 z-30 flex h-[76px] items-center justify-between border-b border-slate-200/80 bg-white/90 px-6 backdrop-blur-md lg:px-8">
             <div>
               <p className="text-sm font-semibold text-slate-800">{title}</p>
-              <p className="hidden text-xs text-slate-400 sm:block">泡泡看市 · Web 端</p>
+              {!hideProductMeta && <p className="hidden text-xs text-slate-400 sm:block">泡泡看市 · Web 端</p>}
             </div>
             <div className="flex items-center gap-3">
-              <span className="hidden rounded-full bg-emerald-50 px-2.5 py-1 text-xs font-medium text-emerald-700 md:inline">数据与移动端同步</span>
+              {!hideProductMeta && <span className="hidden rounded-full bg-emerald-50 px-2.5 py-1 text-xs font-medium text-emerald-700 md:inline">数据与移动端同步</span>}
               {themeButton}
               {refreshButton}
             </div>
