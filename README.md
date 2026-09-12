@@ -155,17 +155,88 @@ npm run dev
 
 默认访问 `http://localhost:8080`。端口可通过 `PORT` 环境变量覆盖，例如 `PORT=8111 npm run dev`。
 
-### CLI 与本地 MCP
+## 如何使用
+
+项目既可以作为完整网页应用运行，也可以只把它当作 CLI、MCP 或可分享 HTML 报告生成器。所有入口都保留来源、生成时间和数据缺口；它们服务于研究与学习，不会输出买卖指令。
+
+### 1. 在浏览器中使用
 
 ```bash
-# 不启动 Web 服务也可用的命令行入口
-npm run cli -- market
-npm run cli -- quote 002230
-npm run cli -- snapshot 002230 --offline
+npm run dev
+```
 
-# 本地 MCP stdio（客户端配置示例见 examples/mcp/mcp.json）
+打开终端显示的本地地址（默认是 `http://localhost:8080`）。可在页面中查看市场观察、市场地图、个股研究与条件选股；桌面浏览器显示 Web 布局，窄屏设备显示移动端布局，二者使用同一套后端数据。
+
+### 2. 用 CLI 调用
+
+CLI 默认输出机器可读的 JSON，适合脚本、Notebook、Cron 或后续接入自己的程序。`quote` 和 `snapshot` 均需要 6 位证券代码；名称不确定时先使用 `search`。
+
+```bash
+# 市场观察：指数、市场广度、热点板块与数据缺口
+npm run cli -- market
+
+# 单只证券行情 / 搜索证券身份 / 轻量事实快照
+npm run cli -- quote 002155
+npm run cli -- search 科大讯飞
+npm run cli -- snapshot 002155
+
+# 自然语言条件选股（需要在 .env 中配置 MX_APIKEY）
+npm run cli -- screen "ROE 大于 15%，净利润持续增长的 A 股"
+
+# 无网络或演示环境：使用仓库内固定样例数据
+npm run cli -- market --offline
+npm run cli -- snapshot 002155 --offline
+```
+
+### 3. 作为本地 stdio MCP 接入 Agent
+
+适用于 Codex、Claude Desktop、Cherry Studio 等支持本地 MCP 的客户端。将 [examples/mcp/mcp.json](examples/mcp/mcp.json) 中的 `cwd` 改成你本机仓库的绝对路径，然后将该服务配置加入客户端。
+
+```json
+{
+  "mcpServers": {
+    "paopao-market": {
+      "command": "npm",
+      "args": ["run", "mcp:stdio"],
+      "cwd": "/absolute/path/to/stock_analyze"
+    }
+  }
+}
+```
+
+也可以直接在终端启动，供支持 stdio 的 MCP 客户端连接：
+
+```bash
 npm run mcp:stdio
 ```
+
+### 4. 使用 HTTP MCP 或 HTTP API
+
+先执行 `npm run dev`，然后将 Streamable HTTP MCP 地址配置为：
+
+```text
+http://localhost:8080/api/mcp
+```
+
+部署后将 `localhost:8080` 换成自己的 HTTPS 域名。可用工具包括 `get_market_observation`、`search_stock`、`get_stock_fact_snapshot`、`screen_stocks` 和 HTML 报告生成工具；健康状态可通过 `GET /health` 和 `GET /api/health/sources` 查看。
+
+### 5. 在 Agent 中使用 `stock_analyze` 生成 HTML 报告
+
+将仓库中的 [HTML 报告 Skill](skills/stock-analyze-reports/SKILL.md) 安装或随项目提供给 Agent 后，可直接使用下面的自然语言命令。报告是生成时的冻结快照，包含来源和数据缺口，不会随着实时行情自动变化。
+
+```text
+使用 stock_analyze 对 002155 进行分析，并生成 HTML 报告。
+使用 stock_analyze 捕捉今日热点，并生成 HTML 报告。
+使用 stock_analyze 生成每日板块精选 HTML 报告。
+使用 stock_analyze 条件选股：ROE 大于 15%，净利润持续增长的 A 股。
+```
+
+其中：
+
+- 个股名称而不是代码时，Agent 会先调用 `search_stock` 确认证券身份，再生成报告。
+- “今日热点”报告复用产品首页和市场地图的市场快照；首页只展示最重要的 3 条市场动态。
+- “每日板块精选”会使用 `daily_sector_picks` 视角，同时保留市场概览与市场地图数据。
+- 条件选股返回的是符合条件的研究候选池，而非推荐名单；需要配置 `MX_APIKEY`。
 
 ### 一键容器运行
 
@@ -190,6 +261,7 @@ npm run test:public-hotlists
 npm run test:mx-screener
 npm run test:mcp-skills
 npm run test:open-source-runtime
+npm run test:html-reports
 npm run test:ci
 npm run db:migrate
 ```
